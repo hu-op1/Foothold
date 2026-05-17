@@ -14,3 +14,6 @@ results/
 
 # Test code
 test/
+
+# IDE files
+.claude/

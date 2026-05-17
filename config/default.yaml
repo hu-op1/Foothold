@@ -1,13 +1,13 @@
 # Parameter sweep configuration for LLM operator benchmarks
 # Each list will be combined via Cartesian product.
 
-batch_sizes: [1, 2, 4, 8]
-seq_lens: [256, 512, 1024, 2048]
-hidden_dims: [512, 1024, 2048]
-num_heads: [12, 24, 32]      # head_dim = hidden_dim / num_heads
-vocab_sizes: [32000, 128256]  # for lm_head
+batch_sizes: [1, 8]                  # extremes only; linear in between
+seq_lens: [1, 512, 2048]             # 1=decode, 512=mid, 2048=long
+hidden_dims: [512, 1024, 2048]       # small, mid, large
+num_heads: [8, 32]                   # divisors of all hidden_dims above
+vocab_sizes: [128256]                # LLaMA vocab covers most models
 
 dtype: "float16"
 warmup_iters: 200
-bench_iters: 1000
-max_memory_gb: 6
+bench_iters: 500
+max_memory_gb: 6                     # protects 8GB GPUs

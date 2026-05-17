@@ -3,7 +3,7 @@ from fit.utils import _get, lstsq_fit, lstsq_log_fit
 
 
 def fit_activation(results):
-    """Fit activation / pointwise operators."""
+    """Fit activation / pointwise operators, return {op_name: {a, b, r2}}."""
     print("\n" + "=" * 60)
     print("Activation Operators")
     print("=" * 60)
@@ -14,6 +14,8 @@ def fit_activation(results):
         "residual_add": {"desc": "b * s * h"},
         "causal_mask":  {"desc": "b * n_heads * s^2"},
     }
+
+    params = {}
 
     for op_name, cfg in op_configs.items():
         op_results = [r for r in results if r["op_name"] == op_name]
@@ -39,27 +41,22 @@ def fit_activation(results):
         c1, _, r2_log = lstsq_log_fit(work, time_ms)
 
         total_ms = np.sum(time_ms)
-
-        # Bytes moved (fp16=2 bytes per element)
         if op_name == "swiglu":
-            bytes_moved = 2 * np.sum(3 * work)
             flops = np.sum(5 * work)
         elif op_name == "rope":
-            bytes_moved = 2 * np.sum(2 * work)
             flops = np.sum(5 * work)
         elif op_name == "residual_add":
-            bytes_moved = 2 * np.sum(3 * work)
             flops = np.sum(work)
         elif op_name == "causal_mask":
-            bytes_moved = 2 * np.sum(2 * work)
             flops = np.sum(work)
-
         avg_tflops = (flops / (total_ms / 1000)) / 1e12 if total_ms > 0 else 0
-        bw_gbps = bytes_moved / 1e9 / (total_ms / 1000) if total_ms > 0 else 0
 
         print(f"\n{op_name}")
         print(f"  work = {cfg['desc']}")
         print(f"  time = {a:.3e} * work + {b0:.4f}   R2={r2:.4f}")
         print(f"  power-law exponent: {c1:.3f}   R2_log={r2_log:.4f}")
         print(f"  effective TFLOPS: {avg_tflops:.1f}")
-        print(f"  effective bandwidth: {bw_gbps:.0f} GB/s")
+
+        params[op_name] = {"a": float(a), "b": float(b0), "r2": float(r2), "type": "activation"}
+
+    return params

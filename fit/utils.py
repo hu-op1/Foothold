@@ -1,9 +1,9 @@
+import json
 import numpy as np
 from openpyxl import load_workbook
 
 
 def _get(d, *keys):
-    """Return first non-None value from dict d for given keys."""
     for k in keys:
         v = d.get(k)
         if v is not None:
@@ -12,7 +12,6 @@ def _get(d, *keys):
 
 
 def load_results(path):
-    """Load xlsx results, skip OOM rows, convert time_ms to float."""
     wb = load_workbook(path)
     ws = wb.active
     headers = [c.value for c in ws[1]]
@@ -28,7 +27,6 @@ def load_results(path):
 
 
 def lstsq_fit(x, y):
-    """Linear least squares: y = a * x + b. Returns (a, b, r2)."""
     x, y = np.array(x, dtype=np.float64), np.array(y, dtype=np.float64)
     mask = np.isfinite(x) & np.isfinite(y)
     x, y = x[mask], y[mask]
@@ -47,7 +45,6 @@ def lstsq_fit(x, y):
 
 
 def lstsq_log_fit(x, y):
-    """Log-log fit: y = exp(c0) * x^c1. Returns (c1, exp(c0), r2)."""
     x, y = np.array(x, dtype=np.float64), np.array(y, dtype=np.float64)
     mask = (x > 0) & (y > 0) & np.isfinite(x) & np.isfinite(y)
     x, y = x[mask], y[mask]
@@ -64,3 +61,14 @@ def lstsq_log_fit(x, y):
     ss_tot = float(np.sum((y - np.mean(y)) ** 2))
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
     return c1, np.exp(c0), r2
+
+
+def save_fitted_params(params, path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(params, f, indent=2)
+    print(f"Fitted params saved to: {path}")
+
+
+def load_fitted_params(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
