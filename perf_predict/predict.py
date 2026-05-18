@@ -1,15 +1,9 @@
 """
-Predict model inference throughput from architecture specs + fitted operator params.
-
-Args are input_len (prompt) and output_len (generation):
-  prefill_time  = one forward over input_len tokens
-  decode_time   = output_len * one decode step (1 token + KV cache)
-  total_latency = prefill_time + decode_time
-  throughput    = (input_len + output_len) / total_latency
+Predict model inference throughput from architecture specs + hardware roofline params.
 
 Usage:
     uv run python perf_predict/predict.py --list
-    uv run python perf_predict/predict.py --model "Llama-3.1-8B" --input-len 2048 --output-len 512
+    uv run python perf_predict/predict.py --model "Llama-3.1-8B" --input-len 2048 --output-len 512 --batch 4
     uv run python perf_predict/predict.py --predict-all --input-len 2048 --output-len 512
 """
 
@@ -21,6 +15,7 @@ from pathlib import Path
 HERE = Path(__file__).parent.resolve()
 DEFAULT_PARAMS = HERE / "fitted_params.json"
 DEFAULT_SPECS = HERE / "model_specs.yaml"
+DTYPE_BYTES = 2  # fp16
 
 
 def load_model_specs(path=None):
@@ -29,136 +24,134 @@ def load_model_specs(path=None):
         return yaml.safe_load(f)
 
 
-def load_fitted_params(path=None):
+def load_hw_params(path=None):
     path = path or str(DEFAULT_PARAMS)
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-# ── workloads ───────────────────────────────────────────────────────────
+# ── roofline ────────────────────────────────────────────────────────────
 
-def prefill_workloads(model, b, s):
-    h = model["hidden_dim"]
-    inter = model.get("intermediate_dim", h * 4)
-    nh = model["num_heads"]
-    hd = model["head_dim"]
-    vs = model["vocab_size"]
-    M = b * s
-    return {
-        "q_proj":       M * h * h,
-        "k_proj":       M * h * h,
-        "v_proj":       M * h * h,
-        "o_proj":       M * h * h,
-        "ffn_up":       M * h * inter,
-        "ffn_gate":     M * h * inter,
-        "ffn_down":     M * inter * h,
-        "lm_head":      M * h * vs,
-        "qk_matmul":    b * nh * s * s * hd,
-        "softmax":      b * nh * s * s,
-        "score_v_matmul": b * nh * s * s * hd,
-        "layernorm":    b * s * h,
-        "rmsnorm":      b * s * h,
-        "swiglu":       b * s * inter,
-        "rope":         b * nh * s * hd,
-        "residual_add": b * s * h,
-        "causal_mask":  b * nh * s * s,
-    }
+def roofline_time(flops, bytes_moved, F_peak, B_peak, p):
+    c = flops / F_peak
+    m = bytes_moved / B_peak
+    return (c ** p + m ** p) ** (1 / p)
 
 
-def decode_workloads(model, b, s_kv):
-    h = model["hidden_dim"]
-    inter = model.get("intermediate_dim", h * 4)
-    nh = model["num_heads"]
-    hd = model["head_dim"]
-    vs = model["vocab_size"]
-    M = b * 1
-    return {
-        "q_proj":       M * h * h,
-        "k_proj":       M * h * h,
-        "v_proj":       M * h * h,
-        "o_proj":       M * h * h,
-        "ffn_up":       M * h * inter,
-        "ffn_gate":     M * h * inter,
-        "ffn_down":     M * inter * h,
-        "lm_head":      M * h * vs,
-        "qk_matmul":    b * nh * 1 * s_kv * hd,
-        "softmax":      b * nh * 1 * s_kv,
-        "score_v_matmul": b * nh * 1 * s_kv * hd,
-        "layernorm":    b * 1 * h,
-        "rmsnorm":      b * 1 * h,
-        "swiglu":       b * 1 * inter,
-        "rope":         b * nh * 1 * hd,
-        "residual_add": b * 1 * h,
-    }
+def matmul_time(M, K, N, F, B, p):
+    flops = 2 * M * K * N
+    bytes_moved = (M * K + K * N + M * N) * DTYPE_BYTES
+    return roofline_time(flops, bytes_moved, F, B, p)
 
 
-# ── per-layer op counts ─────────────────────────────────────────────────
-
-BASE_OPS = {
-    "q_proj": 1, "k_proj": 1, "v_proj": 1, "o_proj": 1,
-    "ffn_up": 1, "ffn_gate": 1, "ffn_down": 1,
-    "swiglu": 1, "rope": 1, "residual_add": 2,
+# Bytes-per-element factors for elementwise ops
+ELEM_BYTES = {
+    "residual_add": 3,
+    "swiglu": 3,
+    "rope": 4,
+    "softmax": 6,
+    "layernorm": 5,
+    "rmsnorm": 4,
+    "causal_mask": 3,
 }
 
-ATTN_OPS = {"qk_matmul": 1, "softmax": 1, "score_v_matmul": 1}
+
+def elem_time(op_name, N, B_peak):
+    factor = ELEM_BYTES.get(op_name, 3)
+    return (N * factor * DTYPE_BYTES) / B_peak
 
 
-def _sum_ops(ops, w, fitted):
+# ── layer ops ───────────────────────────────────────────────────────────
+
+def projections(M, h, inter, F, B, p):
+    """Q/K/V/O (4×) + FFN up/gate (2×) + FFN down."""
+    t = 4 * matmul_time(M, h, h, F, B, p)
+    t += 2 * matmul_time(M, h, inter, F, B, p)
+    t += matmul_time(M, inter, h, F, B, p)
+    return t
+
+
+def attention_matmuls(b, nh, s_q, s_kv, hd, F, B, p):
+    """QK^T + score×V matmuls."""
+    t = matmul_time(b * nh * s_q, hd, s_kv, F, B, p)
+    t += matmul_time(b * nh * s_q, s_kv, hd, F, B, p)
+    return t
+
+
+def elementwise_ops(b, s, h, inter, nh, hd, norm_type, B_peak):
+    """All elementwise ops per layer."""
     t = 0.0
-    for op, count in ops.items():
-        work = w.get(op, 0)
-        if op in fitted and work > 0:
-            t += count * (fitted[op]["a"] * work + fitted[op]["b"])
+    N = b * s * h
+    # 2 norm ops (attention + ffn)
+    t += 2 * elem_time(norm_type, N, B_peak)
+    # SwiGLU
+    t += elem_time("swiglu", b * s * inter, B_peak)
+    # RoPE (on Q)
+    t += elem_time("rope", b * nh * s * hd, B_peak)
+    # 2 residual adds
+    t += 2 * elem_time("residual_add", N, B_peak)
     return t
-
-
-def base_layer_time(w, fitted, norm_type):
-    t = _sum_ops(BASE_OPS, w, fitted)
-    if norm_type in fitted and w.get(norm_type, 0) > 0:
-        a, b = fitted[norm_type]["a"], fitted[norm_type]["b"]
-        t += 2 * (a * w[norm_type] + b)
-    return t
-
-
-def attn_layer_time(w, fitted):
-    return _sum_ops(ATTN_OPS, w, fitted)
 
 
 # ── prediction ──────────────────────────────────────────────────────────
 
-def predict(model, batch, input_len, output_len, fitted):
+def predict(model, batch, input_len, output_len, hw_params):
+    F = hw_params["F_peak"]
+    B_peak = hw_params["B_peak"]
+    p = hw_params["p"]
+
     nl = model["num_layers"]
-    na = model.get("attn_layers", nl)  # layers with full attention (default: all)
-    nd = nl - na                        # layers without attention (DeltaNet, etc.)
-    norm = model.get("norm_type", "rmsnorm")
+    na = model.get("attn_layers", nl)
+    nd = nl - na
+
+    h = model["hidden_dim"]
+    inter = model.get("intermediate_dim", h * 4)
+    nh = model["num_heads"]
+    hd = model["head_dim"]
+    vs = model["vocab_size"]
+    norm_type = model.get("norm_type", "rmsnorm")
 
     # ---- prefill ----
-    pw = prefill_workloads(model, batch, input_len)
-    p_base = base_layer_time(pw, fitted, norm)
-    p_attn = attn_layer_time(pw, fitted)
+    M = batch * input_len
+    s = input_len
 
-    p_total = nl * p_base + na * p_attn
+    p_proj = projections(M, h, inter, F, B_peak, p)
+    p_elem = elementwise_ops(batch, s, h, inter, nh, hd, norm_type, B_peak)
 
-    if "causal_mask" in fitted and pw.get("causal_mask", 0) > 0:
-        a, b = fitted["causal_mask"]["a"], fitted["causal_mask"]["b"]
-        p_total += a * pw["causal_mask"] + b
-    if "lm_head" in fitted and pw.get("lm_head", 0) > 0:
-        a, b = fitted["lm_head"]["a"], fitted["lm_head"]["b"]
-        p_total += a * pw["lm_head"] + b
+    # Full attention: matmuls + softmax
+    p_attn_matmul = attention_matmuls(batch, nh, s, s, hd, F, B_peak, p)
+    p_attn_softmax = elem_time("softmax", batch * nh * s * s, B_peak)
 
-    prefill_time_s = p_total / 1000.0
+    p_layer_full = p_proj + p_elem + p_attn_matmul + p_attn_softmax
+    p_layer_delta = p_proj + p_elem
+
+    p_total = na * p_layer_full + nd * p_layer_delta
+
+    # lm_head (once)
+    p_total += matmul_time(M, h, vs, F, B_peak, p)
+    # causal_mask (once, if any full-attn layers)
+    if na > 0:
+        p_total += elem_time("causal_mask", batch * nh * s * s, B_peak)
+
+    prefill_time_s = p_total
 
     # ---- decode (one step) ----
-    dw = decode_workloads(model, batch, input_len)
-    d_base = base_layer_time(dw, fitted, norm)
-    d_attn = attn_layer_time(dw, fitted)
+    M = batch * 1
+    s_kv = input_len
 
-    d_step = nl * d_base + na * d_attn
-    if "lm_head" in fitted and dw.get("lm_head", 0) > 0:
-        a, b = fitted["lm_head"]["a"], fitted["lm_head"]["b"]
-        d_step += a * dw["lm_head"] + b
+    d_proj = projections(M, h, inter, F, B_peak, p)
+    d_elem = elementwise_ops(batch, 1, h, inter, nh, hd, norm_type, B_peak)
 
-    decode_time_s = output_len * d_step / 1000.0
+    d_attn_matmul = attention_matmuls(batch, nh, 1, s_kv, hd, F, B_peak, p)
+    d_attn_softmax = elem_time("softmax", batch * nh * 1 * s_kv, B_peak)
+
+    d_layer_full = d_proj + d_elem + d_attn_matmul + d_attn_softmax
+    d_layer_delta = d_proj + d_elem
+
+    d_step = na * d_layer_full + nd * d_layer_delta
+    d_step += matmul_time(M, h, vs, F, B_peak, p)
+
+    decode_time_s = output_len * d_step
 
     # ---- totals ----
     total_s = prefill_time_s + decode_time_s
@@ -166,12 +159,12 @@ def predict(model, batch, input_len, output_len, fitted):
     overall_tps = total_tokens / total_s if total_s > 0 else float("inf")
 
     return {
-        "prefill_ms":        round(p_total, 2),
-        "decode_step_ms":    round(d_step, 4),
-        "decode_total_ms":   round(output_len * d_step, 2),
-        "total_latency_ms":  round(total_s * 1000, 2),
-        "total_tokens":      total_tokens,
-        "overall_tps":       round(overall_tps, 1),
+        "prefill_ms": round(prefill_time_s * 1000, 2),
+        "decode_step_ms": round(d_step * 1000, 4),
+        "decode_total_ms": round(decode_time_s * 1000, 2),
+        "total_latency_ms": round(total_s * 1000, 2),
+        "total_tokens": total_tokens,
+        "overall_tps": round(overall_tps, 1),
     }
 
 
@@ -179,14 +172,17 @@ def predict(model, batch, input_len, output_len, fitted):
 
 def print_one(model_name, model, r, batch, input_len, output_len):
     h = model["hidden_dim"]
-    inter = model["intermediate_dim"]
+    inter = model.get("intermediate_dim", h * 4)
     nh = model["num_heads"]
     nl = model["num_layers"]
+    na = model.get("attn_layers", nl)
 
     print(f"\n{'=' * 60}")
     print(f"  {model_name}")
     print(f"{'=' * 60}")
     print(f"  hidden_dim={h}, intermediate_dim={inter}, num_heads={nh}, num_layers={nl}")
+    if na < nl:
+        print(f"  attn_layers={na}/{nl}  (DeltaNet: {nl - na} layers)")
     print(f"  batch={batch}, input_len={input_len}, output_len={output_len}")
     print()
     p_tokens = batch * input_len
@@ -203,14 +199,14 @@ def print_one(model_name, model, r, batch, input_len, output_len):
     print()
 
 
-def print_all(models, batch, input_len, output_len, fitted):
+def print_all(models, batch, input_len, output_len, hw_params):
     print(f"\n  batch={batch}, input_len={input_len}, output_len={output_len}")
     print(f"  {'Model':<20} {'Params':>8}  {'Prefill':>10} {'DecStep':>10} {'Total':>10} {'tokens/s':>10}")
     print(f"  {'':20} {'':8}  {'ms':>10} {'ms':>10} {'ms':>10} {'':>10}")
     print(f"  {'-' * 70}")
 
     for m in models:
-        r = predict(m, batch, input_len, output_len, fitted)
+        r = predict(m, batch, input_len, output_len, hw_params)
         pb = m.get("total_params_b", 0) / 1e9
         print(f"  {m['name']:<20} {pb:>7.1f}B  {r['prefill_ms']:>10.1f} {r['decode_step_ms']:>10.4f} "
               f"{r['total_latency_ms']:>10.1f} {r['overall_tps']:>10.1f}")
@@ -233,18 +229,24 @@ def main():
     specs = load_model_specs()
     models = specs.get("models", [])
 
-    params_path = args.params or str(DEFAULT_PARAMS)
-    try:
-        fitted = load_fitted_params(params_path)
-    except FileNotFoundError:
-        print(f"Fitted params not found: {params_path}")
-        print("Run `uv run python -m fit results/<gpu> --save perf_predict/fitted_params.json` first.")
-        return
-
     if args.list:
         print("Available models:")
         for m in models:
-            print(f"  {m['name']:<20}  h={m['hidden_dim']}, nh={m['num_heads']}, nl={m['num_layers']}")
+            na = m.get("attn_layers", m["num_layers"])
+            print(f"  {m['name']:<20}  h={m['hidden_dim']}, nh={m['num_heads']}, "
+                  f"nl={m['num_layers']}, attn_layers={na}")
+        return
+
+    params_path = args.params or str(DEFAULT_PARAMS)
+    try:
+        hw_params = load_hw_params(params_path)
+    except FileNotFoundError:
+        print(f"Fitted params not found: {params_path}")
+        print("Run `uv run python -m fit results/ --save perf_predict/fitted_params.json` first.")
+        return
+
+    if "F_peak" not in hw_params:
+        print(f"Error: fitted params missing 'F_peak'. Expected roofline model params.")
         return
 
     if args.model:
@@ -252,11 +254,11 @@ def main():
         if not model:
             print(f"Model not found: {args.model}")
             return
-        r = predict(model, args.batch, args.input_len, args.output_len, fitted)
+        r = predict(model, args.batch, args.input_len, args.output_len, hw_params)
         print_one(args.model, model, r, args.batch, args.input_len, args.output_len)
 
     elif args.predict_all:
-        print_all(models, args.batch, args.input_len, args.output_len, fitted)
+        print_all(models, args.batch, args.input_len, args.output_len, hw_params)
 
     else:
         parser.print_help()
