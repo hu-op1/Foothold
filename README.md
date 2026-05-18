@@ -1,6 +1,6 @@
 # Foothold
 
-LLM 推理性能工具链：基准测试 → 算子拟合 → 模型吞吐预测。
+LLM 推理性能工具链：硬件标定 → Roofline 建模 → 模型吞吐预测。
 
 ## 环境
 
@@ -14,72 +14,76 @@ uv sync
 ## 整体流程
 
 ```
-config/default.yaml  →  bench/   →  results/<gpu>/*.xlsx     (原始数据)
-                                     ↓
-                                  fit/   →  fitted_params.json  (算子拟合参数)
-                                              ↓
+config/default.yaml  →  bench/   →  results/<gpu>/*.xlsx    (原始数据)
+                                    ↓
+                                 fit/   →  fitted_params.json  (F_peak, B_peak, p)
+                                             ↓
 perf_predict/model_specs.yaml  →  perf_predict/  →  模型吞吐预测 (tokens/s)
 ```
 
-## 1. 基准测试 — `bench/`
+## 1. 硬件标定 — `bench/`
 
 ```bash
 uv run python main.py                          # 默认 config/default.yaml
-uv run python main.py --output results/3090    # 指定输出目录
+uv run python main.py --output results/5060    # 指定输出目录
 ```
 
 ### 配置 — [config/default.yaml](config/default.yaml)
 
 ```yaml
-batch_sizes: [1, 8]
-seq_lens: [1, 512, 2048]         # 1 覆盖 decode，512 中等，2048 长序列
-hidden_dims: [512, 1024, 2048]
-num_heads: [8, 32]
-vocab_sizes: [128256]
+matmul:
+  M: [1, 2, 4, ..., 8192]         # 1=memory-bound, 8192=compute-bound
+  K: [512, 1024, 2048, 4096, 8192]
+  N: [512, 1024, 2048, 4096, 8192]
+elementwise:
+  N: [1024, 4096, ..., 16777216]
+  operators: [residual_add, rmsnorm, softmax]
 dtype: "float16"
 warmup_iters: 200
 bench_iters: 500
-max_memory_gb: 6                  # 保护 8GB 显存
+max_memory_gb: 6
 ```
 
-### 算子覆盖
+### 原理
 
-| 类别 | 算子 | work 公式 |
-|------|------|----------|
-| GEMM | q/k/v/o_proj | M·K·N, M=b·s, K=N=h |
-| GEMM | ffn_up/gate | M·K·N, N=4h |
-| GEMM | ffn_down | M·K·N, K=4h |
-| GEMM | lm_head | M·K·N, N=vocab |
-| Attention | qk_matmul | b·nh·s²·hd |
-| Attention | softmax | b·nh·s² |
-| Attention | score_v_matmul | b·nh·s²·hd |
-| Norm | layernorm / rmsnorm | b·s·h |
-| Activation | swiglu / rope / residual_add / causal_mask | 各不同 |
+不再按 LLM 算子名（q_proj, qk_matmul…）逐个测，而是直接测底层 kernel：
 
-输出格式：`results/<gpu>/*.xlsx`，含 `all_operators.xlsx` 汇总。
+| 类别 | bench 内容 | 用途 |
+|------|-----------|------|
+| matmul | `torch.mm` 的 M×K×N 网格 | 拟合 roofline 参数 |
+| elementwise | residual_add / rmsnorm / softmax | 验证带宽一致性 |
 
-## 2. 算子拟合 — `fit/`
+输出：`results/<gpu>/matmul.xlsx`, `elementwise.xlsx`
 
-从 benchmark 结果拟合每个算子的线性模型 `time = a·work + b`：
+## 2. Roofline 拟合 — `fit/`
+
+从 matmul benchmark 结果拟合平滑 Roofline 模型的三个硬件参数：
+
+```
+time = ( (flops/F_peak)^p + (bytes/B_peak)^p )^(1/p)
+```
 
 ```bash
-uv run python -m fit results/3090                        # 打印拟合结果
-uv run python -m fit results/3090 --save fitted_params.json  # 导出 JSON
+uv run python -m fit results/5060                     # 打印拟合结果
+uv run python -m fit results/5060 --save fitted.json   # 导出 JSON
 ```
 
 输出 `fitted_params.json`：
 
 ```json
 {
-  "q_proj":    {"a": 3.01e-11, "b": 0.038, "r2": 0.997, "type": "gemm"},
-  "qk_matmul": {"a": 6.48e-11, "b": 0.231, "r2": 0.622, "type": "attention"},
-  ...
+  "F_peak": 2.76e13,     // 有效峰值算力 (FLOP/s)
+  "B_peak": 6.18e11,     // 有效显存带宽 (bytes/s)
+  "p": 1.01,             // 计算/访存重叠度
+  "r2": 0.9997
 }
 ```
 
+换 GPU 只需重跑 bench → fit，换模型架构无需改动硬件参数。
+
 ## 3. 吞吐预测 — `perf_predict/`
 
-根据模型架构参数 + 算子拟合结果，预测 prefill 和 decode 的端到端延迟与吞吐：
+根据模型 shape 计算每个算子的 FLOPs 和 Bytes，套用 Roofline 公式得耗时，汇总得到 prefill/decode 端到端吞吐：
 
 ```bash
 uv run python perf_predict/predict.py --list                # 列出已有模型
@@ -91,9 +95,12 @@ uv run python perf_predict/predict.py --predict-all \
 
 ### 预测原理
 
-- **Prefill**: 所有 token 并行处理，attention 为 O(s²)
-- **Decode**: 每次只算 1 个 token + KV cache，GEMM 的 M=1，attention 为 O(s_kv)
-- 支持混合架构（如 Qwen3.5 的 DeltaNet + full attention）
+- 所有 matmul 类算子（投影、QK^T、score×V）走完整 Roofline 模型
+- 所有 elementwise 算子（norm、softmax、swiglu、rope…）按 `bytes / B_peak` 计算
+- **Prefill**: 所有 token 并行，M = b·s
+- **Decode**: 每次 1 token，M = b·1，attention 按 s_kv 计算
+- 兼容混合架构：`attn_layers` 控制 full attention 层数，其余层跳过 O(s²) attention
+- 窗口注意力 / 线性注意力等新架构：只改 FLOPs/Bytes 公式，无需重新 bench
 
 ### 模型参数 — [model_specs.yaml](perf_predict/model_specs.yaml)
 
@@ -106,17 +113,10 @@ uv run python perf_predict/predict.py --predict-all \
   num_layers: 32
   vocab_size: 32000
   norm_type: rmsnorm
-  # attn_layers: 32   # 默认全层 attention；混合架构用此字段
-```
 
-### 实测对比
-
-在 RTX 3090 + Llama-2-7B 上与 vLLM 真实吞吐（100 组不同 batch/input/output 组合）对比：
-
-```
-MAPE:         6.9%
-within 10%:   80/100 (80%)
-within 20%:   96/100 (96%)
+- name: "Qwen3.5-2B"
+  ...
+  attn_layers: 6     # 只有 6/24 层用 full attention，其余 DeltaNet
 ```
 
 ## 目录结构
@@ -124,14 +124,14 @@ within 20%:   96/100 (96%)
 ```
 foothold/
 ├── main.py                     # 入口：benchmark / --fit
-├── config/default.yaml         # benchmark 配置
-├── bench/                      # GPU 算子基准测试
-│   ├── gemm.py, attention.py, norm.py, activation.py
+├── config/default.yaml         # 硬件标定配置
+├── bench/                      # GPU kernel 基准测试
+│   ├── matmul.py, elementwise.py
 │   └── utils.py                # CUDA 计时、保存、内存估算
-├── fit/                        # 算子级线性拟合
+├── fit/                        # Roofline 模型拟合
 │   ├── __main__.py             # uv run python -m fit <dir> --save <out>
-│   ├── gemm.py, attention.py, norm.py, activation.py
-│   └── utils.py                # lstsq_fit, load_results, save/load_fitted_params
+│   ├── matmul.py, elementwise.py
+│   └── utils.py                # roofline_time, roofline_fit, load/save
 ├── perf_predict/               # 模型吞吐预测
 │   ├── model_specs.yaml        # 模型架构参数
 │   └── predict.py              # 预测主程序
