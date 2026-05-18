@@ -1,13 +1,17 @@
-# Parameter sweep configuration for LLM operator benchmarks
-# Each list will be combined via Cartesian product.
+# Hardware characterization benchmark config
+# matmul shape grid spans both memory-bound (small M) and compute-bound (large M) regimes
 
-batch_sizes: [1, 8]                  # extremes only; linear in between
-seq_lens: [1, 512, 2048]             # 1=decode, 512=mid, 2048=long
-hidden_dims: [512, 1024, 2048]       # small, mid, large
-num_heads: [8, 32]                   # divisors of all hidden_dims above
-vocab_sizes: [128256]                # LLaMA vocab covers most models
+matmul:
+  M: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+  K: [512, 1024, 2048, 4096, 8192]
+  N: [512, 1024, 2048, 4096, 8192]
+
+# elementwise ops for bandwidth validation — N spans 1K to 16M elements
+elementwise:
+  N: [1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216]
+  operators: [residual_add, rmsnorm, softmax]
 
 dtype: "float16"
 warmup_iters: 200
 bench_iters: 500
-max_memory_gb: 6                     # protects 8GB GPUs
+max_memory_gb: 6
