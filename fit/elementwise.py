@@ -36,7 +36,7 @@ def fit_elementwise(results):
         ss_tot = float(np.sum((times - np.mean(times)) ** 2))
         r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
 
-        print(f"  {op_name:<16} B_eff = {B_effective / 1e12:.3f} TB/s  R² = {r2:.4f}")
+        print(f"  {op_name:<16} B_eff = {B_effective / 1e12:.3f} TB/s  R2 = {r2:.4f}")
 
         params[op_name] = {
             "B_effective": B_effective,

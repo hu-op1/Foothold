@@ -21,7 +21,7 @@ def fit_matmul(results):
     print(f"  F_peak = {F_peak:.3e} FLOP/s  ({F_peak / 1e12:.1f} TFLOP/s)")
     print(f"  B_peak = {B_peak:.3e} bytes/s ({B_peak / 1e12:.2f} TB/s)")
     print(f"  p      = {p:.3f}")
-    print(f"  R²     = {r2:.4f}")
+    print(f"  R2     = {r2:.4f}")
 
     return {
         "F_peak": float(F_peak),
