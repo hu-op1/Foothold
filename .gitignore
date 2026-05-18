@@ -17,3 +17,6 @@ test/
 
 # IDE files
 .claude/
+
+# Agent files
+docs/superpowers/
