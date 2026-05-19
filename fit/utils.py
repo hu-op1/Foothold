@@ -1,4 +1,5 @@
 import json
+import os
 import numpy as np
 from openpyxl import load_workbook
 
@@ -64,6 +65,9 @@ def lstsq_log_fit(x, y):
 
 
 def save_fitted_params(params, path):
+    if os.path.isdir(path):
+        path = os.path.join(path, "fitted_params.json")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(params, f, indent=2)
     print(f"Fitted params saved to: {path}")

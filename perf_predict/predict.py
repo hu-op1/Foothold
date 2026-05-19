@@ -1,15 +1,10 @@
-"""
-Predict model inference throughput from architecture specs + hardware roofline params.
+"""Predict model inference throughput from architecture specs + hardware roofline params.
 
-Usage:
-    uv run python perf_predict/predict.py --list
-    uv run python perf_predict/predict.py --model "Llama-3.1-8B" --input-len 2048 --output-len 512 --batch 4
-    uv run python perf_predict/predict.py --predict-all --input-len 2048 --output-len 512
+Library module — CLI entry point is main.py.
 """
 
 import yaml
 import json
-import argparse
 from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
@@ -64,7 +59,7 @@ def elem_time(op_name, N, B_peak):
 # ── layer ops ───────────────────────────────────────────────────────────
 
 def projections(M, h, inter, F, B, p):
-    """Q/K/V/O (4×) + FFN up/gate (2×) + FFN down."""
+    """Q/K/V/O (4x) + FFN up/gate (2x) + FFN down."""
     t = 4 * matmul_time(M, h, h, F, B, p)
     t += 2 * matmul_time(M, h, inter, F, B, p)
     t += matmul_time(M, inter, h, F, B, p)
@@ -72,7 +67,7 @@ def projections(M, h, inter, F, B, p):
 
 
 def attention_matmuls(b, nh, s_q, s_kv, hd, F, B, p):
-    """QK^T + score×V matmuls."""
+    """QK^T + score x V matmuls."""
     t = matmul_time(b * nh * s_q, hd, s_kv, F, B, p)
     t += matmul_time(b * nh * s_q, s_kv, hd, F, B, p)
     return t
@@ -82,13 +77,9 @@ def elementwise_ops(b, s, h, inter, nh, hd, norm_type, B_peak):
     """All elementwise ops per layer."""
     t = 0.0
     N = b * s * h
-    # 2 norm ops (attention + ffn)
     t += 2 * elem_time(norm_type, N, B_peak)
-    # SwiGLU
     t += elem_time("swiglu", b * s * inter, B_peak)
-    # RoPE (on Q)
     t += elem_time("rope", b * nh * s * hd, B_peak)
-    # 2 residual adds
     t += 2 * elem_time("residual_add", N, B_peak)
     return t
 
@@ -118,7 +109,6 @@ def predict(model, batch, input_len, output_len, hw_params):
     p_proj = projections(M, h, inter, F, B_peak, p)
     p_elem = elementwise_ops(batch, s, h, inter, nh, hd, norm_type, B_peak)
 
-    # Full attention: matmuls + softmax
     p_attn_matmul = attention_matmuls(batch, nh, s, s, hd, F, B_peak, p)
     p_attn_softmax = elem_time("softmax", batch * nh * s * s, B_peak)
 
@@ -127,9 +117,7 @@ def predict(model, batch, input_len, output_len, hw_params):
 
     p_total = na * p_layer_full + nd * p_layer_delta
 
-    # lm_head (once)
     p_total += matmul_time(M, h, vs, F, B_peak, p)
-    # causal_mask (once, if any full-attn layers)
     if na > 0:
         p_total += elem_time("causal_mask", batch * nh * s * s, B_peak)
 
@@ -155,17 +143,19 @@ def predict(model, batch, input_len, output_len, hw_params):
 
     # ---- totals ----
     total_s = prefill_time_s + decode_time_s
-    total_tokens = batch * (input_len + output_len)
-    overall_tps = total_tokens / total_s if total_s > 0 else float("inf")
-
-    return {
-        "prefill_ms": round(prefill_time_s * 1000, 2),
-        "decode_step_ms": round(d_step * 1000, 4),
-        "decode_total_ms": round(decode_time_s * 1000, 2),
-        "total_latency_ms": round(total_s * 1000, 2),
-        "total_tokens": total_tokens,
-        "overall_tps": round(overall_tps, 1),
+    r = {
+        "prefill_ms": round(prefill_time_s * 1000),
+        "prefill_tps_1x": round(input_len / prefill_time_s) if prefill_time_s > 0 else float("inf"),
+        "prefill_tps_batch": round(batch * input_len / prefill_time_s) if prefill_time_s > 0 else float("inf"),
+        "decode_ms": round(decode_time_s * 1000),
+        "decode_tps_1x": round(output_len / decode_time_s) if decode_time_s > 0 else float("inf"),
+        "decode_tps_batch": round(batch * output_len / decode_time_s) if decode_time_s > 0 else float("inf"),
+        "total_ms": round(total_s * 1000),
+        "total_s": round(total_s, 2),
+        "e2e_tps_1x": round((input_len + output_len) / total_s) if total_s > 0 else float("inf"),
+        "e2e_tps_batch": round(batch * (input_len + output_len) / total_s) if total_s > 0 else float("inf"),
     }
+    return r
 
 
 # ── display ─────────────────────────────────────────────────────────────
@@ -185,84 +175,35 @@ def print_one(model_name, model, r, batch, input_len, output_len):
         print(f"  attn_layers={na}/{nl}  (DeltaNet: {nl - na} layers)")
     print(f"  batch={batch}, input_len={input_len}, output_len={output_len}")
     print()
-    p_tokens = batch * input_len
-    print(f"  prefill ({p_tokens} tokens, b={batch}x{input_len}):")
-    print(f"    time:        {r['prefill_ms']:.2f} ms")
-    print(f"    throughput:  {p_tokens / (r['prefill_ms'] / 1000):.1f} tokens/s")
-    print(f"  decode (b={batch}, {output_len} steps, 1 token/step):")
-    print(f"    time/step:   {r['decode_step_ms']:.4f} ms")
-    print(f"    total:       {r['decode_total_ms']:.2f} ms")
-    print(f"  ----")
-    print(f"  total latency: {r['total_latency_ms']:.2f} ms  ({r['total_latency_ms'] / 1000:.3f} s)")
-    print(f"  total tokens:  {r['total_tokens']}")
-    print(f"  throughput:    {r['overall_tps']:.1f} tokens/s")
+    s_req = f"{input_len}->{output_len}"
+    if batch > 1:
+        print(f"  prefill  {r['prefill_ms']}ms  --  1x {r['prefill_tps_1x']} tok/s,  {batch}x {r['prefill_tps_batch']} tok/s")
+        print(f"  decode   {r['decode_ms']}ms  --  1x {r['decode_tps_1x']} tok/s,   {batch}x {r['decode_tps_batch']} tok/s")
+        print(f"  e2e      {r['total_ms']}ms ({r['total_s']}s)  --  1x {r['e2e_tps_1x']} tok/s,  {batch}x {r['e2e_tps_batch']} tok/s  [{s_req}]")
+    else:
+        print(f"  prefill  {r['prefill_ms']}ms  --  {r['prefill_tps_1x']} tok/s")
+        print(f"  decode   {r['decode_ms']}ms  --  {r['decode_tps_1x']} tok/s")
+        print(f"  e2e      {r['total_ms']}ms ({r['total_s']}s)  --  {r['e2e_tps_1x']} tok/s  [{s_req}]")
     print()
 
 
 def print_all(models, batch, input_len, output_len, hw_params):
-    print(f"\n  batch={batch}, input_len={input_len}, output_len={output_len}")
-    print(f"  {'Model':<20} {'Params':>8}  {'Prefill':>10} {'DecStep':>10} {'Total':>10} {'tokens/s':>10}")
-    print(f"  {'':20} {'':8}  {'ms':>10} {'ms':>10} {'ms':>10} {'':>10}")
-    print(f"  {'-' * 70}")
+    print(f"\n  batch={batch}, input_len={input_len}, output_len={output_len}\n")
 
     for m in models:
         r = predict(m, batch, input_len, output_len, hw_params)
         pb = m.get("total_params_b", 0) / 1e9
-        print(f"  {m['name']:<20} {pb:>7.1f}B  {r['prefill_ms']:>10.1f} {r['decode_step_ms']:>10.4f} "
-              f"{r['total_latency_ms']:>10.1f} {r['overall_tps']:>10.1f}")
-
-
-# ── main ────────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description="Predict model inference throughput")
-    parser.add_argument("--model", type=str, help="Model name")
-    parser.add_argument("--batch", type=int, default=1, help="Batch size")
-    parser.add_argument("--input-len", type=int, default=2048, help="Prompt length (tokens)")
-    parser.add_argument("--output-len", type=int, default=512, help="Generation length (tokens)")
-    parser.add_argument("--params", type=str, help="Path to fitted_params.json")
-    parser.add_argument("--list", action="store_true", help="List available models")
-    parser.add_argument("--predict-all", action="store_true", help="Predict all models")
-
-    args = parser.parse_args()
-
-    specs = load_model_specs()
-    models = specs.get("models", [])
-
-    if args.list:
-        print("Available models:")
-        for m in models:
-            na = m.get("attn_layers", m["num_layers"])
-            print(f"  {m['name']:<20}  h={m['hidden_dim']}, nh={m['num_heads']}, "
-                  f"nl={m['num_layers']}, attn_layers={na}")
-        return
-
-    params_path = args.params or str(DEFAULT_PARAMS)
-    try:
-        hw_params = load_hw_params(params_path)
-    except FileNotFoundError:
-        print(f"Fitted params not found: {params_path}")
-        print("Run `uv run python -m fit results/ --save perf_predict/fitted_params.json` first.")
-        return
-
-    if "F_peak" not in hw_params:
-        print(f"Error: fitted params missing 'F_peak'. Expected roofline model params.")
-        return
-
-    if args.model:
-        model = next((m for m in models if m["name"] == args.model), None)
-        if not model:
-            print(f"Model not found: {args.model}")
-            return
-        r = predict(model, args.batch, args.input_len, args.output_len, hw_params)
-        print_one(args.model, model, r, args.batch, args.input_len, args.output_len)
-
-    elif args.predict_all:
-        print_all(models, args.batch, args.input_len, args.output_len, hw_params)
-
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
+        na = m.get("attn_layers", m["num_layers"])
+        s_req = f"{input_len}->{output_len}"
+        if batch > 1:
+            print(f"  {m['name']:<18} {pb:>4.1f}B"
+                  f"  |  prefill {r['prefill_ms']:>6}ms  1x {r['prefill_tps_1x']:>6}  {batch}x {r['prefill_tps_batch']:>6} t/s"
+                  f"  |  decode {r['decode_ms']:>7}ms  1x {r['decode_tps_1x']:>5}  {batch}x {r['decode_tps_batch']:>5} t/s"
+                  f"  |  e2e {r['total_ms']:>7}ms  1x {r['e2e_tps_1x']:>5}  {batch}x {r['e2e_tps_batch']:>5} t/s"
+                  f"  |  [{s_req}]")
+        else:
+            print(f"  {m['name']:<18} {pb:>4.1f}B"
+                  f"  |  prefill {r['prefill_ms']:>6}ms {r['prefill_tps_1x']:>6} t/s"
+                  f"  |  decode {r['decode_ms']:>7}ms {r['decode_tps_1x']:>5} t/s"
+                  f"  |  e2e {r['total_ms']:>7}ms {r['e2e_tps_1x']:>5} t/s"
+                  f"  |  [{s_req}]")

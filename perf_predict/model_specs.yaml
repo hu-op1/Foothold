@@ -137,3 +137,14 @@ models:
     vocab_size: 248_320
     norm_type: rmsnorm
     attn_layers: 8      # only 8/32 layers use full attention, rest use DeltaNet
+
+  - name: "Qwen3.5-9B"
+    total_params_b: 9_000_000_000
+    hidden_dim: 4096
+    intermediate_dim: 12288
+    num_heads: 16
+    head_dim: 256
+    num_layers: 32
+    vocab_size: 248_320
+    norm_type: rmsnorm
+    attn_layers: 8      # 8/32 full attention, 24/32 DeltaNet

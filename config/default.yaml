@@ -6,7 +6,7 @@ matmul:
   K: [512, 1024, 2048, 4096, 8192]
   N: [512, 1024, 2048, 4096, 8192]
 
-# elementwise ops for bandwidth validation — N spans 1K to 16M elements
+# elementwise ops for bandwidth validation, N spans 1K to 16M elements
 elementwise:
   N: [1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216]
   operators: [residual_add, rmsnorm, softmax]
