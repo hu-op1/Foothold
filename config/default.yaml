@@ -14,4 +14,4 @@ elementwise:
 dtype: "float16"
 warmup_iters: 200
 bench_iters: 2000
-max_memory_gb: 6
+max_memory_gb: 24

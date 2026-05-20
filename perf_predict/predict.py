@@ -51,10 +51,11 @@ ELEM_BYTES = {
 }
 
 
-def elem_time(op_name, N, B_stream, overheads):
+def elem_time(op_name, N, b_effs, overheads):
     factor = ELEM_BYTES.get(op_name, 3)
+    B_eff = b_effs.get(op_name, 1e12)  # fallback: huge B = ~zero time
     overhead = overheads.get(op_name, 0.0)
-    return (N * factor * DTYPE_BYTES) / B_stream + overhead
+    return (N * factor * DTYPE_BYTES) / B_eff + overhead
 
 
 # ── layer ops ───────────────────────────────────────────────────────────
@@ -74,24 +75,27 @@ def attention_matmuls(b, nh, s_q, s_kv, hd, F, B, p):
     return t
 
 
-def elementwise_ops(b, s, h, inter, nh, hd, norm_type, B_stream, overheads):
+def elementwise_ops(b, s, h, inter, nh, hd, norm_type, b_effs, overheads):
     """All elementwise ops per layer."""
     t = 0.0
     N = b * s * h
-    t += 2 * elem_time(norm_type, N, B_stream, overheads)
-    t += elem_time("swiglu", b * s * inter, B_stream, overheads)
-    t += elem_time("rope", b * nh * s * hd, B_stream, overheads)
-    t += 2 * elem_time("residual_add", N, B_stream, overheads)
+    t += 2 * elem_time(norm_type, N, b_effs, overheads)
+    t += elem_time("swiglu", b * s * inter, b_effs, overheads)
+    t += elem_time("rope", b * nh * s * hd, b_effs, overheads)
+    t += 2 * elem_time("residual_add", N, b_effs, overheads)
     return t
 
 
 # ── prediction ──────────────────────────────────────────────────────────
 
 def predict(model, batch, input_len, output_len, hw_params):
-    F = hw_params["F_peak"]
-    B_peak = hw_params["B_peak"]
-    p = hw_params["p"]
-    B_stream = hw_params["B_stream"]
+    F_p = hw_params["F_peak_prefill"]
+    B_p = hw_params["B_peak_prefill"]
+    p_p = hw_params["p_prefill"]
+    F_d = hw_params["F_peak_decode"]
+    B_d = hw_params["B_peak_decode"]
+    p_d = hw_params["p_decode"]
+    b_effs = hw_params["elem_b_effs"]
     overheads = hw_params["elem_overheads"]
 
     nl = model["num_layers"]
@@ -109,20 +113,20 @@ def predict(model, batch, input_len, output_len, hw_params):
     M = batch * input_len
     s = input_len
 
-    p_proj = projections(M, h, inter, F, B_peak, p)
-    p_elem = elementwise_ops(batch, s, h, inter, nh, hd, norm_type, B_stream, overheads)
+    p_proj = projections(M, h, inter, F_p, B_p, p_p)
+    p_elem = elementwise_ops(batch, s, h, inter, nh, hd, norm_type, b_effs, overheads)
 
-    p_attn_matmul = attention_matmuls(batch, nh, s, s, hd, F, B_peak, p)
-    p_attn_softmax = elem_time("softmax", batch * nh * s * s, B_stream, overheads)
+    p_attn_matmul = attention_matmuls(batch, nh, s, s, hd, F_p, B_p, p_p)
+    p_attn_softmax = elem_time("softmax", batch * nh * s * s, b_effs, overheads)
 
     p_layer_full = p_proj + p_elem + p_attn_matmul + p_attn_softmax
     p_layer_delta = p_proj + p_elem
 
     p_total = na * p_layer_full + nd * p_layer_delta
 
-    p_total += matmul_time(M, h, vs, F, B_peak, p)
+    p_total += matmul_time(M, h, vs, F_p, B_p, p_p)
     if na > 0:
-        p_total += elem_time("causal_mask", batch * nh * s * s, B_stream, overheads)
+        p_total += elem_time("causal_mask", batch * nh * s * s, b_effs, overheads)
 
     prefill_time_s = p_total
 
@@ -130,17 +134,17 @@ def predict(model, batch, input_len, output_len, hw_params):
     M = batch * 1
     s_kv = input_len
 
-    d_proj = projections(M, h, inter, F, B_peak, p)
-    d_elem = elementwise_ops(batch, 1, h, inter, nh, hd, norm_type, B_stream, overheads)
+    d_proj = projections(M, h, inter, F_d, B_d, p_d)
+    d_elem = elementwise_ops(batch, 1, h, inter, nh, hd, norm_type, b_effs, overheads)
 
-    d_attn_matmul = attention_matmuls(batch, nh, 1, s_kv, hd, F, B_peak, p)
-    d_attn_softmax = elem_time("softmax", batch * nh * 1 * s_kv, B_stream, overheads)
+    d_attn_matmul = attention_matmuls(batch, nh, 1, s_kv, hd, F_d, B_d, p_d)
+    d_attn_softmax = elem_time("softmax", batch * nh * 1 * s_kv, b_effs, overheads)
 
     d_layer_full = d_proj + d_elem + d_attn_matmul + d_attn_softmax
     d_layer_delta = d_proj + d_elem
 
     d_step = na * d_layer_full + nd * d_layer_delta
-    d_step += matmul_time(M, h, vs, F, B_peak, p)
+    d_step += matmul_time(M, h, vs, F_d, B_d, p_d)
 
     decode_time_s = output_len * d_step
 
