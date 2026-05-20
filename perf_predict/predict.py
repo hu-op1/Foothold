@@ -51,9 +51,10 @@ ELEM_BYTES = {
 }
 
 
-def elem_time(op_name, N, B_peak):
+def elem_time(op_name, N, B_stream, overheads):
     factor = ELEM_BYTES.get(op_name, 3)
-    return (N * factor * DTYPE_BYTES) / B_peak
+    overhead = overheads.get(op_name, 0.0)
+    return (N * factor * DTYPE_BYTES) / B_stream + overhead
 
 
 # ── layer ops ───────────────────────────────────────────────────────────
@@ -73,14 +74,14 @@ def attention_matmuls(b, nh, s_q, s_kv, hd, F, B, p):
     return t
 
 
-def elementwise_ops(b, s, h, inter, nh, hd, norm_type, B_peak):
+def elementwise_ops(b, s, h, inter, nh, hd, norm_type, B_stream, overheads):
     """All elementwise ops per layer."""
     t = 0.0
     N = b * s * h
-    t += 2 * elem_time(norm_type, N, B_peak)
-    t += elem_time("swiglu", b * s * inter, B_peak)
-    t += elem_time("rope", b * nh * s * hd, B_peak)
-    t += 2 * elem_time("residual_add", N, B_peak)
+    t += 2 * elem_time(norm_type, N, B_stream, overheads)
+    t += elem_time("swiglu", b * s * inter, B_stream, overheads)
+    t += elem_time("rope", b * nh * s * hd, B_stream, overheads)
+    t += 2 * elem_time("residual_add", N, B_stream, overheads)
     return t
 
 
@@ -90,6 +91,8 @@ def predict(model, batch, input_len, output_len, hw_params):
     F = hw_params["F_peak"]
     B_peak = hw_params["B_peak"]
     p = hw_params["p"]
+    B_stream = hw_params["B_stream"]
+    overheads = hw_params["elem_overheads"]
 
     nl = model["num_layers"]
     na = model.get("attn_layers", nl)
@@ -107,10 +110,10 @@ def predict(model, batch, input_len, output_len, hw_params):
     s = input_len
 
     p_proj = projections(M, h, inter, F, B_peak, p)
-    p_elem = elementwise_ops(batch, s, h, inter, nh, hd, norm_type, B_peak)
+    p_elem = elementwise_ops(batch, s, h, inter, nh, hd, norm_type, B_stream, overheads)
 
     p_attn_matmul = attention_matmuls(batch, nh, s, s, hd, F, B_peak, p)
-    p_attn_softmax = elem_time("softmax", batch * nh * s * s, B_peak)
+    p_attn_softmax = elem_time("softmax", batch * nh * s * s, B_stream, overheads)
 
     p_layer_full = p_proj + p_elem + p_attn_matmul + p_attn_softmax
     p_layer_delta = p_proj + p_elem
@@ -119,7 +122,7 @@ def predict(model, batch, input_len, output_len, hw_params):
 
     p_total += matmul_time(M, h, vs, F, B_peak, p)
     if na > 0:
-        p_total += elem_time("causal_mask", batch * nh * s * s, B_peak)
+        p_total += elem_time("causal_mask", batch * nh * s * s, B_stream, overheads)
 
     prefill_time_s = p_total
 
@@ -128,10 +131,10 @@ def predict(model, batch, input_len, output_len, hw_params):
     s_kv = input_len
 
     d_proj = projections(M, h, inter, F, B_peak, p)
-    d_elem = elementwise_ops(batch, 1, h, inter, nh, hd, norm_type, B_peak)
+    d_elem = elementwise_ops(batch, 1, h, inter, nh, hd, norm_type, B_stream, overheads)
 
     d_attn_matmul = attention_matmuls(batch, nh, 1, s_kv, hd, F, B_peak, p)
-    d_attn_softmax = elem_time("softmax", batch * nh * 1 * s_kv, B_peak)
+    d_attn_softmax = elem_time("softmax", batch * nh * 1 * s_kv, B_stream, overheads)
 
     d_layer_full = d_proj + d_elem + d_attn_matmul + d_attn_softmax
     d_layer_delta = d_proj + d_elem
