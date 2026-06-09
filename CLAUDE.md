@@ -2,6 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Overview
+
+LLM inference performance toolchain: **GPU characterization → Roofline fitting → Throughput prediction**.
+
+```
+config/default.yaml  →  bench/   →  results/<gpu>/*.xlsx    (raw data)
+                                    ↓
+                                 fit/   →  fitted_params.json  (F_peak, B_peak, p, B_eff)
+                                             ↓
+perf_predict/model_specs.yaml  →  perf_predict/  →  throughput prediction (tokens/s)
+```
+
 ## Commands
 
 ```bash
@@ -9,86 +21,82 @@ uv sync                                              # Install deps (PyTorch CUD
 
 # Benchmarking (stage 1)
 uv run python main.py                                # Run all benchmarks with config/default.yaml
-uv run python main.py --config config/custom.yaml    # Run with custom config
-uv run python main.py --output results/3090          # Specify output directory
+uv run python main.py --output results/5060          # Specify output directory
 
-# Operator fitting (stage 2)
-uv run python -m fit results/                        # Fit from results/xlsx, print summary
-uv run python -m fit results/ --save fitted.json     # Fit and export JSON
+# Roofline fitting (stage 2)
+uv run python main.py --fit results/                 # Fit from results/xlsx, print summary
+uv run python main.py --fit results/ --save fitted.json  # Fit and export JSON
 
 # Throughput prediction (stage 3)
-uv run python perf_predict/predict.py --list         # List available model specs
-uv run python perf_predict/predict.py --model "Llama-2-7B" --input-len 2048 --output-len 512 --batch 4
-uv run python perf_predict/predict.py --predict-all --input-len 2048 --output-len 512
+uv run python main.py --predict --list               # List available model specs
+uv run python main.py --predict --model "Llama-2-7B" --input-len 2048 --output-len 512 --batch 4
+uv run python main.py --predict --all                # Predict all models
 ```
 
 ## Architecture
 
-Three-stage pipeline: **bench → fit → predict**.
+### Stage 1: `bench/` — GPU kernel microbenchmarks
 
-### Stage 1: `bench/` — GPU operator microbenchmarks
+Two benchmark categories, not per-operator. Every shape iterates the Cartesian product from config, guards against OOM via `check_memory()`, warms up, then measures with `CudaTimer`.
 
-`main.py` drives four benchmark modules sequentially, each writing its own Excel file plus an `all_operators.xlsx` aggregate. Each module iterates the Cartesian product of `batch_sizes × seq_lens × hidden_dims × num_heads`, guards against OOM via `check_memory()`, warms up, then measures with `CudaTimer`.
+- `bench/utils.py` — `CudaTimer` (CUDA event-based timing), `warmup()`, `benchmark()`, `save_xlsx()`, `check_memory()`
+- `bench/matmul.py` — `torch.mm` over M×K×N grid. Covers memory-bound (small M) and compute-bound (large M) regimes. Records flops + bytes per run.
+- `bench/elementwise.py` — residual_add, rmsnorm, softmax over element count N. Validates bandwidth consistency across ops with different arithmetic complexity.
 
-- `bench/utils.py` — `CudaTimer` (CUDA event-based GPU timing context manager), `warmup()`, `benchmark()`, `save_xlsx()`, `estimate_memory_gb()`, `check_memory()`. Every benchmark module imports from here.
-- `bench/gemm.py` — Q/K/V/O projection and FFN up/gate/down as `torch.mm`. Shape functions map `(M, h) → (M, K, N)`. Also includes lm_head (M×h × h×vocab).
-- `bench/attention.py` — QK^T matmul (`torch.bmm`), softmax (`F.softmax`), score×V matmul. Multi-head layout `[b, n_heads, s, head_dim]` where `head_dim = h // num_heads`.
-- `bench/norm.py` — `F.layer_norm` and `F.rms_norm` over the last dimension `[h]`.
-- `bench/activation.py` — SwiGLU (`F.silu` × up), RoPE rotary embedding, residual add, causal mask.
+Output: `results/<gpu>/matmul.xlsx`, `elementwise.xlsx`
 
-### Stage 2: `fit/` — Linear model fitting
+### Stage 2: `fit/` — Smooth roofline model fitting
 
-Fits `time = a·work + b` for each operator using least squares. Exports to `fitted_params.json` (used by stage 3).
+Fits a smooth roofline model to benchmark data:
 
-- `fit/__main__.py` — CLI: `python -m fit <results_dir> --save <out.json>`
-- `fit/utils.py` — `load_results()` from xlsx, `save_fitted_params()`, `lstsq_fit()`.
-- `fit/gemm.py`, `fit/attention.py`, `fit/norm.py`, `fit/activation.py` — per-category fit functions.
+```
+time = ( (flops/F_peak)^p + (bytes/B_peak)^p )^(1/p)
+```
+
+- `fit/__init__.py` — exports `load_results`, `save_fitted_params`, `roofline_time`, plus `fit_all()` orchestrator
+- `fit/utils.py` — `roofline_fit()` via scipy curve_fit, `lstsq_fit()`, `lstsq_log_fit()`, xlsx loader/saver
+- `fit/matmul.py` — Splits matmul results at M=256 into **prefill** (large M) and **decode** (small M) regimes. Fits F_peak on prefill first, then fixes F_peak and fits B_peak + p for decode. Produces `{F_peak, B_peak, p}_{prefill,decode}`.
+- `fit/elementwise.py` — Per-op effective bandwidth model: `time = bytes / B_eff + overhead`. Fits B_eff from large-N points (overhead negligible), overhead from small-N points. Unmeasured ops inherit via proxy map. Produces `{elem_b_effs, elem_overheads}`.
 
 ### Stage 3: `perf_predict/` — End-to-end throughput prediction
 
-Given fitted operator params + model architecture specs, predicts prefill/decode latency and tokens/s.
+Given fitted roofline params + model architecture specs, predicts prefill/decode latency and tokens/s.
 
-- `perf_predict/predict.py` — Main predictor. Computes per-layer time as sum of operator times, multiplies by num_layers. Prefill: all tokens parallel, O(s²) attention. Decode: 1 token at a time + KV cache, O(s_kv) attention.
-- `perf_predict/model_specs.yaml` — Model definitions (hidden_dim, num_heads, num_layers, vocab_size, etc). Supports hybrid architectures via optional `attn_layers` field (e.g., Qwen3.5 with DeltaNet + full attention).
+- `perf_predict/predict.py` — Computes per-layer time as sum of projections (roofline), attention (FlashAttention-fused roofline), elementwise ops (B_eff model). Multiplies by num_layers. Prefill: all tokens parallel, O(s²) attention. Decode: 1 token at a time + KV cache, O(s_kv) attention.
+- `perf_predict/model_specs.yaml` — Model definitions. Key fields: `hidden_dim`, `intermediate_dim`, `num_heads`, `head_dim`, `num_layers`, `vocab_size`, `norm_type`. Optional: `num_kv_heads` (GQA), `attn_layers` (hybrid architectures like Qwen3.5 with DeltaNet + full attention).
+- `perf_predict/fitted_params.json` — Default fitted hardware params for quick testing.
 
 ### Entry point: `main.py`
 
-Supports two modes:
-- **Benchmark** (default): loads YAML config, runs all four bench modules, saves xlsx files.
-- **Fit** (`--fit DIR`): loads existing xlsx results and runs the fit pipeline.
+Single CLI with three modes controlled by flags:
+- **Benchmark** (default): runs matmul + elementwise benchmarks, saves xlsx files
+- **Fit** (`--fit DIR [--save PATH]`): loads xlsx results, fits roofline model
+- **Predict** (`--predict --model/--all/--list ...`): predicts throughput
 
-## Memory model
+## Key design decisions
 
-`check_memory()` checks both `torch.cuda.mem_get_info()` free memory and the config's `max_memory_gb` cap (default 6 GB, protects 8 GB GPUs). Each benchmark estimates activation footprint with multipliers tuned per operator type:
-
-- GEMM: ~3× (input + weight + output)
-- Attention: ~3× (QKV + score matrix per head)
-- Norm: ~2× (input + weights)
-- Activation: varies (gate/up 3×, RoPE 2×, residual 3×)
-
-## Output format
-
-Results saved as `.xlsx` to the output directory (default `results/`):
-
-| File | Operators |
-|------|-----------|
-| `gemm.xlsx` | q_proj, k_proj, v_proj, o_proj, ffn_up, ffn_gate, ffn_down, lm_head |
-| `attention.xlsx` | qk_matmul, softmax, score_v_matmul |
-| `norm.xlsx` | layernorm, rmsnorm |
-| `activation.xlsx` | swiglu, rope, residual_add, causal_mask |
-| `all_operators.xlsx` | All of the above (aggregate, used by fit stage) |
+- **Roofline over linear**: smooth roofline captures both compute-bound and memory-bound behavior with 3 params (F_peak, B_peak, p) instead of per-operator coefficients.
+- **Prefill/decode split**: M<256 vs M>=256 gives separate roofline params since GPUs behave differently at small vs large batch dimensions.
+- **FlashAttention model**: `attention_fused()` skips HBM round-trip for S×S score matrix — only reads Q,K,V and writes O.
+- **GQA support**: when `num_kv_heads < num_heads`, projections use different output dims for K/V vs Q/O.
+- **Hybrid architectures**: `attn_layers` field lets models like Qwen3.5 mix full attention layers with DeltaNet (no O(s²) attention).
 
 ## Configuration
 
-Edit `config/default.yaml` to modify parameter sweep ranges. All lists are combined via Cartesian product. `head_dim = hidden_dim / num_heads` must be an integer.
+Edit `config/default.yaml` to modify parameter sweep ranges. All lists are combined via Cartesian product. `max_memory_gb` caps working memory to protect the GPU.
 
 ## Dependencies
 
 - Python ≥ 3.14
 - PyTorch ≥ 2.11.0 with CUDA 12.8 (installed via `https://download.pytorch.org/whl/cu128`)
-- numpy, pyyaml, openpyxl, tqdm
+- numpy, scipy, pyyaml, openpyxl, tqdm
 - Package index: tsinghua mirror (`https://pypi.tuna.tsinghua.edu.cn/simple`)
 
-```bash
-uv sync
-```
+## External repos (git submodules / cloned)
+
+- `InferSim/` — Independent inference simulator with kernel benchmark/simulation layers
+- `LLMServingSim/` — LLM serving simulation framework (Astra-Sim based)
+- `SimAI/` — Alibaba AI infrastructure simulator (ns-3, Vidur, Astra-Sim forks)
+- `apex_plus/` — GPU profiling and trace analysis tool
+
+These are standalone projects kept alongside for reference/comparison. They have their own dependencies and build systems. Not part of the main `uv sync` pipeline.

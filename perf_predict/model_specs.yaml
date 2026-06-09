@@ -148,3 +148,28 @@ models:
     vocab_size: 248_320
     norm_type: rmsnorm
     attn_layers: 8      # 8/32 full attention, 24/32 DeltaNet
+
+  # Qwen3 series (dense, no DeltaNet)
+  # Qwen3: hidden_dim != nh*hd (Q/K proj up-project then O proj maps back).
+  # handled by num_kv_heads + projections() branch in predict.py.
+  - name: "Qwen3-4B"
+    total_params_b: 4_000_000_000
+    hidden_dim: 2560
+    intermediate_dim: 9728
+    num_heads: 32
+    num_kv_heads: 8
+    head_dim: 128
+    num_layers: 36
+    vocab_size: 151_936
+    norm_type: rmsnorm
+
+  - name: "Qwen3-8B"
+    total_params_b: 8_000_000_000
+    hidden_dim: 4096
+    intermediate_dim: 12288
+    num_heads: 32
+    num_kv_heads: 8
+    head_dim: 128
+    num_layers: 36
+    vocab_size: 151_936
+    norm_type: rmsnorm

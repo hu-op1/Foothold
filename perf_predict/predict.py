@@ -60,19 +60,37 @@ def elem_time(op_name, N, b_effs, overheads):
 
 # ── layer ops ───────────────────────────────────────────────────────────
 
-def projections(M, h, inter, F, B, p):
-    """Q/K/V/O (4x) + FFN up/gate (2x) + FFN down."""
-    t = 4 * matmul_time(M, h, h, F, B, p)
+def projections(M, h, inter, F, B, p, nh=None, nh_kv=None, hd=None):
+    """Q/K/V/O (4x) + FFN up/gate (2x) + FFN down.
+
+    nh, hd: if nh*hd != h, Q proj outputs nh*hd, K/V output nh_kv*hd, O inputs nh*hd.
+    nh_kv defaults to nh (MHA), set for GQA.
+    """
+    if nh is None or nh * hd == h:
+        t = 4 * matmul_time(M, h, h, F, B, p)
+    else:
+        dim_q = nh * hd
+        dim_kv = (nh_kv or nh) * hd
+        t = matmul_time(M, h, dim_q, F, B, p)       # Q proj
+        t += matmul_time(M, h, dim_kv, F, B, p)      # K proj
+        t += matmul_time(M, h, dim_kv, F, B, p)      # V proj
+        t += matmul_time(M, dim_q, h, F, B, p)       # O proj
     t += 2 * matmul_time(M, h, inter, F, B, p)
     t += matmul_time(M, inter, h, F, B, p)
     return t
 
 
-def attention_matmuls(b, nh, s_q, s_kv, hd, F, B, p):
-    """QK^T + score x V matmuls."""
-    t = matmul_time(b * nh * s_q, hd, s_kv, F, B, p)
-    t += matmul_time(b * nh * s_q, s_kv, hd, F, B, p)
-    return t
+def attention_fused(b, nh, s_q, s_kv, hd, F, B, p):
+    """FlashAttention: QK^T + softmax + score x V fused in SRAM.
+
+    FLOPs unchanged, but intermediate SxS matrix never touches HBM.
+    Bytes = Q,K,V reads + O write (no SxS round-trip).
+    """
+    M_q = b * nh * s_q
+    M_kv = b * nh * s_kv
+    flops = 4 * M_q * s_kv * hd
+    bytes_moved = 4 * b * nh * max(s_q, s_kv) * hd * DTYPE_BYTES
+    return roofline_time(flops, bytes_moved, F, B, p)
 
 
 def elementwise_ops(b, s, h, inter, nh, hd, norm_type, b_effs, overheads):
@@ -105,6 +123,7 @@ def predict(model, batch, input_len, output_len, hw_params):
     h = model["hidden_dim"]
     inter = model.get("intermediate_dim", h * 4)
     nh = model["num_heads"]
+    nh_kv = model.get("num_kv_heads", nh)
     hd = model["head_dim"]
     vs = model["vocab_size"]
     norm_type = model.get("norm_type", "rmsnorm")
@@ -113,13 +132,12 @@ def predict(model, batch, input_len, output_len, hw_params):
     M = batch * input_len
     s = input_len
 
-    p_proj = projections(M, h, inter, F_p, B_p, p_p)
+    p_proj = projections(M, h, inter, F_p, B_p, p_p, nh, nh_kv, hd)
     p_elem = elementwise_ops(batch, s, h, inter, nh, hd, norm_type, b_effs, overheads)
 
-    p_attn_matmul = attention_matmuls(batch, nh, s, s, hd, F_p, B_p, p_p)
-    p_attn_softmax = elem_time("softmax", batch * nh * s * s, b_effs, overheads)
+    p_attn = attention_fused(batch, nh, s, s, hd, F_p, B_p, p_p)
 
-    p_layer_full = p_proj + p_elem + p_attn_matmul + p_attn_softmax
+    p_layer_full = p_proj + p_elem + p_attn
     p_layer_delta = p_proj + p_elem
 
     p_total = na * p_layer_full + nd * p_layer_delta
@@ -134,13 +152,12 @@ def predict(model, batch, input_len, output_len, hw_params):
     M = batch * 1
     s_kv = input_len
 
-    d_proj = projections(M, h, inter, F_d, B_d, p_d)
+    d_proj = projections(M, h, inter, F_d, B_d, p_d, nh, nh_kv, hd)
     d_elem = elementwise_ops(batch, 1, h, inter, nh, hd, norm_type, b_effs, overheads)
 
-    d_attn_matmul = attention_matmuls(batch, nh, 1, s_kv, hd, F_d, B_d, p_d)
-    d_attn_softmax = elem_time("softmax", batch * nh * 1 * s_kv, b_effs, overheads)
+    d_attn = attention_fused(batch, nh, 1, s_kv, hd, F_d, B_d, p_d)
 
-    d_layer_full = d_proj + d_elem + d_attn_matmul + d_attn_softmax
+    d_layer_full = d_proj + d_elem + d_attn
     d_layer_delta = d_proj + d_elem
 
     d_step = na * d_layer_full + nd * d_layer_delta
