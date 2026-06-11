@@ -1,0 +1,9 @@
+gpu: "3090"
+
+# model: "all" | "list" | "<model_name>"
+model: "all"
+
+batch: 1
+input_len: 2048
+output_len: 512
+params: ""  # empty = auto-detect from fit/results/<gpu>.json

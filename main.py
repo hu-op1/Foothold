@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """GPU roofline benchmark suite — benchmark, fit, predict.
 
+All paths auto-derived from config's `gpu` field. Override with CLI flags.
+
 Usage:
-    uv run python main.py                                    # run benchmarks
-    uv run python main.py --fit results/ --save fitted.json  # fit + save
-    uv run python main.py --predict --model "Llama-2-7B"     # predict one
-    uv run python main.py --predict --all                    # predict all
+    uv run python main.py --bench                            # run benchmarks → bench/results/<gpu>/
+    uv run python main.py --fit                              # fit and save → fit/results/<gpu>.json
+    uv run python main.py --predict                          # predict from config/predict.yaml
 """
 
 import argparse
@@ -20,10 +21,21 @@ from tqdm import tqdm
 from bench.matmul import bench_matmul
 from bench.elementwise import bench_elementwise
 
+BENCH_RESULTS = os.path.join("bench", "results")
+FIT_RESULTS = os.path.join("fit", "results")
+
 
 def load_config(path):
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def bench_results_dir(cfg):
+    gpu = cfg.get("gpu")
+    if not gpu:
+        sys.exit("Config is missing `gpu` field. Add e.g. `gpu: \"3090\"` to your config.")
+    return os.path.join(BENCH_RESULTS, gpu)
+
 
 
 def run_benchmarks(args):
@@ -44,7 +56,7 @@ def run_benchmarks(args):
     print(f"Matmul combos: {matmul_combos}, Elementwise combos: {elem_combos}")
     print("=" * 70)
 
-    out_dir = args.output
+    out_dir = bench_results_dir(cfg)
     os.makedirs(out_dir, exist_ok=True)
 
     matmul_xlsx = os.path.join(out_dir, "matmul.xlsx")
@@ -68,9 +80,11 @@ def run_benchmarks(args):
 def run_fit(args):
     from fit import load_results, fit_all, save_fitted_params
 
-    results_dir = args.fit
-    matmul_xlsx = os.path.join(results_dir, "matmul.xlsx")
-    elem_xlsx = os.path.join(results_dir, "elementwise.xlsx")
+    cfg = load_config(args.config)
+
+    bench_dir = args.fit or bench_results_dir(cfg)
+    matmul_xlsx = os.path.join(bench_dir, "matmul.xlsx")
+    elem_xlsx = os.path.join(bench_dir, "elementwise.xlsx")
 
     results = []
     for path in [matmul_xlsx, elem_xlsx]:
@@ -83,20 +97,29 @@ def run_fit(args):
         print("No valid results to fit.")
         return
 
-    print(f"Loaded {len(results)} rows from {results_dir}")
+    print(f"Loaded {len(results)} rows from {bench_dir}")
     params = fit_all(results)
 
-    if args.save:
-        save_fitted_params(params, args.save)
+    gpu = cfg.get("gpu", "unknown")
+    os.makedirs(FIT_RESULTS, exist_ok=True)
+    save_path = os.path.join(FIT_RESULTS, f"{gpu}.json")
+    save_fitted_params(params, save_path)
 
 
 def run_predict(args):
     from perf_predict.predict import load_model_specs, load_hw_params, predict, print_one, print_all
 
+    cfg = load_config(args.predict_config)
+    gpu = cfg.get("gpu", "unknown")
+    model_sel = cfg.get("model", "all")
+    batch = cfg.get("batch", 1)
+    input_len = cfg.get("input_len", 2048)
+    output_len = cfg.get("output_len", 512)
+
     specs = load_model_specs()
     models = specs.get("models", [])
 
-    if args.list:
+    if model_sel == "list":
         print("Available models:")
         for m in models:
             na = m.get("attn_layers", m["num_layers"])
@@ -104,52 +127,50 @@ def run_predict(args):
                   f"nl={m['num_layers']}, attn_layers={na}")
         return
 
-    params_path = args.params or "perf_predict/fitted_params.json"
+    params_path = cfg.get("params") or os.path.join(FIT_RESULTS, f"{gpu}.json")
+    if not os.path.exists(params_path):
+        params_path = "perf_predict/fitted_params.json"
+
     try:
         hw_params = load_hw_params(params_path)
     except FileNotFoundError:
         print(f"Fitted params not found: {params_path}")
-        print("Run: uv run python main.py --fit results/ --save <path>")
+        print("Run: uv run python main.py --fit")
         return
 
-    if args.all:
-        print_all(models, args.batch, args.input_len, args.output_len, hw_params)
-    elif args.model:
-        model = next((m for m in models if m["name"] == args.model), None)
-        if not model:
-            print(f"Model not found: {args.model}")
-            return
-        r = predict(model, args.batch, args.input_len, args.output_len, hw_params)
-        print_one(args.model, model, r, args.batch, args.input_len, args.output_len)
+    if model_sel == "all":
+        print_all(models, batch, input_len, output_len, hw_params)
     else:
-        print("Specify --model <name> or --all")
+        model = next((m for m in models if m["name"] == model_sel), None)
+        if not model:
+            print(f"Model not found: {model_sel}")
+            return
+        r = predict(model, batch, input_len, output_len, hw_params)
+        print_one(model_sel, model, r, batch, input_len, output_len)
 
 
 def main():
     parser = argparse.ArgumentParser(description="GPU Roofline Benchmark Suite")
-    # ── bench ──
-    parser.add_argument("--config", default="config/default.yaml", help="[bench] Path to YAML config file")
-    parser.add_argument("--output", default="results", help="[bench] Directory to save output xlsx files")
-    # ── fit ──
-    parser.add_argument("--fit", default=None, metavar="DIR", help="[fit] Fit existing results in DIR")
-    parser.add_argument("--save", default=None, metavar="PATH", help="[fit] Save fitted params JSON")
-    # ── predict ──
-    parser.add_argument("--predict", action="store_true", help="[predict] Predict inference throughput")
-    parser.add_argument("--model", type=str, help="[predict] Model name")
-    parser.add_argument("--all", action="store_true", help="[predict] Predict all models")
-    parser.add_argument("--list", action="store_true", help="[predict] List available models")
-    parser.add_argument("--params", type=str, help="[predict] Path to fitted_params.json")
-    parser.add_argument("--batch", type=int, default=1, help="[predict] Batch size")
-    parser.add_argument("--input-len", type=int, default=2048, help="[predict] Prompt length (tokens)")
-    parser.add_argument("--output-len", type=int, default=512, help="[predict] Generation length (tokens)")
+    parser.add_argument("--config", default="config/default.yaml", help="Path to YAML config file")
+    # ── mode ──
+    parser.add_argument("--bench", action="store_true", help="Run GPU kernel benchmarks → bench/results/<gpu>/")
+    parser.add_argument("--fit", default=None, nargs="?", const="", metavar="DIR", help="Fit roofline model → fit/results/<gpu>.json")
+    parser.add_argument("--predict", action="store_true", help="Predict inference throughput (config/predict.yaml)")
+    parser.add_argument("--predict-config", default="config/predict.yaml", help="Path to predict config")
     args = parser.parse_args()
 
-    if args.fit:
+    fit_mode = args.fit is not None
+    if args.fit == "":
+        args.fit = None
+
+    if fit_mode:
         run_fit(args)
     elif args.predict:
         run_predict(args)
-    else:
+    elif args.bench:
         run_benchmarks(args)
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

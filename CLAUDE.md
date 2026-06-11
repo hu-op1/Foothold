@@ -7,11 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 LLM inference performance toolchain: **GPU characterization → Roofline fitting → Throughput prediction**.
 
 ```
-config/default.yaml  →  bench/   →  results/<gpu>/*.xlsx    (raw data)
+config/default.yaml  →  bench/   →  bench/results/<gpu>/*.xlsx    (raw data)
                                     ↓
-                                 fit/   →  fitted_params.json  (F_peak, B_peak, p, B_eff)
+                                 fit/   →  fit/results/<gpu>.json  (F_peak, B_peak, p, B_eff)
                                              ↓
-perf_predict/model_specs.yaml  →  perf_predict/  →  throughput prediction (tokens/s)
+config/predict.yaml + model_specs.yaml  →  perf_predict/  →  throughput prediction (tokens/s)
 ```
 
 ## Commands
@@ -20,17 +20,13 @@ perf_predict/model_specs.yaml  →  perf_predict/  →  throughput prediction (t
 uv sync                                              # Install deps (PyTorch CUDA 12.8 via tsinghua mirror)
 
 # Benchmarking (stage 1)
-uv run python main.py                                # Run all benchmarks with config/default.yaml
-uv run python main.py --output results/5060          # Specify output directory
+uv run python main.py --bench                        # Run all benchmarks → bench/results/<gpu>/
 
 # Roofline fitting (stage 2)
-uv run python main.py --fit results/                 # Fit from results/xlsx, print summary
-uv run python main.py --fit results/ --save fitted.json  # Fit and export JSON
+uv run python main.py --fit                          # Fit from bench/results/<gpu>/ → fit/results/<gpu>.json
 
 # Throughput prediction (stage 3)
-uv run python main.py --predict --list               # List available model specs
-uv run python main.py --predict --model "Llama-2-7B" --input-len 2048 --output-len 512 --batch 4
-uv run python main.py --predict --all                # Predict all models
+uv run python main.py --predict                      # Predict from config/predict.yaml
 ```
 
 ## Architecture
@@ -43,7 +39,7 @@ Two benchmark categories, not per-operator. Every shape iterates the Cartesian p
 - `bench/matmul.py` — `torch.mm` over M×K×N grid. Covers memory-bound (small M) and compute-bound (large M) regimes. Records flops + bytes per run.
 - `bench/elementwise.py` — residual_add, rmsnorm, softmax over element count N. Validates bandwidth consistency across ops with different arithmetic complexity.
 
-Output: `results/<gpu>/matmul.xlsx`, `elementwise.xlsx`
+Output: `bench/results/<gpu>/matmul.xlsx`, `elementwise.xlsx`
 
 ### Stage 2: `fit/` — Smooth roofline model fitting
 
@@ -68,10 +64,12 @@ Given fitted roofline params + model architecture specs, predicts prefill/decode
 
 ### Entry point: `main.py`
 
-Single CLI with three modes controlled by flags:
-- **Benchmark** (default): runs matmul + elementwise benchmarks, saves xlsx files
-- **Fit** (`--fit DIR [--save PATH]`): loads xlsx results, fits roofline model
-- **Predict** (`--predict --model/--all/--list ...`): predicts throughput
+Single CLI, all paths auto-derived from config's `gpu` field. Three modes:
+- **Benchmark** (`--bench`): runs matmul + elementwise benchmarks → `bench/results/<gpu>/`
+- **Fit** (`--fit`): loads xlsx from `bench/results/<gpu>/`, fits roofline model → `fit/results/<gpu>.json`
+- **Predict** (`--predict`): reads settings from `config/predict.yaml`, auto-loads fitted params from `fit/results/<gpu>.json`
+
+Override auto-paths with `--fit DIR`, `--predict-config PATH`.
 
 ## Key design decisions
 
@@ -83,7 +81,10 @@ Single CLI with three modes controlled by flags:
 
 ## Configuration
 
-Edit `config/default.yaml` to modify parameter sweep ranges. All lists are combined via Cartesian product. `max_memory_gb` caps working memory to protect the GPU.
+## Configuration
+
+- `config/default.yaml` — Hardware benchmark config (`gpu`, matmul/elementwise grid, dtype, `max_memory_gb`). Used by `--bench` and `--fit`.
+- `config/predict.yaml` — Predict config (`gpu`, `model`, `batch`, `input_len`, `output_len`, `params`). Used by `--predict`.
 
 ## Dependencies
 
