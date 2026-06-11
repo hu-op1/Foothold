@@ -69,8 +69,19 @@ class SimulationEngine:
         Returns:
             metrics_collector with recorded per-request metrics.
         """
+        # Reset request state for fresh simulation run
         for r in requests:
+            r.num_computed_tokens = 0
+            r.num_output_tokens = 0
+            r.status = RequestStatus.WAITING
+            r.finish_reason = None
+            r.finish_time = None
+            r.ttft = None
+            r.is_prefill_chunk = True
             r.block_hashes = compute_block_hashes(r.prompt_token_ids, self.block_size)
+            r.block_table.clear()
+            r.kv_transfer_start = None
+            r.kv_transfer_end = None
 
         if mode == "colocated":
             return self._run_colocated(requests)
@@ -155,8 +166,9 @@ class SimulationEngine:
             heapq.heappush(event_queue, SimulationEvent(r.arrival_time, EventType.ARRIVAL, r))
 
         while event_queue or pending_xfers or p_sched.has_requests() or d_sched.has_requests():
-            # If waiting for events and nothing to process, jump clock
-            if event_queue and not p_sched.has_requests() and not d_sched.has_requests() and not pending_xfers:
+            # If waiting for events and nothing to process, jump clock to next arrival
+            if (not p_sched.has_requests() and not d_sched.has_requests()
+                    and not pending_xfers and event_queue):
                 self.clock = max(self.clock, event_queue[0].time)
 
             # Pop arrival events at current clock
@@ -180,13 +192,15 @@ class SimulationEngine:
 
             if p_total == 0 and d_total == 0 and not pending_xfers:
                 if not p_sched.has_requests() and not d_sched.has_requests():
-                    break
-                # Jump to next arrival
-                if event_queue:
-                    self.clock = event_queue[0].time
+                    if not event_queue:
+                        break
+                    # Jump to next arrival
+                    self.clock = max(self.clock, event_queue[0].time)
+                    continue
                 else:
+                    # Schedulers have requests but nothing scheduled — idle tick
                     self.clock += 0.001
-                continue
+                    continue
 
             p_sched._update_after_schedule(p_out)
             d_sched._update_after_schedule(d_out)

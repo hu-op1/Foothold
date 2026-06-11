@@ -55,6 +55,9 @@ def predict_step(scheduled_requests, model_spec, hw_params):
     hd = model_spec["head_dim"]
     vs = model_spec["vocab_size"]
     norm_type = model_spec.get("norm_type", "rmsnorm")
+    nl = model_spec["num_layers"]
+    na = model_spec.get("attn_layers", nl)
+    nd = nl - na  # DeltaNet layers (no attention)
 
     b_effs = hw_params["elem_b_effs"]
     overheads = hw_params["elem_overheads"]
@@ -64,22 +67,22 @@ def predict_step(scheduled_requests, model_spec, hw_params):
     params = _select_roofline_params(total_new_tokens, hw_params)
     F, B, p = params["F"], params["B"], params["p"]
 
-    # ── Projections (batched: all new tokens together) ──
-    proj_time = projections(total_new_tokens, h, inter, F, B, p, nh, nh_kv, hd)
+    # ── Projections (per-layer, multiplied by num_layers) ──
+    proj_time = nl * projections(total_new_tokens, h, inter, F, B, p, nh, nh_kv, hd)
 
-    # ── Attention (per-request, because s_q and s_kv differ) ──
+    # ── Attention (per-request, per-attention-layer) ──
     attn_time = 0.0
     for req, num_new in scheduled_requests:
         kv_len_after = req.num_computed_tokens + num_new
         if kv_len_after > 0:
-            attn_time += attention_fused(1, nh, num_new, kv_len_after, hd, F, B, p)
+            attn_time += na * attention_fused(1, nh, num_new, kv_len_after, hd, F, B, p)
 
-    # ── Elementwise (batched: all new tokens together) ──
-    elem_time = elementwise_ops(
+    # ── Elementwise (per-layer, multiplied by num_layers) ──
+    elem_time = nl * elementwise_ops(
         1, total_new_tokens, h, inter, nh, hd, norm_type, b_effs, overheads
     )
 
-    # ── Output projection ──
+    # ── Output projection (single lm_head, not per-layer) ──
     lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p)
 
     return proj_time + attn_time + elem_time + lm_head_time
