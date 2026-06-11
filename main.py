@@ -36,8 +36,6 @@ def bench_results_dir(cfg):
         sys.exit("Config is missing `gpu` field. Add e.g. `gpu: \"3090\"` to your config.")
     return os.path.join(BENCH_RESULTS, gpu)
 
-
-
 def run_benchmarks(args):
     if not torch.cuda.is_available():
         print("CUDA not available. Exiting.")
