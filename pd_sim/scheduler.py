@@ -80,6 +80,7 @@ class ColocatedScheduler:
         self.waiting = RequestQueue()
         self.skipped_waiting = RequestQueue()
         self._finished_requests: list[Request] = []
+        self._prefill_done_requests: list[Request] = []
 
     def has_requests(self) -> bool:
         return bool(self.running) or bool(self.waiting) or bool(self.skipped_waiting)
@@ -205,8 +206,12 @@ class ColocatedScheduler:
     def _update_after_schedule(self, output: SchedulerOutput) -> None:
         """Advance num_computed_tokens after scheduling, before execution."""
         for req, num_new, _ in output.scheduled_requests:
+            was_prefill = req.is_prefill_chunk
             req.num_computed_tokens += num_new
             req.is_prefill_chunk = req.num_computed_tokens < req.num_tokens_with_spec
+            # Detect prefill completion (transition from prefill to decode)
+            if was_prefill and not req.is_prefill_chunk:
+                self._prefill_done_requests.append(req)
 
     def update_from_output(self, output: SchedulerOutput, clock: float) -> None:
         """Simulate token generation after step execution."""
@@ -214,12 +219,12 @@ class ColocatedScheduler:
 
         for req, num_new, _ in output.scheduled_requests:
             if req.has_prompt_remaining():
-                # Still in prefill — no output tokens generated
-                # Check if this was the last prefill chunk
-                if not req.has_prompt_remaining() and req.ttft is None:
-                    req.ttft = clock - req.arrival_time
+                # Still in prefill — no output tokens generated yet
+                pass
             else:
-                # Decode — generate one output token per scheduled decode token
+                # Decode — record TTFT on first decode token
+                if req.num_output_tokens == 0 and req.ttft is None:
+                    req.ttft = clock - req.arrival_time
                 req.num_output_tokens += num_new
 
             # Check stop
@@ -242,3 +247,9 @@ class ColocatedScheduler:
         finished = list(self._finished_requests)
         self._finished_requests.clear()
         return finished
+
+    def drain_prefill_done(self) -> list[Request]:
+        """Return and clear requests that just completed prefill."""
+        done = list(self._prefill_done_requests)
+        self._prefill_done_requests.clear()
+        return done

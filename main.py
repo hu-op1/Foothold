@@ -147,6 +147,55 @@ def run_predict(args):
         print_one(model_sel, model, r, batch, input_len, output_len)
 
 
+def run_pd_sim(args):
+    from pd_sim.config import load_config as load_pd_config
+    from pd_sim.trace import load_trace
+    from pd_sim.engine import SimulationEngine
+    from pd_sim.strategy import search
+    from pd_sim.report import print_comparison_table, export_json
+    from perf_predict.predict import load_model_specs, load_hw_params
+
+    cfg = load_pd_config(args.pd_config)
+    gpu = cfg.get("gpu", "unknown")
+
+    # Load model specs
+    specs = load_model_specs()
+    models = specs.get("models", [])
+    model_sel = cfg.get("model", "all")
+    if model_sel == "all":
+        model = models[0]
+    else:
+        model = next((m for m in models if m["name"] == model_sel), None)
+        if not model:
+            print(f"Model not found: {model_sel}")
+            return
+
+    # Load hardware params
+    hw_path = cfg.get("params") or os.path.join(FIT_RESULTS, f"{gpu}.json")
+    if not os.path.exists(hw_path):
+        hw_path = "perf_predict/fitted_params.json"
+    hw = load_hw_params(hw_path)
+
+    # Load trace
+    trace_path = cfg["trace"]["path"]
+    max_reqs = cfg["trace"].get("max_requests")
+    trace_fmt = cfg["trace"].get("format", "sharegpt")
+    requests = load_trace(trace_path, fmt=trace_fmt, max_requests=max_reqs)
+    print(f"Loaded {len(requests)} requests from {trace_path}")
+
+    # Run strategy search
+    mode = cfg["strategy"]["mode"]
+    print(f"Strategy mode: {mode}")
+    print(f"Model: {model['name']}, GPU: {gpu}")
+
+    engine = SimulationEngine(cfg, model, hw)
+    results = search(engine, requests, cfg)
+
+    # Report
+    print_comparison_table(results, cfg)
+    export_json(results, os.path.join("pd_sim", "output", "results.json"))
+
+
 def main():
     parser = argparse.ArgumentParser(description="GPU Roofline Benchmark Suite")
     parser.add_argument("--config", default="config/default.yaml", help="Path to YAML config file")
@@ -155,6 +204,10 @@ def main():
     parser.add_argument("--fit", default=None, nargs="?", const="", metavar="DIR", help="Fit roofline model → fit/results/<gpu>.json")
     parser.add_argument("--predict", action="store_true", help="Predict inference throughput (config/predict.yaml)")
     parser.add_argument("--predict-config", default="config/predict.yaml", help="Path to predict config")
+    parser.add_argument("--pd-sim", action="store_true",
+                        help="Run PD disaggregation simulation (config/pd_sim.yaml)")
+    parser.add_argument("--pd-config", default="config/pd_sim.yaml",
+                        help="Path to pd_sim config")
     args = parser.parse_args()
 
     fit_mode = args.fit is not None
@@ -167,6 +220,8 @@ def main():
         run_predict(args)
     elif args.bench:
         run_benchmarks(args)
+    elif args.pd_sim:
+        run_pd_sim(args)
     else:
         parser.print_help()
 
