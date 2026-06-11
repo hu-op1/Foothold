@@ -1,0 +1,244 @@
+"""Scheduling logic — based on vllm v1/core/sched/scheduler.py."""
+
+from collections import deque
+
+from pd_sim.request import Request, RequestStatus, FinishReason
+
+
+class SchedulingPolicy:
+    FCFS = "fcfs"
+    PRIORITY = "priority"
+
+
+class RequestQueue:
+    """Simple FIFO request queue."""
+
+    def __init__(self):
+        self._queue: deque[Request] = deque()
+
+    def add(self, request: Request) -> None:
+        self._queue.append(request)
+
+    def prepend(self, request: Request) -> None:
+        self._queue.appendleft(request)
+
+    def peek(self) -> Request | None:
+        return self._queue[0] if self._queue else None
+
+    def pop(self) -> Request | None:
+        return self._queue.popleft() if self._queue else None
+
+    def remove(self, request: Request) -> None:
+        try:
+            self._queue.remove(request)
+        except ValueError:
+            pass
+
+    def __bool__(self) -> bool:
+        return bool(self._queue)
+
+    def __len__(self) -> int:
+        return len(self._queue)
+
+    def __iter__(self):
+        return iter(list(self._queue))
+
+    def pop_all(self) -> list[Request]:
+        items = list(self._queue)
+        self._queue.clear()
+        return items
+
+
+class SchedulerOutput:
+    """Result of one schedule() call."""
+
+    def __init__(self):
+        self.scheduled_new_reqs: list[tuple[Request, int, list[int]]] = []
+        self.scheduled_running_reqs: list[tuple[Request, int, list[int]]] = []
+        self.preempted_reqs: list[Request] = []
+        self.total_num_scheduled_tokens: int = 0
+
+    @property
+    def scheduled_requests(self) -> list[tuple[Request, int, list[int]]]:
+        return self.scheduled_running_reqs + self.scheduled_new_reqs
+
+
+class ColocatedScheduler:
+    """Scheduler for colocated (P+D on same GPU) deployment."""
+
+    def __init__(self, memory_pool, config):
+        self.pool = memory_pool
+        self.max_num_batched_tokens = config["simulation"]["max_num_batched_tokens"]
+        self.max_num_seqs = config["simulation"]["max_num_seqs"]
+        self.block_size = config["simulation"]["block_size"]
+        self.enable_chunked_prefill = config["simulation"]["enable_chunked_prefill"]
+        self.long_prefill_token_threshold = config["simulation"]["long_prefill_token_threshold"]
+        self.policy = config["simulation"].get("scheduling_policy", SchedulingPolicy.FCFS)
+        self.max_model_len = config.get("max_model_len", 131072)
+
+        self.running: list[Request] = []
+        self.waiting = RequestQueue()
+        self.skipped_waiting = RequestQueue()
+        self._finished_requests: list[Request] = []
+
+    def has_requests(self) -> bool:
+        return bool(self.running) or bool(self.waiting) or bool(self.skipped_waiting)
+
+    def add_request(self, request: Request) -> None:
+        self.waiting.add(request)
+
+    def schedule(self) -> SchedulerOutput:
+        """Run one scheduling step. Returns SchedulerOutput."""
+        output = SchedulerOutput()
+        token_budget = self.max_num_batched_tokens
+        preempted = False
+
+        # ── Phase 1: Service RUNNING requests ──
+        req_index = 0
+        while req_index < len(self.running) and token_budget > 0:
+            request = self.running[req_index]
+
+            if request.is_finished():
+                req_index += 1
+                continue
+
+            num_new = request.num_tokens_with_spec - request.num_computed_tokens
+            if num_new <= 0:
+                req_index += 1
+                continue
+
+            if self.long_prefill_token_threshold > 0:
+                num_new = min(num_new, self.long_prefill_token_threshold)
+            num_new = min(num_new, token_budget)
+            num_new = min(num_new, self.max_model_len - 1 - request.num_computed_tokens)
+            if num_new <= 0:
+                req_index += 1
+                continue
+
+            new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
+            if new_blocks is None:
+                # Preempt
+                if self.policy == SchedulingPolicy.PRIORITY:
+                    victim = max(self.running, key=lambda r: (r.priority, r.arrival_time))
+                else:
+                    victim = self.running[-1]
+
+                self._preempt(victim)
+                preempted = True
+                output.preempted_reqs.append(victim)
+                if victim == request:
+                    break
+                # Retry after freeing victim's blocks
+                new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
+                if new_blocks is None:
+                    break
+
+            output.scheduled_running_reqs.append((request, num_new, new_blocks))
+            token_budget -= num_new
+            req_index += 1
+
+        # ── Phase 2: Admit WAITING requests ──
+        if not preempted:
+            for queue in (self.waiting, self.skipped_waiting):
+                while queue and token_budget > 0:
+                    if len(self.running) >= self.max_num_seqs:
+                        break
+
+                    request = queue.peek()
+                    if request is None:
+                        break
+
+                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                        queue.pop()
+                        self.skipped_waiting.add(request)
+                        continue
+
+                    # Prefix cache hit
+                    cached_blocks, num_cached_blocks = self.pool.get_computed_blocks(
+                        request.block_hashes
+                    )
+                    if num_cached_blocks > 0:
+                        num_cached_tokens = num_cached_blocks * self.block_size
+                        request.num_computed_tokens = num_cached_tokens
+                        self.pool.touch(cached_blocks)
+                        for bid in cached_blocks:
+                            if bid not in request.block_table:
+                                request.block_table.append(bid)
+
+                    num_new = request.num_tokens - request.num_computed_tokens
+                    if self.long_prefill_token_threshold > 0:
+                        num_new = min(num_new, self.long_prefill_token_threshold)
+
+                    if not self.enable_chunked_prefill and num_new > token_budget:
+                        break
+
+                    num_new = min(num_new, token_budget)
+                    if num_new <= 0:
+                        queue.pop()
+                        self.skipped_waiting.add(request)
+                        continue
+
+                    new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
+                    if new_blocks is None:
+                        break
+
+                    queue.pop()
+                    output.scheduled_new_reqs.append((request, num_new, new_blocks))
+                    token_budget -= num_new
+                    request.status = RequestStatus.RUNNING
+                    self.running.append(request)
+
+        output.total_num_scheduled_tokens = sum(
+            nt for _, nt, _ in output.scheduled_requests
+        )
+        return output
+
+    def _preempt(self, request: Request) -> None:
+        """Evict request from running, free KV cache, move to waiting."""
+        if request in self.running:
+            self.running.remove(request)
+        self.pool.free_request(request)
+        request.status = RequestStatus.PREEMPTED
+        request.num_computed_tokens = 0  # must recompute
+        self.waiting.prepend(request)
+
+    def _update_after_schedule(self, output: SchedulerOutput) -> None:
+        """Advance num_computed_tokens after scheduling, before execution."""
+        for req, num_new, _ in output.scheduled_requests:
+            req.num_computed_tokens += num_new
+            req.is_prefill_chunk = req.num_computed_tokens < req.num_tokens_with_spec
+
+    def update_from_output(self, output: SchedulerOutput, clock: float) -> None:
+        """Simulate token generation after step execution."""
+        self.pool.clock = clock
+
+        for req, num_new, _ in output.scheduled_requests:
+            if req.has_prompt_remaining():
+                # Still in prefill — no output tokens generated
+                # Check if this was the last prefill chunk
+                if not req.has_prompt_remaining() and req.ttft is None:
+                    req.ttft = clock - req.arrival_time
+            else:
+                # Decode — generate one output token per scheduled decode token
+                req.num_output_tokens += num_new
+
+            # Check stop
+            if req.num_output_tokens >= req.max_output_len:
+                req.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                req.finish_reason = FinishReason.LENGTH
+                req.finish_time = clock
+                self._finish_request(req)
+
+    def _finish_request(self, request: Request) -> None:
+        """Mark request finished and release resources."""
+        request.finish_time = request.finish_time or self.pool.clock
+        self.pool.free_request(request)
+        if request in self.running:
+            self.running.remove(request)
+        self._finished_requests.append(request)
+
+    def drain_finished(self) -> list[Request]:
+        """Return and clear finished requests since last call."""
+        finished = list(self._finished_requests)
+        self._finished_requests.clear()
+        return finished
