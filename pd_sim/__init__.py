@@ -1,0 +1,1 @@
+"""PD disaggregation simulator — event-driven inference performance modeling."""
