@@ -34,6 +34,15 @@ def load_config(path=None, model_spec=None):
     strat = cfg.setdefault("strategy", {})
     strat.setdefault("mode", "auto")
 
+    # Use search list first value as simulation default
+    search = strat.setdefault("search", {})
+    if "max_num_batched_tokens" not in sim:
+        tokens = search.get("max_batched_tokens", [8192])
+        sim["max_num_batched_tokens"] = tokens[0] if tokens else 8192
+    if "long_prefill_token_threshold" not in sim:
+        thrs = search.get("prefill_thresholds", [1024])
+        sim["long_prefill_token_threshold"] = thrs[0] if thrs else 1024
+
     slo = cfg.setdefault("slo", {})
     for k, v in [("ttft_ms", 500), ("tpot_ms", 50), ("p99_latency_ms", 2000)]:
         if slo.get(k) is None:
@@ -114,6 +123,10 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
         kv_budget_per_gpu = vram - weight_per_gpu - activation_gb
         # KV per seq is split across tp GPUs (head parallelism)
         kv_per_seq_per_gpu_gb = (kv_per_tok * max_model_len) / 1e9 / tp
+
+        # Must fit at least 1 request at full context
+        if kv_per_seq_per_gpu_gb > kv_budget_per_gpu:
+            continue
 
         if kv_per_seq_per_gpu_gb * max_num_seqs <= kv_budget_per_gpu:
             valid.append(tp)

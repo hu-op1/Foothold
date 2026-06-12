@@ -7,12 +7,10 @@ communication:
   inter_latency_us: 2
 
 simulation:
-  max_num_batched_tokens: 8192
-  max_num_seqs: null  # null = auto from KV budget
   block_size: 16
-  kv_cache_memory_gb: null
+  max_num_seqs: null  # null = auto from KV budget
+  kv_cache_memory_gb: null  # null = auto from VRAM - model - activation
   enable_chunked_prefill: true
-  long_prefill_token_threshold: 1024
   scheduling_policy: fcfs
 
 strategy:
