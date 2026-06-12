@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pd_sim.request import Request, RequestStatus, FinishReason
 from pd_sim.memory import BlockPool, compute_block_hashes
 from pd_sim.scheduler import ColocatedScheduler
-from pd_sim.executor import predict_step
+from pd_sim.executor import predict_step, predict_step_tp
 from pd_sim.communication import (
     effective_xfer_overhead,
     transfer_blocks,
@@ -57,7 +57,7 @@ class SimulationEngine:
         return max(1, int(kv_mem_gb * 1024**3) // self.bytes_per_block)
 
     def run(self, requests: list[Request], mode="colocated",
-            chunk_size=None, pd_ratio=None):
+            chunk_size=None, pd_ratio=None, tp_size=1):
         """Run simulation over a list of requests.
 
         Args:
@@ -65,10 +65,12 @@ class SimulationEngine:
             mode: "colocated" or "disaggregated"
             chunk_size: for colocated, override chunk size (None = use config)
             pd_ratio: for disaggregated, (num_prefill, num_decode) GPU counts
+            tp_size: tensor parallelism degree (1 = no TP)
 
         Returns:
             metrics_collector with recorded per-request metrics.
         """
+        self.tp_size = tp_size
         # Reset request state for fresh simulation run
         for r in requests:
             r.num_computed_tokens = 0
@@ -122,10 +124,8 @@ class SimulationEngine:
                 continue
 
             sched._update_after_schedule(output)
-            step_time = predict_step(
-                [(r, nt) for r, nt, _ in output.scheduled_requests],
-                self.model, self.hw,
-            )
+            step_time = self._predict_step(
+                [(r, nt) for r, nt, _ in output.scheduled_requests])
             self.clock += step_time
             sched.update_from_output(output, self.clock)
 
@@ -206,15 +206,11 @@ class SimulationEngine:
             d_sched._update_after_schedule(d_out)
 
             # Execute both sides
-            p_time = predict_step(
-                [(r, nt) for r, nt, _ in p_out.scheduled_requests],
-                self.model, self.hw,
-            ) if p_total > 0 else 0.0
+            p_time = self._predict_step(
+                [(r, nt) for r, nt, _ in p_out.scheduled_requests]) if p_total > 0 else 0.0
 
-            d_time = predict_step(
-                [(r, nt) for r, nt, _ in d_out.scheduled_requests],
-                self.model, self.hw,
-            ) if d_total > 0 else 0.0
+            d_time = self._predict_step(
+                [(r, nt) for r, nt, _ in d_out.scheduled_requests]) if d_total > 0 else 0.0
 
             # Process prefill completions and compute KV transfer
             p_sched.update_from_output(p_out, self.clock + p_time)
@@ -257,6 +253,16 @@ class SimulationEngine:
                 metrics.record(r)
 
         return metrics
+
+    def _predict_step(self, scheduled_requests):
+        """Predict step time, using TP if configured."""
+        tp = getattr(self, "tp_size", 1)
+        if tp > 1:
+            intra_bw = {"nvlink": 900, "pcie": 64}.get(
+                self.cfg["communication"]["intra_node"], 900)
+            return predict_step_tp(scheduled_requests, self.model, self.hw,
+                                   tp, intra_bw)
+        return predict_step(scheduled_requests, self.model, self.hw)
 
     def _compute_xfer(self, request: Request, prefill_time: float) -> float:
         """Compute KV transfer time for a completed prefill, accounting for overlap."""

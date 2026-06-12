@@ -5,68 +5,91 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from pd_sim.engine import SimulationEngine
+from pd_sim.config import valid_tp_sizes, total_vram_gb
 
 
 def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     """Run grid search over strategy configurations.
 
-    Returns list of {label, metrics, score} sorted by score descending.
+    Cartesian product: tp_sizes × max_batched_tokens × prefill_thresholds
+                       × (colocated + each P:D ratio)
+
+    Returns list of {label, metrics_raw, score, elapsed, slo_score}
+    sorted by score descending.
     """
     mode = cfg["strategy"]["mode"]
     search_cfg = cfg["strategy"]["search"]
     slo = cfg["slo"]
     workers = cfg["strategy"].get("workers", 1)
+    total_gpus = cfg["strategy"]["total_gpus"]
+    gpu_name = cfg.get("gpu", "3090")
+    kv_cache_gb = cfg["simulation"]["kv_cache_memory_gb"]
 
     max_tokens_list = search_cfg.get("max_batched_tokens", [8192])
     thresholds_list = search_cfg.get("prefill_thresholds", [1024])
     pd_ratios = search_cfg.get("pd_ratios", [[1, 1]])
+    tp_sizes = search_cfg.get("tp_sizes", [1])
 
-    # Cartesian product: max_batched_tokens × prefill_thresholds × (colocated + each pd_ratio)
+    model_spec = engine.model
+    hw_params = engine.hw
+
+    # Pre-compute valid TP sizes for this model+GPU
+    valid_tps = valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, total_gpus)
+    tp_sizes = [t for t in tp_sizes if t in valid_tps]
+    if not tp_sizes:
+        tp_sizes = [1]
+
     tasks: list[dict] = []
 
-    for max_tokens in max_tokens_list:
-        for threshold in thresholds_list:
-            if threshold > max_tokens:
-                continue
+    for tp in tp_sizes:
+        for max_tokens in max_tokens_list:
+            for threshold in thresholds_list:
+                if threshold > max_tokens:
+                    continue
 
-            # Colocated
-            if mode in ("colocated", "auto"):
-                label = f"Colo (batch={max_tokens}, thr={threshold})"
-                local_cfg = _deep_copy_config(cfg)
-                local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
-                local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
-                tasks.append({"label": label, "cfg": local_cfg, "mode": "colocated"})
-
-            # Disaggregated — each P:D ratio crossed with batch/threshold
-            if mode in ("disaggregated", "auto"):
-                for pd_ratio in pd_ratios:
-                    p, d = pd_ratio if isinstance(pd_ratio, (list, tuple)) else (pd_ratio, 1)
-                    label = f"Disagg {p}P:{d}D (batch={max_tokens}, thr={threshold})"
+                # Colocated: TP=tp, DP = total_gpus / tp independent instances
+                if mode in ("colocated", "auto") and total_gpus % tp == 0:
+                    dp = total_gpus // tp
+                    label = f"Colo TP{tp} DP{dp} (batch={max_tokens}, thr={threshold})"
                     local_cfg = _deep_copy_config(cfg)
                     local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
                     local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
                     tasks.append({
-                        "label": label, "cfg": local_cfg,
-                        "mode": "disaggregated", "pd_ratio": (p, d),
+                        "label": label, "cfg": local_cfg, "mode": "colocated",
+                        "tp": tp, "dp": dp,
                     })
 
-    total = len(tasks)
-    print(f"\n  Evaluating {total} strategies (workers={workers})...\n")
+                # Disaggregated: P side TP=tp, D side all independent (TP=1)
+                if mode in ("disaggregated", "auto"):
+                    for pd_ratio in pd_ratios:
+                        p, d = pd_ratio if isinstance(pd_ratio, (list, tuple)) else (pd_ratio, 1)
+                        if p % tp != 0:
+                            continue
+                        dp_p = p // tp
+                        label = f"Disagg {p}P(TP{tp}×{dp_p}):{d}D (batch={max_tokens}, thr={threshold})"
+                        local_cfg = _deep_copy_config(cfg)
+                        local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
+                        local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
+                        tasks.append({
+                            "label": label, "cfg": local_cfg,
+                            "mode": "disaggregated", "pd_ratio": (p, d),
+                            "tp": tp, "dp_p": dp_p,
+                        })
 
-    # Serialize shared data for workers
-    model_spec = engine.model
-    hw_params = engine.hw
+    total = len(tasks)
+    print(f"\n  Model={model_spec['name']} ({model_spec['total_params_b']/1e9:.1f}B params)")
+    print(f"  GPU={gpu_name} x{total_gpus} ({total_vram_gb(gpu_name)}GB each)")
+    print(f"  Valid TP sizes: {tp_sizes}")
+    print(f"  Evaluating {total} strategies (workers={workers})...\n")
 
     results = []
 
     if workers <= 1:
-        # Sequential (original behavior)
         for i, t in enumerate(tasks, 1):
             r = _run_one(t, requests, model_spec, hw_params, slo)
             results.append(r)
             _print_result(i, total, r)
     else:
-        # Parallel
         future_to_idx = {}
         with ProcessPoolExecutor(max_workers=workers) as pool:
             for i, t in enumerate(tasks):
@@ -92,15 +115,19 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
 
     engine = SimulationEngine(task["cfg"], model_spec, hw_params)
     mode = task["mode"]
+    tp = task.get("tp", 1)
 
     if mode == "colocated":
-        metrics = engine.run(list(requests), mode=mode)
+        metrics = engine.run(list(requests), mode=mode, tp_size=tp)
+        dp = task.get("dp", 1)
+        if dp > 1:
+            metrics._scale_throughput(dp)
     else:
-        metrics = engine.run(list(requests), mode=mode, pd_ratio=task.get("pd_ratio"))
+        metrics = engine.run(list(requests), mode=mode,
+                             pd_ratio=task.get("pd_ratio"), tp_size=tp)
 
     elapsed = time.perf_counter() - t0
     score = metrics.score(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
-
     slo_info = metrics.slo_compliance(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
 
     return {
@@ -128,7 +155,7 @@ def _print_result(n, total, entry):
     label = entry["label"]
     score = entry["score"]
     elapsed = entry["elapsed"]
-    print(f"  [{n}/{total}] {label:<32} "
+    print(f"  [{n}/{total}] {label:<55} "
           f"thrpt={m['throughput']:>8.0f} tok/s  "
           f"TTFT={m['mean_ttft_ms']:>7.1f}ms  "
           f"TPOT={m['mean_tpot_ms']:>7.1f}ms  "
@@ -138,5 +165,4 @@ def _print_result(n, total, entry):
 
 
 def _deep_copy_config(cfg: dict) -> dict:
-    """Simple deep copy via JSON round-trip."""
     return json.loads(json.dumps(cfg))

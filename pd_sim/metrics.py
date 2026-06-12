@@ -98,3 +98,13 @@ class MetricsCollector:
         """Combined throughput × SLO compliance score."""
         slo = self.slo_compliance(ttft_ms, tpot_ms, p99_ms)
         return self.throughput() * slo["score"]
+
+    def _scale_throughput(self, factor: int) -> None:
+        """Scale throughput by factor (for DP scaling).
+        Modifies records to reflect multi-instance deployment."""
+        for r in self.records:
+            r["total_latency"] = r["total_latency"] / factor
+            r["tpot"] = r["tpot"] / factor
+            r["completion_time"] = r["arrival_time"] + (
+                r["completion_time"] - r["arrival_time"]
+            ) / factor

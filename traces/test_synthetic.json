@@ -1,1 +1,0 @@
-{"num_requests": 10, "arrival_rate": 2.0, "prompt_len_mean": 512, "prompt_len_std": 100, "output_len_mean": 128, "output_len_std": 50, "shared_prefix_len": 64, "seed": 42}
