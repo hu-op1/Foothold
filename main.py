@@ -176,8 +176,8 @@ def run_pd_sim(args):
         hw_path = "perf_predict/fitted_params.json"
     hw = load_hw_params(hw_path)
 
-    # Load trace
-    trace_path = cfg["trace"]["path"]
+    # Load trace (CLI arg overrides config)
+    trace_path = args.trace or cfg["trace"]["path"]
     max_reqs = cfg["trace"].get("max_requests")
     requests = load_trace(trace_path, max_requests=max_reqs)
     print(f"Loaded {len(requests)} requests from {trace_path}")
@@ -196,30 +196,84 @@ def run_pd_sim(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GPU Roofline Benchmark Suite")
-    parser.add_argument("--config", default="config/default.yaml", help="Path to YAML config file")
-    # ── mode ──
-    parser.add_argument("--bench", action="store_true", help="Run GPU kernel benchmarks → bench/results/<gpu>/")
-    parser.add_argument("--fit", default=None, nargs="?", const="", metavar="DIR", help="Fit roofline model → fit/results/<gpu>.json")
-    parser.add_argument("--predict", action="store_true", help="Predict inference throughput (config/predict.yaml)")
-    parser.add_argument("--predict-config", default="config/predict.yaml", help="Path to predict config")
-    parser.add_argument("--pd-sim", action="store_true",
-                        help="Run PD disaggregation simulation (config/pd_sim.yaml)")
-    parser.add_argument("--pd-config", default="config/pd_sim.yaml",
-                        help="Path to pd_sim config")
+    parser = argparse.ArgumentParser(
+        description="GPU Roofline Benchmark Suite — benchmark, fit, predict, PD sim",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+               "  uv run python main.py --bench\n"
+               "  uv run python main.py --fit\n"
+               "  uv run python main.py --predict\n"
+               "  uv run python main.py --pd-sim --trace traces/myllama-2-7b.jsonl",
+    )
+
+    subs = parser.add_subparsers(dest="mode", title="modes")
+    subs.required = False
+
+    # ── bench ──
+    bench_p = subs.add_parser("bench", help="Run GPU kernel benchmarks")
+    bench_p.add_argument("--config", default="config/default.yaml",
+                         help="Benchmark config (default: config/default.yaml)")
+
+    # ── fit ──
+    fit_p = subs.add_parser("fit", help="Fit roofline model from benchmark data")
+    fit_p.add_argument("--config", default="config/default.yaml",
+                       help="Benchmark config for GPU name (default: config/default.yaml)")
+    fit_p.add_argument("--dir", default=None, metavar="DIR",
+                       help="Override bench results directory")
+
+    # ── predict ──
+    pred_p = subs.add_parser("predict", help="Predict inference throughput")
+    pred_p.add_argument("--config", default="config/predict.yaml",
+                        help="Predict config (default: config/predict.yaml)")
+
+    # ── pd-sim ──
+    pd_p = subs.add_parser("pd-sim", help="Run PD disaggregation simulation")
+    pd_p.add_argument("--config", default="config/pd_sim.yaml",
+                      help="Simulation config (default: config/pd_sim.yaml)")
+    pd_p.add_argument("--trace", default=None,
+                      help="Path to JSONL trace file (overrides config)")
+
+    # Backward-compat: support --bench / --fit / --predict / --pd-sim flags too
+    parser.add_argument("--bench", action="store_true", dest="_flag_bench",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--fit", default=None, nargs="?", const="", metavar="DIR",
+                        dest="_flag_fit", help=argparse.SUPPRESS)
+    parser.add_argument("--predict", action="store_true", dest="_flag_predict",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--pd-sim", action="store_true", dest="_flag_pd_sim",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--config", default="config/default.yaml", dest="_flag_config",
+                        help=argparse.SUPPRESS)
+
     args = parser.parse_args()
 
-    fit_mode = args.fit is not None
-    if args.fit == "":
-        args.fit = None
+    # Route based on subparser mode, fall back to flags for backward compat
+    mode = args.mode
+    if mode is None:
+        # Check backward-compat flags
+        if getattr(args, "_flag_bench", False):
+            mode = "bench"
+        elif getattr(args, "_flag_fit", None) is not None:
+            mode = "fit"
+        elif getattr(args, "_flag_predict", False):
+            mode = "predict"
+        elif getattr(args, "_flag_pd_sim", False):
+            mode = "pd-sim"
 
-    if fit_mode:
-        run_fit(args)
-    elif args.predict:
-        run_predict(args)
-    elif args.bench:
+    if mode == "bench":
+        args.config = getattr(args, "config", "config/default.yaml")
         run_benchmarks(args)
-    elif args.pd_sim:
+    elif mode == "fit":
+        fit_dir = getattr(args, "dir", None)
+        args.fit = fit_dir if fit_dir else getattr(args, "_flag_fit", "")
+        args.config = getattr(args, "config", "config/default.yaml")
+        run_fit(args)
+    elif mode == "predict":
+        args.predict_config = getattr(args, "config", "config/predict.yaml")
+        run_predict(args)
+    elif mode == "pd-sim":
+        args.pd_config = getattr(args, "config", "config/pd_sim.yaml")
+        args.trace = getattr(args, "trace", None)
         run_pd_sim(args)
     else:
         parser.print_help()
