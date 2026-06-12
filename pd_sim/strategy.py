@@ -24,6 +24,8 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     total_gpus = cfg["strategy"]["total_gpus"]
     gpu_name = cfg.get("gpu", "3090")
     kv_cache_gb = cfg["simulation"]["kv_cache_memory_gb"]
+    max_model_len = cfg.get("max_model_len", 8192)
+    max_num_seqs = cfg["simulation"].get("max_num_seqs", 256)
 
     max_tokens_list = search_cfg.get("max_batched_tokens", [8192])
     thresholds_list = search_cfg.get("prefill_thresholds", [1024])
@@ -34,7 +36,8 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     hw_params = engine.hw
 
     # Pre-compute valid TP sizes for this model+GPU
-    valid_tps = valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, total_gpus)
+    valid_tps = valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, total_gpus,
+                               max_model_len, max_num_seqs)
     tp_sizes = [t for t in tp_sizes if t in valid_tps]
     if not tp_sizes:
         tp_sizes = [1]

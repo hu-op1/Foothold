@@ -155,12 +155,13 @@ def run_pd_sim(args):
     from pd_sim.report import print_comparison_table, export_json
     from perf_predict.predict import load_model_specs, load_hw_params
 
+    # Load model specs first (needed for config defaults)
+    specs = load_model_specs()
+    models = specs.get("models", [])
+
     cfg = load_pd_config(args.pd_config)
     gpu = cfg.get("gpu", "unknown")
 
-    # Load model specs
-    specs = load_model_specs()
-    models = specs.get("models", [])
     model_sel = cfg.get("model")
     if not model_sel:
         print("Config is missing `model` field. Available models:")
@@ -171,6 +172,9 @@ def run_pd_sim(args):
     if not model:
         print(f"Model '{model_sel}' not found in model_specs.yaml")
         return
+
+    # Re-load config with model-aware KV cache default
+    cfg = load_pd_config(args.pd_config, model_spec=model)
 
     # Load hardware params
     hw_path = cfg.get("params") or os.path.join(FIT_RESULTS, f"{gpu}.json")

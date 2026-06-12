@@ -7,15 +7,29 @@ HERE = Path(__file__).parent.resolve()
 DEFAULT_CONFIG = HERE.parent / "config" / "pd_sim.yaml"
 
 
-def load_config(path=None):
+def load_config(path=None, model_spec=None):
     path = Path(path) if path else DEFAULT_CONFIG
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     # Defaults for null fields
     sim = cfg.setdefault("simulation", {})
+    if sim.get("max_num_seqs") is None and model_spec:
+        # Auto-cap max_num_seqs based on available KV memory
+        vram = total_vram_gb(cfg.get("gpu", "3090"))
+        weight_gb = model_weight_gb(model_spec)
+        kv_per_tok = kv_cache_per_token_bytes(model_spec)
+        kv_per_seq_gb = (kv_per_tok * cfg.get("max_model_len", 8192)) / 1e9
+        kv_budget = max(1, vram - weight_gb - 2)
+        sim["max_num_seqs"] = max(1, int(kv_budget / kv_per_seq_gb))
+
     if sim.get("kv_cache_memory_gb") is None:
-        sim["kv_cache_memory_gb"] = _default_vram(cfg.get("gpu", "3090"))
+        if model_spec:
+            weight_gb = model_weight_gb(model_spec)
+            sim["kv_cache_memory_gb"] = max(1, int(total_vram_gb(cfg.get("gpu", "3090"))
+                                                    - weight_gb - 2))
+        else:
+            sim["kv_cache_memory_gb"] = _default_vram(cfg.get("gpu", "3090"))
 
     strat = cfg.setdefault("strategy", {})
     strat.setdefault("mode", "auto")
@@ -64,20 +78,24 @@ def kv_cache_per_token_bytes(model_spec):
     return 2 * nl * nh_kv * hd * 2  # 2 (K+V) × layers × heads × dim × 2 bytes
 
 
-def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus):
+def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
+                   max_model_len=8192, max_num_seqs=256):
     """Return list of TP sizes that fit in GPU memory.
 
     Constraints:
     1. num_heads % tp == 0 (attention head divisibility)
-    2. (model_weight/tp + kv_cache/tp + activation_overhead) < VRAM
-    3. tp <= num_gpus
+    2. num_kv_heads % tp == 0 (KV head divisibility for GQA)
+    3. model_weight/tp + activation_overhead < VRAM (weights must fit)
+    4. KV cache at max context must fit in remaining VRAM:
+       kv_per_token × max_model_len × max_num_seqs / tp < VRAM - weight/tp - activation
 
-    For decode-only, TP doesn't help → only TP=1 is useful for D side.
     Returns sorted list of valid TP sizes.
     """
     vram = total_vram_gb(gpu_name)
     weight_gb = model_weight_gb(model_spec)
-    activation_overhead = max(1.0, kv_cache_gb * 0.1)  # ~10% overhead
+    kv_per_tok = kv_cache_per_token_bytes(model_spec)
+    nh_kv = model_spec.get("num_kv_heads", model_spec["num_heads"])
+    activation_gb = 2.0
 
     valid = []
     for tp in [1, 2, 4, 8]:
@@ -85,7 +103,44 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus):
             continue
         if model_spec["num_heads"] % tp != 0:
             continue
-        per_gpu = weight_gb / tp + kv_cache_gb / tp + activation_overhead
-        if per_gpu < vram:
+        if nh_kv % tp != 0:
+            continue
+
+        weight_per_gpu = weight_gb / tp
+        if weight_per_gpu + activation_gb >= vram:
+            continue
+
+        # Per-GPU available for KV
+        kv_budget_per_gpu = vram - weight_per_gpu - activation_gb
+        # KV per seq is split across tp GPUs (head parallelism)
+        kv_per_seq_per_gpu_gb = (kv_per_tok * max_model_len) / 1e9 / tp
+
+        if kv_per_seq_per_gpu_gb * max_num_seqs <= kv_budget_per_gpu:
             valid.append(tp)
+
     return valid if valid else [1]
+
+
+def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256):
+    """Print a memory breakdown for a given config."""
+    vram = total_vram_gb(gpu_name)
+    weight_gb = model_weight_gb(model_spec)
+    kv_per_tok = kv_cache_per_token_bytes(model_spec)
+    activation_gb = 2.0
+
+    w_gpu = weight_gb / tp
+    kv_seq_gb = (kv_per_tok * max_model_len) / 1e9 / tp  # per-GPU for one seq
+    kv_total_gb = kv_seq_gb * max_num_seqs
+    used = w_gpu + kv_total_gb + activation_gb
+    free = vram - used
+
+    return {
+        "vram": vram,
+        "weight_per_gpu": w_gpu,
+        "kv_per_seq": kv_seq_gb,
+        "kv_total": kv_total_gb,
+        "activation": activation_gb,
+        "used": used,
+        "free": free,
+        "fits": used < vram,
+    }
