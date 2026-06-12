@@ -8,8 +8,9 @@ import json
 from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
+ROOT = HERE.parent
 DEFAULT_PARAMS = HERE / "fitted_params.json"
-DEFAULT_SPECS = HERE / "model_specs.yaml"
+DEFAULT_SPECS = ROOT / "config" / "model_specs.yaml"
 DTYPE_BYTES = 2  # fp16
 
 
