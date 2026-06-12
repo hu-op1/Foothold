@@ -17,22 +17,19 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     slo = cfg["slo"]
     workers = cfg["strategy"].get("workers", 1)
 
-    # Build task list
     tasks: list[dict] = []
 
     if mode in ("colocated", "auto"):
-        for chunk_size in search_cfg.get("chunk_sizes", [512]):
-            for max_tokens in search_cfg.get("max_batched_tokens", [8192]):
-                label = f"Colo (chunk={chunk_size}, batch={max_tokens})"
-                local_cfg = _deep_copy_config(cfg)
-                local_cfg["simulation"]["long_prefill_token_threshold"] = chunk_size
-                local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
-                tasks.append({
-                    "label": label,
-                    "cfg": local_cfg,
-                    "mode": "colocated",
-                    "chunk_size": chunk_size,
-                })
+        for max_tokens in search_cfg.get("max_batched_tokens", [8192]):
+            label = f"Colo (batch={max_tokens})"
+            local_cfg = _deep_copy_config(cfg)
+            local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
+            local_cfg["simulation"]["long_prefill_token_threshold"] = max_tokens
+            tasks.append({
+                "label": label,
+                "cfg": local_cfg,
+                "mode": "colocated",
+            })
 
     if mode in ("disaggregated", "auto"):
         for pd_ratio in search_cfg.get("pd_ratios", [[1, 1]]):
@@ -90,7 +87,7 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
     mode = task["mode"]
 
     if mode == "colocated":
-        metrics = engine.run(list(requests), mode=mode, chunk_size=task.get("chunk_size"))
+        metrics = engine.run(list(requests), mode=mode)
     else:
         metrics = engine.run(list(requests), mode=mode, pd_ratio=task.get("pd_ratio"))
 
