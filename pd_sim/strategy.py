@@ -17,34 +17,38 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     slo = cfg["slo"]
     workers = cfg["strategy"].get("workers", 1)
 
+    max_tokens_list = search_cfg.get("max_batched_tokens", [8192])
+    thresholds_list = search_cfg.get("prefill_thresholds", [1024])
+    pd_ratios = search_cfg.get("pd_ratios", [[1, 1]])
+
+    # Cartesian product: max_batched_tokens × prefill_thresholds × (colocated + each pd_ratio)
     tasks: list[dict] = []
 
-    if mode in ("colocated", "auto"):
-        for max_tokens in search_cfg.get("max_batched_tokens", [8192]):
-            for threshold in search_cfg.get("prefill_thresholds", [1024]):
-                if threshold > max_tokens:
-                    continue
-                label = f"Colo (batch={max_tokens}, threshold={threshold})"
+    for max_tokens in max_tokens_list:
+        for threshold in thresholds_list:
+            if threshold > max_tokens:
+                continue
+
+            # Colocated
+            if mode in ("colocated", "auto"):
+                label = f"Colo (batch={max_tokens}, thr={threshold})"
                 local_cfg = _deep_copy_config(cfg)
                 local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
                 local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
-                tasks.append({
-                    "label": label,
-                    "cfg": local_cfg,
-                    "mode": "colocated",
-                })
+                tasks.append({"label": label, "cfg": local_cfg, "mode": "colocated"})
 
-    if mode in ("disaggregated", "auto"):
-        for pd_ratio in search_cfg.get("pd_ratios", [[1, 1]]):
-            p, d = pd_ratio if isinstance(pd_ratio, (list, tuple)) else (pd_ratio, 1)
-            label = f"Disagg ({p}P:{d}D)"
-            local_cfg = _deep_copy_config(cfg)
-            tasks.append({
-                "label": label,
-                "cfg": local_cfg,
-                "mode": "disaggregated",
-                "pd_ratio": (p, d),
-            })
+            # Disaggregated — each P:D ratio crossed with batch/threshold
+            if mode in ("disaggregated", "auto"):
+                for pd_ratio in pd_ratios:
+                    p, d = pd_ratio if isinstance(pd_ratio, (list, tuple)) else (pd_ratio, 1)
+                    label = f"Disagg {p}P:{d}D (batch={max_tokens}, thr={threshold})"
+                    local_cfg = _deep_copy_config(cfg)
+                    local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
+                    local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
+                    tasks.append({
+                        "label": label, "cfg": local_cfg,
+                        "mode": "disaggregated", "pd_ratio": (p, d),
+                    })
 
     total = len(tasks)
     print(f"\n  Evaluating {total} strategies (workers={workers})...\n")
