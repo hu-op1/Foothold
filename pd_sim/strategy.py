@@ -21,15 +21,18 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
 
     if mode in ("colocated", "auto"):
         for max_tokens in search_cfg.get("max_batched_tokens", [8192]):
-            label = f"Colo (batch={max_tokens})"
-            local_cfg = _deep_copy_config(cfg)
-            local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
-            local_cfg["simulation"]["long_prefill_token_threshold"] = max_tokens
-            tasks.append({
-                "label": label,
-                "cfg": local_cfg,
-                "mode": "colocated",
-            })
+            for threshold in search_cfg.get("prefill_thresholds", [1024]):
+                if threshold > max_tokens:
+                    continue
+                label = f"Colo (batch={max_tokens}, threshold={threshold})"
+                local_cfg = _deep_copy_config(cfg)
+                local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
+                local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
+                tasks.append({
+                    "label": label,
+                    "cfg": local_cfg,
+                    "mode": "colocated",
+                })
 
     if mode in ("disaggregated", "auto"):
         for pd_ratio in search_cfg.get("pd_ratios", [[1, 1]]):
