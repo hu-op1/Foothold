@@ -24,7 +24,7 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     total_gpus = cfg["strategy"]["total_gpus"]
     gpu_name = cfg.get("gpu", "3090")
     kv_cache_gb = cfg["simulation"]["kv_cache_memory_gb"]
-    max_model_len = cfg.get("max_model_len", 8192)
+    max_model_len = model_spec.get("max_model_len", 8192)
     max_num_seqs = cfg["simulation"].get("max_num_seqs", 256)
 
     max_tokens_list = search_cfg.get("max_batched_tokens", [8192])

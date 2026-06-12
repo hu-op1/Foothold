@@ -12,6 +12,10 @@ def load_config(path=None, model_spec=None):
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
+    # Derive from model spec
+    if model_spec:
+        cfg.setdefault("max_model_len", model_spec.get("max_model_len", 8192))
+
     # Defaults for null fields
     sim = cfg.setdefault("simulation", {})
     if sim.get("max_num_seqs") is None and model_spec:
@@ -19,7 +23,7 @@ def load_config(path=None, model_spec=None):
         vram = total_vram_gb(cfg.get("gpu", "3090"))
         weight_gb = model_weight_gb(model_spec)
         kv_per_tok = kv_cache_per_token_bytes(model_spec)
-        kv_per_seq_gb = (kv_per_tok * cfg.get("max_model_len", 8192)) / 1e9
+        kv_per_seq_gb = (kv_per_tok * cfg["max_model_len"]) / 1e9
         kv_budget = max(1, vram - weight_gb - 2)
         sim["max_num_seqs"] = max(1, int(kv_budget / kv_per_seq_gb))
 

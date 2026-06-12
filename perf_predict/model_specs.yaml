@@ -5,6 +5,7 @@ models:
   # LLaMA series
   - name: "Llama-3.2-1B"
     total_params_b: 1_100_000_000
+    max_model_len: 131072
     hidden_dim: 2048
     intermediate_dim: 8192
     num_heads: 8
@@ -15,6 +16,7 @@ models:
 
   - name: "Llama-3.2-3B"
     total_params_b: 3_300_000_000
+    max_model_len: 131072
     hidden_dim: 3072
     intermediate_dim: 8192
     num_heads: 24
@@ -25,6 +27,7 @@ models:
 
   - name: "Llama-3.1-8B"
     total_params_b: 8_000_000_000
+    max_model_len: 131072
     hidden_dim: 4096
     intermediate_dim: 14336
     num_heads: 32
@@ -35,6 +38,7 @@ models:
 
   - name: "Llama-3.1-70B"
     total_params_b: 70_000_000_000
+    max_model_len: 131072
     hidden_dim: 8192
     intermediate_dim: 28672
     num_heads: 64
@@ -45,6 +49,7 @@ models:
 
   - name: "Llama-2-7B"
     total_params_b: 7_000_000_000
+    max_model_len: 4096
     hidden_dim: 4096
     intermediate_dim: 11008
     num_heads: 32
@@ -56,6 +61,7 @@ models:
   # Qwen2.5 series
   - name: "Qwen2.5-0.5B"
     total_params_b: 500_000_000
+    max_model_len: 32768
     hidden_dim: 1536
     intermediate_dim: 4096
     num_heads: 8
@@ -66,6 +72,7 @@ models:
 
   - name: "Qwen2.5-1.5B"
     total_params_b: 1_500_000_000
+    max_model_len: 32768
     hidden_dim: 2048
     intermediate_dim: 8192
     num_heads: 8
@@ -76,6 +83,7 @@ models:
 
   - name: "Qwen2.5-3B"
     total_params_b: 3_100_000_000
+    max_model_len: 32768
     hidden_dim: 2304
     intermediate_dim: 9216
     num_heads: 16
@@ -86,6 +94,7 @@ models:
 
   - name: "Qwen2.5-7B"
     total_params_b: 7_000_000_000
+    max_model_len: 131072
     hidden_dim: 4608
     intermediate_dim: 12288
     num_heads: 32
@@ -96,6 +105,7 @@ models:
 
   - name: "Qwen2.5-14B"
     total_params_b: 14_000_000_000
+    max_model_len: 131072
     hidden_dim: 5120
     intermediate_dim: 13824
     num_heads: 40
@@ -107,6 +117,7 @@ models:
   # MiniCPM series
   - name: "MiniCPM-2B"
     total_params_b: 2_000_000_000
+    max_model_len: 4096
     hidden_dim: 2048
     intermediate_dim: 8192
     num_heads: 8
@@ -118,6 +129,7 @@ models:
   # Qwen3.5 series (hybrid: DeltaNet linear-attn layers + full GQA attention layers)
   - name: "Qwen3.5-2B"
     total_params_b: 2_000_000_000
+    max_model_len: 131072
     hidden_dim: 2048
     intermediate_dim: 6144
     num_heads: 8
@@ -129,6 +141,7 @@ models:
 
   - name: "Qwen3.5-4B"
     total_params_b: 4_000_000_000
+    max_model_len: 131072
     hidden_dim: 2560
     intermediate_dim: 9216
     num_heads: 16
@@ -140,6 +153,7 @@ models:
 
   - name: "Qwen3.5-9B"
     total_params_b: 9_000_000_000
+    max_model_len: 131072
     hidden_dim: 4096
     intermediate_dim: 12288
     num_heads: 16
@@ -154,6 +168,7 @@ models:
   # handled by num_kv_heads + projections() branch in predict.py.
   - name: "Qwen3-4B"
     total_params_b: 4_000_000_000
+    max_model_len: 32768
     hidden_dim: 2560
     intermediate_dim: 9728
     num_heads: 32
@@ -165,6 +180,7 @@ models:
 
   - name: "Qwen3-8B"
     total_params_b: 8_000_000_000
+    max_model_len: 131072
     hidden_dim: 4096
     intermediate_dim: 12288
     num_heads: 32
