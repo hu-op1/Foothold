@@ -22,6 +22,7 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     slo = cfg["slo"]
     workers = cfg["strategy"].get("workers", 1)
     total_gpus = cfg["strategy"]["total_gpus"]
+    model_spec = engine.model
     gpu_name = cfg.get("gpu", "3090")
     kv_cache_gb = cfg["simulation"]["kv_cache_memory_gb"]
     max_model_len = model_spec.get("max_model_len", 8192)
@@ -31,8 +32,6 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     thresholds_list = search_cfg.get("prefill_thresholds", [1024])
     pd_ratios = search_cfg.get("pd_ratios", [[1, 1]])
     tp_sizes = search_cfg.get("tp_sizes", [1])
-
-    model_spec = engine.model
     hw_params = engine.hw
 
     # Pre-compute valid TP sizes for this model+GPU
