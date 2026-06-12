@@ -176,8 +176,8 @@ def run_pd_sim(args):
         hw_path = "perf_predict/fitted_params.json"
     hw = load_hw_params(hw_path)
 
-    # Load trace (CLI arg overrides config)
-    trace_path = args.trace or cfg["trace"]["path"]
+    # Load trace
+    trace_path = cfg["trace"]["path"]
     max_reqs = cfg["trace"].get("max_requests")
     requests = load_trace(trace_path, max_requests=max_reqs)
     print(f"Loaded {len(requests)} requests from {trace_path}")
@@ -203,7 +203,7 @@ def main():
                "  uv run python main.py --bench\n"
                "  uv run python main.py --fit\n"
                "  uv run python main.py --predict\n"
-               "  uv run python main.py --pd-sim --trace traces/myllama-2-7b.jsonl",
+               "  uv run python main.py --pd-sim",
     )
 
     subs = parser.add_subparsers(dest="mode", title="modes")
@@ -230,8 +230,6 @@ def main():
     pd_p = subs.add_parser("pd-sim", help="Run PD disaggregation simulation")
     pd_p.add_argument("--config", default="config/pd_sim.yaml",
                       help="Simulation config (default: config/pd_sim.yaml)")
-    pd_p.add_argument("--trace", default=None,
-                      help="Path to JSONL trace file (overrides config)")
 
     # Backward-compat: support --bench / --fit / --predict / --pd-sim flags too
     parser.add_argument("--bench", action="store_true", dest="_flag_bench",
@@ -273,7 +271,6 @@ def main():
         run_predict(args)
     elif mode == "pd-sim":
         args.pd_config = getattr(args, "config", "config/pd_sim.yaml")
-        args.trace = getattr(args, "trace", None)
         run_pd_sim(args)
     else:
         parser.print_help()

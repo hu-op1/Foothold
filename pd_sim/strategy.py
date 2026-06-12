@@ -1,6 +1,7 @@
 """Grid search over colocated and disaggregated strategy parameters."""
 
 import json
+import time
 
 from pd_sim.engine import SimulationEngine
 
@@ -36,11 +37,13 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                 local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
                 engine.cfg = local_cfg
 
+                t0 = time.perf_counter()
                 metrics = engine.run(list(requests), mode="colocated", chunk_size=chunk_size)
+                elapsed = time.perf_counter() - t0
                 score = metrics.score(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
                 results.append({"label": label, "metrics": metrics, "score": score})
 
-                _print_result(n, total, label, metrics, score)
+                _print_result(n, total, label, metrics, score, elapsed)
 
     if mode in ("disaggregated", "auto"):
         for pd_ratio in search_cfg.get("pd_ratios", [[1, 1]]):
@@ -48,24 +51,27 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
             label = f"Disagg ({p}P:{d}D)"
             n += 1
 
+            t0 = time.perf_counter()
             metrics = engine.run(list(requests), mode="disaggregated", pd_ratio=(p, d))
+            elapsed = time.perf_counter() - t0
             score = metrics.score(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
             results.append({"label": label, "metrics": metrics, "score": score})
 
-            _print_result(n, total, label, metrics, score)
+            _print_result(n, total, label, metrics, score, elapsed)
 
     results.sort(key=lambda r: r["score"], reverse=True)
     return results
 
 
-def _print_result(n, total, label, metrics, score):
+def _print_result(n, total, label, metrics, score, elapsed):
     """Print a single search result row."""
     print(f"  [{n}/{total}] {label:<32} "
           f"thrpt={metrics.throughput():>8.0f} tok/s  "
           f"TTFT={metrics.mean_ttft()*1000:>7.1f}ms  "
           f"TPOT={metrics.mean_tpot()*1000:>7.1f}ms  "
           f"P99={metrics.p99_latency()*1000:>7.1f}ms  "
-          f"score={score:.1f}")
+          f"score={score:.1f}  "
+          f"({elapsed:.2f}s)")
 
 
 def _deep_copy_config(cfg: dict) -> dict:
