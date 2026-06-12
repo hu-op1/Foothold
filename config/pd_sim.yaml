@@ -2,10 +2,9 @@ gpu: "3090"
 model: "Llama-2-7B"
 
 communication:
-  intra_node: nvlink
-  inter_node: infiniband
-  bandwidth_gb_s: 50
-  latency_us: 2
+  intra_bw_gb_s: 900    # intra-node (NVLink ~900 GB/s, PCIe ~64 GB/s)
+  inter_bw_gb_s: 50     # inter-node (InfiniBand ~50 GB/s, Ethernet ~12.5 GB/s)
+  inter_latency_us: 2
 
 simulation:
   max_num_batched_tokens: 8192

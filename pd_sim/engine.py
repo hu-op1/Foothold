@@ -49,8 +49,9 @@ class SimulationEngine:
         self.num_blocks = self._compute_num_blocks()
 
         # Network params
-        self.bw_gb_s = config["communication"]["bandwidth_gb_s"]
-        self.latency_us = config["communication"]["latency_us"]
+        self.bw_gb_s = config["communication"]["inter_bw_gb_s"]
+        self.latency_us = config["communication"]["inter_latency_us"]
+        self.intra_bw_gb_s = config["communication"]["intra_bw_gb_s"]
 
     def _compute_num_blocks(self):
         kv_mem_gb = self.cfg["simulation"]["kv_cache_memory_gb"]
@@ -258,10 +259,8 @@ class SimulationEngine:
         """Predict step time, using TP if configured."""
         tp = getattr(self, "tp_size", 1)
         if tp > 1:
-            intra_bw = {"nvlink": 900, "pcie": 64}.get(
-                self.cfg["communication"]["intra_node"], 900)
             return predict_step_tp(scheduled_requests, self.model, self.hw,
-                                   tp, intra_bw)
+                                   tp, self.intra_bw_gb_s)
         return predict_step(scheduled_requests, self.model, self.hw)
 
     def _compute_xfer(self, request: Request, prefill_time: float) -> float:
