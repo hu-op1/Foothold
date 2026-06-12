@@ -1,4 +1,5 @@
 gpu: "3090"
+model: "Llama-2-7B"
 
 communication:
   intra_node: nvlink

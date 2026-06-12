@@ -161,14 +161,16 @@ def run_pd_sim(args):
     # Load model specs
     specs = load_model_specs()
     models = specs.get("models", [])
-    model_sel = cfg.get("model", "all")
-    if model_sel == "all":
-        model = models[0]
-    else:
-        model = next((m for m in models if m["name"] == model_sel), None)
-        if not model:
-            print(f"Model not found: {model_sel}")
-            return
+    model_sel = cfg.get("model")
+    if not model_sel:
+        print("Config is missing `model` field. Available models:")
+        for m in models:
+            print(f"  {m['name']}")
+        return
+    model = next((m for m in models if m["name"] == model_sel), None)
+    if not model:
+        print(f"Model '{model_sel}' not found in model_specs.yaml")
+        return
 
     # Load hardware params
     hw_path = cfg.get("params") or os.path.join(FIT_RESULTS, f"{gpu}.json")
