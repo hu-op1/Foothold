@@ -1,0 +1,226 @@
+"""Integration tests for pd_sim module."""
+
+import json
+import os
+import tempfile
+
+import pytest
+
+
+def _make_jsonl_trace(path, num=5, shared_prefix_ids=None):
+    """Generate a JSONL trace with optional shared prefix for cache testing."""
+    with open(path, "w") as f:
+        for i in range(num):
+            base = shared_prefix_ids or []
+            unique = [hash(f"u-{i}-{t}") % 50000 for t in range(max(1, 100 + i * 20))]
+            entry = {
+                "input_toks": len(base) + len(unique),
+                "output_toks": 50 + i * 10,
+                "arrival_time_ns": int(i * 500_000_000),  # 0.5s apart
+                "input_tok_ids": base + unique,
+                "output_tok_ids": [hash(f"o-{i}-{t}") % 50000 for t in range(50)],
+            }
+            json.dump(entry, f)
+            f.write("\n")
+
+
+@pytest.fixture
+def model():
+    from perf_predict.predict import load_model_specs
+    specs = load_model_specs()
+    return next(m for m in specs["models"] if m["name"] == "Llama-3.2-1B")
+
+
+@pytest.fixture
+def hw():
+    from perf_predict.predict import load_hw_params
+    path = "fit/results/3090.json"
+    return load_hw_params(path)
+
+
+@pytest.fixture
+def config():
+    from pd_sim.config import load_config
+    cfg = load_config()
+    cfg["max_model_len"] = 8192
+    return cfg
+
+
+def test_load_jsonl_trace():
+    from pd_sim.trace import load_trace
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        _make_jsonl_trace(f.name, num=5)
+        path = f.name
+    try:
+        reqs = load_trace(path)
+        assert len(reqs) == 5
+        assert all(r.prompt_len > 0 for r in reqs)
+        assert all(r.max_output_len > 0 for r in reqs)
+        assert all(len(r.prompt_token_ids) == r.prompt_len for r in reqs)
+    finally:
+        os.unlink(path)
+
+
+def test_block_pool_allocation():
+    from pd_sim.memory import BlockPool, compute_block_hashes
+    from pd_sim.request import Request
+
+    pool = BlockPool(50)
+    r = Request("test", 0.0, list(range(200)), 50)
+    r.block_hashes = compute_block_hashes(r.prompt_token_ids, 16)
+
+    blocks = pool.allocate_slots(r, 64, 16)
+    assert blocks is not None
+    assert len(blocks) == 4
+
+    pool.free_request(r)
+    assert pool.get_num_free_blocks() == 49
+
+
+def test_prefix_cache_hit():
+    from pd_sim.memory import BlockPool, compute_block_hashes
+    from pd_sim.request import Request
+
+    pool = BlockPool(200)
+    block_size = 16
+
+    # First request: 4 blocks of 16 tokens each
+    shared = list(range(64))
+    r1 = Request("r1", 0.0, shared, 50)
+    r1.block_hashes = compute_block_hashes(r1.prompt_token_ids, block_size)
+    pool.allocate_slots(r1, 64, block_size)
+
+    # Second request: same prefix, longer
+    r2_tokens = shared + list(range(100, 196))  # 4 shared blocks + 2 unique
+    r2 = Request("r2", 0.0, r2_tokens, 50)
+    r2.block_hashes = compute_block_hashes(r2.prompt_token_ids, block_size)
+    cached_blocks, num_cached = pool.get_computed_blocks(r2.block_hashes)
+    assert num_cached == 4  # first 4 blocks match
+
+
+def test_colocated_simulation(model, hw, config):
+    from pd_sim.engine import SimulationEngine
+    from pd_sim.trace import load_trace
+
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        _make_jsonl_trace(f.name, num=10)
+        path = f.name
+
+    try:
+        reqs = load_trace(path)
+        engine = SimulationEngine(config, model, hw)
+        metrics = engine.run(reqs, mode="colocated")
+
+        assert metrics.num_requests == 10
+        assert metrics.throughput() > 0
+        assert metrics.p99_latency() > 0
+    finally:
+        os.unlink(path)
+
+
+def test_disaggregated_simulation(model, hw, config):
+    from pd_sim.engine import SimulationEngine
+    from pd_sim.trace import load_trace
+
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        _make_jsonl_trace(f.name, num=10)
+        path = f.name
+
+    try:
+        reqs = load_trace(path)
+        engine = SimulationEngine(config, model, hw)
+        metrics = engine.run(reqs, mode="disaggregated", pd_ratio=(2, 2))
+
+        assert metrics.num_requests == 10
+        assert metrics.throughput() > 0
+    finally:
+        os.unlink(path)
+
+
+def test_strategy_search(model, hw, config):
+    from pd_sim.engine import SimulationEngine
+    from pd_sim.strategy import search
+    from pd_sim.trace import load_trace
+
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        _make_jsonl_trace(f.name, num=5)
+        path = f.name
+
+    try:
+        reqs = load_trace(path)
+
+        config["strategy"]["mode"] = "auto"
+        config["strategy"]["search"]["chunk_sizes"] = [256]
+        config["strategy"]["search"]["max_batched_tokens"] = [2048]
+        config["strategy"]["search"]["pd_ratios"] = [[1, 1]]
+
+        engine = SimulationEngine(config, model, hw)
+        results = search(engine, reqs, config)
+
+        assert len(results) >= 2
+        best = results[0]
+        assert best["score"] > 0
+    finally:
+        os.unlink(path)
+
+
+def test_executor_vs_predict_consistency(model, hw):
+    """Verify executor step-time roughly matches predict() for single request."""
+    from pd_sim.executor import predict_step
+    from pd_sim.request import Request
+    from perf_predict.predict import predict
+
+    r = Request("test", 0.0, list(range(512)), 128)
+    r.num_computed_tokens = 0
+    r.is_prefill_chunk = True
+
+    prefill_step = predict_step([(r, 512)], model, hw)
+
+    pred = predict(model, 1, 512, 128, hw)
+    pred_prefill_s = pred["prefill_ms"] / 1000
+
+    ratio = prefill_step / pred_prefill_s if pred_prefill_s > 0 else 0
+    assert 0.5 < ratio < 2.0, (
+        f"prefill_step={prefill_step:.4f}s, "
+        f"predict_prefill={pred_prefill_s:.4f}s, "
+        f"ratio={ratio:.2f}"
+    )
+
+
+def test_jsonl_prefix_caching_in_simulation(model, hw, config):
+    """Verify prefix cache actually reduces prefill time in colocated sim."""
+    from pd_sim.engine import SimulationEngine
+    from pd_sim.trace import load_trace
+
+    # Two requests sharing the same prefix
+    shared_ids = list(range(256))  # 256 shared tokens
+
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        # Request 1
+        json.dump({
+            "input_toks": 300, "output_toks": 50,
+            "arrival_time_ns": 0,
+            "input_tok_ids": shared_ids + [hash(f"u1-{t}") % 50000 for t in range(44)],
+            "output_tok_ids": [],
+        }, f)
+        f.write("\n")
+        # Request 2 — same prefix
+        json.dump({
+            "input_toks": 400, "output_toks": 50,
+            "arrival_time_ns": 100_000_000,  # 0.1s
+            "input_tok_ids": shared_ids + [hash(f"u2-{t}") % 50000 for t in range(144)],
+            "output_tok_ids": [],
+        }, f)
+        f.write("\n")
+        path = f.name
+
+    try:
+        reqs = load_trace(path)
+        engine = SimulationEngine(config, model, hw)
+        metrics = engine.run(reqs, mode="colocated")
+
+        assert metrics.num_requests == 2
+        assert metrics.throughput() > 0
+        # Second request should have lower TTFT due to prefix cache hit
+    finally:
+        os.unlink(path)

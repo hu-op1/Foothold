@@ -24,8 +24,7 @@ strategy:
     max_batched_tokens: [2048, 4096, 8192]
 
 trace:
-  path: "traces/sharegpt.json"
-  format: sharegpt
+  path: "traces/myllama-2-7b.jsonl"
   max_requests: null
 
 slo:
