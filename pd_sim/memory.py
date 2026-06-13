@@ -105,12 +105,14 @@ class BlockPool:
     def touch(self, block_ids: list[int]) -> None:
         """Increment ref_cnt for cached blocks being reused.
 
-        If ref_cnt was 0, the block was in the free queue — remove it.
+        If ref_cnt was 0, the block should be in the free queue — remove it.
+        Guard against double-touch (ref_cnt already > 0, or already removed).
         """
         for bid in block_ids:
             block = self.blocks[bid]
             if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_ids.remove(bid)
+                if bid in self.free_block_ids:
+                    self.free_block_ids.remove(bid)
             block.ref_cnt += 1
             block.last_accessed = self.clock
 
@@ -149,8 +151,12 @@ class BlockPool:
             block_start = bi * block_size
             block_end = min(block_start + block_size, request.num_prompt_tokens)
 
-            # Reuse existing block at this position if already allocated
-            if bi < len(request.block_table) and request.block_table[bi] >= 0:
+            # Reuse existing block at this position if already owned
+            already_owned = (
+                bi < len(request.block_table)
+                and request.block_table[bi] >= 0
+            )
+            if already_owned:
                 new_block_ids.append(request.block_table[bi])
                 continue
 

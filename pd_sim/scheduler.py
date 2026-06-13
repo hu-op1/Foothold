@@ -169,11 +169,13 @@ class ColocatedScheduler:
                     cached_blocks, num_cached_blocks = self.pool.get_computed_blocks(
                         request.block_hashes
                     )
+                    cache_touched = False
                     if num_cached_blocks > 0:
                         num_cached_tokens = num_cached_blocks * self.block_size
                         request.num_computed_tokens = num_cached_tokens
                         request.is_prefill_chunk = request.num_computed_tokens < request.num_tokens_with_spec
                         self.pool.touch(cached_blocks)
+                        cache_touched = True
                         for bid in cached_blocks:
                             if bid not in request.block_table:
                                 request.block_table.append(bid)
@@ -183,6 +185,8 @@ class ColocatedScheduler:
                         num_new = min(num_new, self.long_prefill_token_threshold)
 
                     if not self.enable_chunked_prefill and num_new > token_budget:
+                        if cache_touched:
+                            self.pool.free_blocks(cached_blocks)
                         break
 
                     num_new = min(num_new, token_budget)
@@ -199,6 +203,12 @@ class ColocatedScheduler:
 
                     new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
                     if new_blocks is None:
+                        if cache_touched:
+                            self.pool.free_blocks(cached_blocks)
+                            # Undo block_table append
+                            for bid in cached_blocks:
+                                if bid in request.block_table:
+                                    request.block_table.remove(bid)
                         break
 
                     queue.pop()

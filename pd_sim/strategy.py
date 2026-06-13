@@ -114,18 +114,30 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
     score = metrics.score(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
     slo_info = metrics.slo_compliance(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
 
+    total_t = metrics.total_time
     return {
         "label": task["label"],
         "metrics_raw": {
             "throughput": metrics.throughput(),
+            "input_throughput": metrics.input_throughput(),
+            "output_throughput": metrics.throughput(),
+            "total_throughput": metrics.total_throughput(),
             "mean_ttft_ms": metrics.mean_ttft() * 1000,
+            "p50_ttft_ms": metrics.p50_ttft() * 1000,
+            "p90_ttft_ms": metrics.p90_ttft() * 1000,
+            "p99_ttft_ms": metrics.p99_ttft() * 1000,
             "mean_tpot_ms": metrics.mean_tpot() * 1000,
+            "p50_tpot_ms": metrics.p50_tpot() * 1000,
+            "p90_tpot_ms": metrics.p90_tpot() * 1000,
+            "p99_tpot_ms": metrics.p99_tpot() * 1000,
             "p50_ms": metrics.p50_latency() * 1000,
+            "p90_ms": metrics.p90_latency() * 1000,
             "p95_ms": metrics.p95_latency() * 1000,
             "p99_ms": metrics.p99_latency() * 1000,
             "num_requests": metrics.num_requests,
+            "total_input_tokens": metrics.total_input_tokens,
             "total_output_tokens": metrics.total_output_tokens,
-            "total_time_s": metrics.total_time,
+            "total_time_s": total_t,
         },
         "score": score,
         "elapsed": elapsed,
@@ -141,9 +153,9 @@ def _print_result(n, total, entry):
     elapsed = entry["elapsed"]
     print(f"  [{n}/{total}] {label:<55} "
           f"thrpt={m['throughput']:>8.0f} tok/s  "
-          f"TTFT={m['mean_ttft_ms']:>7.1f}ms  "
-          f"TPOT={m['mean_tpot_ms']:>7.1f}ms  "
-          f"P99={m['p99_ms']:>7.1f}ms  "
+          f"ttft={m['mean_ttft_ms']:>6.0f}/{m['p99_ttft_ms']:>6.0f}ms  "
+          f"tpot={m['mean_tpot_ms']:>5.1f}/{m['p99_tpot_ms']:>5.1f}ms  "
+          f"lat_p99={m['p99_ms']:>6.0f}ms  "
           f"score={score:.1f}  "
           f"({elapsed:.2f}s)")
 

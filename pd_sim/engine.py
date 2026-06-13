@@ -243,6 +243,14 @@ class SimulationEngine:
             for i, s in enumerate(d_scheds):
                 s._update_after_schedule(d_outs[i])
 
+            # Pull prefill-done requests out of P running immediately.
+            # If left in, Phase 1 of the next schedule() would allocate P-side
+            # decode blocks that are never freed (decode belongs to D side).
+            p_done = p_sched.drain_prefill_done()
+            for req in p_done:
+                if req in p_sched.running:
+                    p_sched.running.remove(req)
+
             p_time_val = self._predict_step(
                 [(r, nt) for r, nt, _ in p_out.scheduled_requests]
             ) if p_total > 0 else 0.0
@@ -257,18 +265,27 @@ class SimulationEngine:
                 else:
                     d_times.append(0.0)
 
-            # Retry stalled transfers (D-side may have freed blocks via finished requests)
-            still_stalled: list[tuple[Request, list[int], int]] = []
-            for req, p_blocks, d_idx in stalled_xfers:
-                if not _try_admit_to_d(req, p_blocks, d_idx, self.clock + p_time_val):
-                    still_stalled.append((req, p_blocks, d_idx))
-            stalled_xfers = still_stalled
+            # Drain finished from D first (frees blocks), then retry stalled transfers
+            d_had_finished = False
+            for s in d_scheds:
+                for r in s.drain_finished():
+                    metrics.record(r)
+                    d_had_finished = True
 
-            # Prefill-done → route to least-loaded D and admit with transfer
-            p_done = p_sched.drain_prefill_done()
+            # Only retry stalled transfers if D-side freed blocks.
+            # Each D completion frees blocks for at most 1-2 transfers.
+            if d_had_finished and stalled_xfers:
+                still_stalled: list[tuple[Request, list[int], int]] = []
+                admitted = 0
+                for req, p_blocks, d_idx in stalled_xfers:
+                    if admitted < 4 and _try_admit_to_d(req, p_blocks, d_idx, self.clock + p_time_val):
+                        admitted += 1
+                    else:
+                        still_stalled.append((req, p_blocks, d_idx))
+                stalled_xfers = still_stalled
+
+            # Transfer prefill-done requests to D side
             for req in p_done:
-                if req in p_sched.running:
-                    p_sched.running.remove(req)
                 p_side_blocks = [b for b in req.block_table if b >= 0]
                 d_idx = _pick_d_instance()
                 if not _try_admit_to_d(req, p_side_blocks, d_idx, self.clock + p_time_val):
@@ -279,10 +296,6 @@ class SimulationEngine:
             if step_time == 0:
                 step_time = 0.001
             self.clock += step_time
-
-            for s in d_scheds:
-                for r in s.drain_finished():
-                    metrics.record(r)
 
             loop_count += 1
             if loop_count > self._max_iterations:

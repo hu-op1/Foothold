@@ -50,7 +50,7 @@ time = ( (flops/F_peak)^p + (bytes/B_peak)^p )^(1/p)
 ```
 
 - `fit/__init__.py` — exports `load_results`, `save_fitted_params`, `roofline_time`, plus `fit_all()` orchestrator
-- `fit/utils.py` — `roofline_fit()` via scipy curve_fit, `lstsq_fit()`, `lstsq_log_fit()`, xlsx loader/saver
+- `fit/utils.py` — `roofline_fit()` via scipy curve_fit, xlsx loader/saver
 - `fit/matmul.py` — Splits matmul results at M=256 into **prefill** (large M) and **decode** (small M) regimes. Fits F_peak on prefill first, then fixes F_peak and fits B_peak + p for decode. Produces `{F_peak, B_peak, p}_{prefill,decode}`.
 - `fit/elementwise.py` — Per-op effective bandwidth model: `time = bytes / B_eff + overhead`. Fits B_eff from large-N points (overhead negligible), overhead from small-N points. Unmeasured ops inherit via proxy map. Produces `{elem_b_effs, elem_overheads}`.
 

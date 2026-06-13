@@ -35,6 +35,10 @@ class MetricsCollector:
         return len(self.records)
 
     @property
+    def total_input_tokens(self) -> int:
+        return sum(r["prompt_len"] for r in self.records)
+
+    @property
     def total_output_tokens(self) -> int:
         return sum(r["num_output_tokens"] for r in self.records)
 
@@ -51,16 +55,53 @@ class MetricsCollector:
         tt = self.total_time
         return self.total_output_tokens / tt if tt > 0 else 0.0
 
+    def input_throughput(self) -> float:
+        """Input (prompt) tokens per second."""
+        tt = self.total_time
+        return self.total_input_tokens / tt if tt > 0 else 0.0
+
+    def total_throughput(self) -> float:
+        """Input + output tokens per second."""
+        tt = self.total_time
+        return (self.total_input_tokens + self.total_output_tokens) / tt if tt > 0 else 0.0
+
+    # ── TTFT ──
+
     def mean_ttft(self) -> float:
         vals = [r["ttft"] for r in self.records]
         return statistics.mean(vals) if vals else 0.0
+
+    def p50_ttft(self) -> float:
+        return self._percentile("ttft", 50)
+
+    def p90_ttft(self) -> float:
+        return self._percentile("ttft", 90)
+
+    def p99_ttft(self) -> float:
+        return self._percentile("ttft", 99)
+
+    # ── TPOT ──
 
     def mean_tpot(self) -> float:
         vals = [r["tpot"] for r in self.records if r["tpot"] > 0]
         return statistics.mean(vals) if vals else 0.0
 
+    def p50_tpot(self) -> float:
+        return self._percentile("tpot", 50)
+
+    def p90_tpot(self) -> float:
+        return self._percentile("tpot", 90)
+
+    def p99_tpot(self) -> float:
+        return self._percentile("tpot", 99)
+
+    # ── total latency percentiles ──
+
     def p50_latency(self) -> float:
         return self._percentile("total_latency", 50)
+
+    def p90_latency(self) -> float:
+        return self._percentile("total_latency", 90)
 
     def p95_latency(self) -> float:
         return self._percentile("total_latency", 95)
