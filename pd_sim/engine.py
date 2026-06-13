@@ -86,6 +86,10 @@ class SimulationEngine:
             r.kv_transfer_start = None
             r.kv_transfer_end = None
 
+        # Safety iteration limit scales with workload (worst case: 1 token/step)
+        total_decode_tokens = sum(r.max_output_len for r in requests)
+        self._max_iterations = max(100_000, total_decode_tokens * 2 + len(requests) * 5)
+
         if mode == "colocated":
             return self._run_colocated(requests)
         else:
@@ -103,6 +107,7 @@ class SimulationEngine:
         for r in requests:
             heapq.heappush(event_queue, SimulationEvent(r.arrival_time, EventType.ARRIVAL, r))
 
+        loop_count = 0
         while event_queue or sched.has_requests():
             # Pop all events at current time
             if event_queue:
@@ -134,124 +139,160 @@ class SimulationEngine:
             for r in sched.drain_finished():
                 metrics.record(r)
 
+            loop_count += 1
+            if loop_count > self._max_iterations:
+                raise RuntimeError(
+                    f"_run_colocated: exceeded {self._max_iterations} iterations. "
+                    f"running={len(sched.running)}, waiting={len(sched.waiting)}, "
+                    f"skipped={len(sched.skipped_waiting)}, clock={self.clock:.6f}"
+                )
+
         return metrics
 
     def _run_disaggregated(self, requests: list[Request], pd_ratio: tuple[int, int]):
-        """Run disaggregated simulation with separate P and D pools/schedulers."""
+        """Run disaggregated simulation with multiple independent D instances.
+
+        Requests are routed to the least-loaded D instance and admitted directly
+        to the D running queue (with KV transfer). Waiting requests never hold
+        D-side blocks — only running requests do.
+        """
         from pd_sim.metrics import MetricsCollector
 
         num_p, num_d = pd_ratio
 
-        # Separate memory pools
+        # P side: pooled GPUs with larger batch budget
         pool_p = BlockPool(self.num_blocks * num_p)
-        pool_d = BlockPool(self.num_blocks * num_d)
-
-        # Separate schedulers
         p_cfg = _deep_copy_config(self.cfg)
-        p_cfg["simulation"]["max_num_batched_tokens"] = self.cfg["simulation"]["max_num_batched_tokens"] * num_p
+        p_cfg["simulation"]["max_num_batched_tokens"] = (
+            self.cfg["simulation"]["max_num_batched_tokens"] * num_p)
         p_cfg["simulation"]["max_num_seqs"] = self.cfg["simulation"]["max_num_seqs"]
-
-        d_cfg = _deep_copy_config(self.cfg)
-        d_cfg["simulation"]["max_num_seqs"] = self.cfg["simulation"]["max_num_seqs"] * num_d
-
         p_sched = ColocatedScheduler(pool_p, p_cfg)
-        d_sched = ColocatedScheduler(pool_d, d_cfg)
+
+        # D side: num_d independent instances, each with own pool + scheduler.
+        # D-side never resets num_computed_tokens on preempt — KV cache was
+        # already computed on the P side and transferred.
+        d_cfg = _deep_copy_config(self.cfg)
+        d_pools = [BlockPool(self.num_blocks) for _ in range(num_d)]
+        d_scheds = [ColocatedScheduler(d_pools[i], d_cfg, reset_on_preempt=False)
+                    for i in range(num_d)]
 
         metrics = MetricsCollector()
 
-        # Pending transfers: list of (transfer_done_time, request), sorted
-        pending_xfers: list[tuple[float, Request]] = []
+        # Stalled prefill-done: (request, p_side_blocks, target_d_idx)
+        stalled_xfers: list[tuple[Request, list[int], int]] = []
 
         event_queue: list[SimulationEvent] = []
         for r in requests:
             heapq.heappush(event_queue, SimulationEvent(r.arrival_time, EventType.ARRIVAL, r))
 
-        while event_queue or pending_xfers or p_sched.has_requests() or d_sched.has_requests():
-            # If waiting for events and nothing to process, jump clock to next arrival
-            if (not p_sched.has_requests() and not d_sched.has_requests()
-                    and not pending_xfers and event_queue):
+        def _pick_d_instance() -> int:
+            loads = [len(s.running) + len(s.waiting) for s in d_scheds]
+            return loads.index(min(loads))
+
+        def _try_admit_to_d(req, p_side_blocks, d_idx, xfer_start_time):
+            sched = d_scheds[d_idx]
+            if len(sched.running) >= sched.max_num_seqs:
+                return False
+            xfer_time = transfer_blocks(req, d_pools[d_idx], self.bytes_per_block,
+                                        self.bw_gb_s, self.latency_us,
+                                        self.block_size)
+            if xfer_time == float("inf"):
+                return False
+            pool_p.free_blocks(p_side_blocks)
+            req.kv_transfer_start = xfer_start_time
+            req.kv_transfer_end = xfer_start_time + xfer_time
+            req.status = RequestStatus.RUNNING
+            sched.running.append(req)
+            return True
+
+        p_time_val: float = 0.0
+        loop_count = 0
+
+        while (event_queue or stalled_xfers
+               or p_sched.has_requests()
+               or any(s.has_requests() for s in d_scheds)):
+
+            if (not p_sched.has_requests()
+                    and not any(s.has_requests() for s in d_scheds)
+                    and not stalled_xfers and event_queue):
                 self.clock = max(self.clock, event_queue[0].time)
 
-            # Pop arrival events at current clock
             while event_queue and event_queue[0].time <= self.clock + 1e-9:
                 ev = heapq.heappop(event_queue)
                 if ev.event_type == EventType.ARRIVAL and ev.request:
                     p_sched.add_request(ev.request)
 
-            # Process completed KV transfers
-            while pending_xfers and pending_xfers[0][0] <= self.clock + 1e-9:
-                _, req = pending_xfers.pop(0)
-                req.status = RequestStatus.WAITING
-                d_sched.add_request(req)
-
-            # Schedule both sides
             p_out = p_sched.schedule()
-            d_out = d_sched.schedule()
+            d_outs = [s.schedule() for s in d_scheds]
 
             p_total = p_out.total_num_scheduled_tokens
-            d_total = d_out.total_num_scheduled_tokens
+            d_totals = [o.total_num_scheduled_tokens for o in d_outs]
 
-            if p_total == 0 and d_total == 0 and not pending_xfers:
-                if not p_sched.has_requests() and not d_sched.has_requests():
-                    if not event_queue:
-                        break
-                    # Jump to next arrival
+            if p_total == 0 and all(t == 0 for t in d_totals):
+                if event_queue:
                     self.clock = max(self.clock, event_queue[0].time)
-                    continue
+                elif (not p_sched.has_requests()
+                        and not any(s.has_requests() for s in d_scheds)
+                        and not stalled_xfers):
+                    break
                 else:
-                    # Schedulers have requests but nothing scheduled — idle tick
                     self.clock += 0.001
-                    continue
+                continue
 
             p_sched._update_after_schedule(p_out)
-            d_sched._update_after_schedule(d_out)
+            for i, s in enumerate(d_scheds):
+                s._update_after_schedule(d_outs[i])
 
-            # Execute both sides
-            p_time = self._predict_step(
-                [(r, nt) for r, nt, _ in p_out.scheduled_requests]) if p_total > 0 else 0.0
+            p_time_val = self._predict_step(
+                [(r, nt) for r, nt, _ in p_out.scheduled_requests]
+            ) if p_total > 0 else 0.0
 
-            d_time = self._predict_step(
-                [(r, nt) for r, nt, _ in d_out.scheduled_requests]) if d_total > 0 else 0.0
+            d_times: list[float] = []
+            for i, o in enumerate(d_outs):
+                if o.total_num_scheduled_tokens > 0:
+                    dt = self._predict_step(
+                        [(r, nt) for r, nt, _ in o.scheduled_requests])
+                    d_scheds[i].update_from_output(o, self.clock + dt)
+                    d_times.append(dt)
+                else:
+                    d_times.append(0.0)
 
-            # Process prefill completions and compute KV transfer
-            p_sched.update_from_output(p_out, self.clock + p_time)
-            d_sched.update_from_output(d_out, self.clock + d_time)
+            # Retry stalled transfers (D-side may have freed blocks via finished requests)
+            still_stalled: list[tuple[Request, list[int], int]] = []
+            for req, p_blocks, d_idx in stalled_xfers:
+                if not _try_admit_to_d(req, p_blocks, d_idx, self.clock + p_time_val):
+                    still_stalled.append((req, p_blocks, d_idx))
+            stalled_xfers = still_stalled
 
-            # Find requests that completed prefill on P side
+            # Prefill-done → route to least-loaded D and admit with transfer
             p_done = p_sched.drain_prefill_done()
             for req in p_done:
-                xfer_time = self._compute_xfer(req, p_time)
-                req.kv_transfer_start = self.clock + p_time
-                req.kv_transfer_end = req.kv_transfer_start + xfer_time
-                req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                if req in p_sched.running:
+                    p_sched.running.remove(req)
+                p_side_blocks = [b for b in req.block_table if b >= 0]
+                d_idx = _pick_d_instance()
+                if not _try_admit_to_d(req, p_side_blocks, d_idx, self.clock + p_time_val):
+                    stalled_xfers.append((req, p_side_blocks, d_idx))
 
-                # Transfer blocks to D pool (touch cached, allocate for new)
-                transfer_blocks(req, pool_d, self.bytes_per_block,
-                                self.bw_gb_s, self.latency_us)
-
-                pending_xfers.append((req.kv_transfer_end, req))
-
-            # Sort pending transfers by completion time
-            pending_xfers.sort(key=lambda x: x[0])
-
-            # Compute effective KV transfer overhead on critical path
-            effective_xfer = 0.0
-            if pending_xfers and p_time > 0:
-                first_xfer = pending_xfers[0][1]
-                kv_len = first_xfer.prompt_len
-                effective_xfer = effective_xfer_overhead(
-                    kv_len, self.nl, self.nh_kv, self.hd,
-                    self.bw_gb_s, self.latency_us, p_time,
-                )
-
-            step_time = max(p_time, d_time + effective_xfer)
+            max_d_time = max(d_times) if d_times else 0.0
+            step_time = max(p_time_val, max_d_time)
             if step_time == 0:
                 step_time = 0.001
             self.clock += step_time
 
-            # Record finished from D side
-            for r in d_sched.drain_finished():
-                metrics.record(r)
+            for s in d_scheds:
+                for r in s.drain_finished():
+                    metrics.record(r)
+
+            loop_count += 1
+            if loop_count > self._max_iterations:
+                d_loads = [len(s.running) + len(s.waiting) for s in d_scheds]
+                raise RuntimeError(
+                    f"_run_disaggregated: exceeded {self._max_iterations} iterations. "
+                    f"p_running={len(p_sched.running)}, p_waiting={len(p_sched.waiting)}, "
+                    f"d_loads={d_loads}, stalled_xfers={len(stalled_xfers)}, "
+                    f"events={len(event_queue)}, clock={self.clock:.6f}"
+                )
 
         return metrics
 

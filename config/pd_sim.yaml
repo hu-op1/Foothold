@@ -2,9 +2,9 @@ gpu: "3090"
 model: "Llama-2-7B"
 
 communication:
-  intra_bw_gb_s: 900    # intra-node (NVLink ~900 GB/s, PCIe ~64 GB/s)
-  inter_bw_gb_s: 50     # inter-node (InfiniBand ~50 GB/s, Ethernet ~12.5 GB/s)
-  inter_latency_us: 2
+  intra_bw_gb_s: 9.7    # intra-node (NVLink ~900 GB/s, PCIe ~64 GB/s)
+  inter_bw_gb_s: 9.7     # inter-node (InfiniBand ~50 GB/s, Ethernet ~12.5 GB/s)
+  inter_latency_us: 6.9
 
 simulation:
   block_size: 16
@@ -15,17 +15,16 @@ simulation:
 
 strategy:
   mode: auto
-  total_gpus: 8
-  workers: 2
+  total_gpus: 4
   search:
-    pd_ratios: [[1, 1], [1, 3], [1, 7], [3, 5]]
+    pd_ratios: [[1, 1], [1, 3], [2, 2]]
     max_batched_tokens: [256, 512, 1024, 2048, 4096, 8192]
     prefill_thresholds: [256, 512, 1024, 2048]
     tp_sizes: [1, 2, 4]
 
 trace:
-  path: "traces/myllama-2-7b.jsonl"
-  max_requests: null
+  path: "traces/myllama-2-7b1.jsonl"
+  max_requests: 1000
 
 slo:
   ttft_ms: 500

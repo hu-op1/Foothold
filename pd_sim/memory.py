@@ -149,6 +149,11 @@ class BlockPool:
             block_start = bi * block_size
             block_end = min(block_start + block_size, request.num_prompt_tokens)
 
+            # Reuse existing block at this position if already allocated
+            if bi < len(request.block_table) and request.block_table[bi] >= 0:
+                new_block_ids.append(request.block_table[bi])
+                continue
+
             if block_end - block_start == block_size and bi < len(request.block_hashes):
                 # Full block — check prefix cache
                 bh = request.block_hashes[bi]
@@ -171,20 +176,24 @@ class BlockPool:
                 block.block_hash = request.block_hashes[bi]
                 self._cache_block(block)
 
-        # Extend request's block table
-        existing_count = len(request.block_table)
+        # Extend request's block table, filling gaps with empty slots.
+        # Free any old block at each position before overwriting.
         for i, bid in enumerate(new_block_ids):
             idx = first_block_idx + i
-            if idx >= existing_count:
-                request.block_table.append(bid)
-            else:
-                request.block_table[idx] = bid
+            while len(request.block_table) <= idx:
+                request.block_table.append(-1)
+            old_bid = request.block_table[idx]
+            if old_bid >= 0 and old_bid != bid:
+                self.free_blocks([old_bid])
+            request.block_table[idx] = bid
 
         return new_block_ids
 
     def free_blocks(self, block_ids: list[int]) -> None:
         """Decrement ref_cnt for blocks. Move to free queue if ref_cnt hits 0."""
         for bid in block_ids:
+            if bid < 0:
+                continue
             block = self.blocks[bid]
             if block.is_null:
                 continue
@@ -194,5 +203,5 @@ class BlockPool:
 
     def free_request(self, request: "Request") -> None:
         """Free all blocks allocated to a request."""
-        self.free_blocks(request.block_table)
+        self.free_blocks([b for b in request.block_table if b >= 0])
         request.block_table.clear()

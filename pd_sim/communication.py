@@ -47,11 +47,13 @@ def effective_xfer_overhead(kv_len, num_layers, num_kv_heads, head_dim,
 
 
 def transfer_blocks(request: Request, pool_d, bytes_per_block: int,
-                    bandwidth_gb_s: float, latency_us: float) -> float:
-    """Compute transfer time for a request's KV blocks from P to D.
+                    bandwidth_gb_s: float, latency_us: float,
+                    block_size: int = 16) -> float:
+    """Allocate D-side blocks for a request's KV cache and compute transfer time.
 
-    Only blocks not already cached on D side need to be sent.
-    Cached blocks on D side are touched (ref_cnt++).
+    Allocates blocks in pool_d for each block in the request's block_table.
+    Cached blocks on D side are reused (touched).
+    Updates request.block_table with D-side block IDs.
 
     Args:
         request: Request with populated block_table and block_hashes.
@@ -59,19 +61,47 @@ def transfer_blocks(request: Request, pool_d, bytes_per_block: int,
         bytes_per_block: Bytes per KV cache block.
         bandwidth_gb_s: Inter-node bandwidth (GB/s).
         latency_us: Fixed per-transfer latency.
+        block_size: Number of tokens per block.
 
     Returns:
         Transfer time in seconds for non-cached blocks.
     """
     blocks_to_send = 0
+    new_table: list[int] = []
+
     for i, bid in enumerate(request.block_table):
+        if bid < 0:
+            new_table.append(-1)
+            continue
+
         if i < len(request.block_hashes):
             bh = request.block_hashes[i]
             cached_id = pool_d.get_cached_block(bh)
             if cached_id is not None:
                 pool_d.touch([cached_id])
+                new_table.append(cached_id)
                 continue
+
+        # Allocate a fresh block on the D side
+        block = pool_d.get_new_block()
+        if block.is_null:
+            # Rollback: free blocks already allocated in new_table
+            pool_d.free_blocks([b for b in new_table if b >= 0])
+            return float("inf")
+
+        new_table.append(block.block_id)
         blocks_to_send += 1
+
+        # Cache the block on D side if it covers a full prompt block
+        if i < len(request.block_hashes):
+            block_start = i * block_size
+            block_end = min(block_start + block_size, request.num_prompt_tokens)
+            if block_end - block_start == block_size:
+                block.block_hash = request.block_hashes[i]
+                pool_d._cache_block(block)
+
+    # Replace request's block_table with D-side blocks
+    request.block_table = new_table
 
     if blocks_to_send == 0:
         return 0.0

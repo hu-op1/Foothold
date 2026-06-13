@@ -64,9 +64,9 @@ class SchedulerOutput:
 
 
 class ColocatedScheduler:
-    """Scheduler for colocated (P+D on same GPU) deployment."""
+    """Scheduler for colocated (P+D on same GPU) or D-only (disaggregated) deployment."""
 
-    def __init__(self, memory_pool, config):
+    def __init__(self, memory_pool, config, *, reset_on_preempt: bool = True):
         self.pool = memory_pool
         self.max_num_batched_tokens = config["simulation"]["max_num_batched_tokens"]
         self.max_num_seqs = config["simulation"]["max_num_seqs"]
@@ -75,6 +75,7 @@ class ColocatedScheduler:
         self.long_prefill_token_threshold = config["simulation"]["long_prefill_token_threshold"]
         self.policy = config["simulation"].get("scheduling_policy", SchedulingPolicy.FCFS)
         self.max_model_len = config.get("max_model_len", 131072)
+        self.reset_on_preempt = reset_on_preempt
 
         self.running: list[Request] = []
         self.waiting = RequestQueue()
@@ -105,8 +106,12 @@ class ColocatedScheduler:
 
             num_new = request.num_tokens_with_spec - request.num_computed_tokens
             if num_new <= 0:
-                req_index += 1
-                continue
+                # Decode: always generate 1 token per step after prefill completes
+                if not request.is_prefill_chunk and request.num_computed_tokens >= request.prompt_len:
+                    num_new = 1
+                else:
+                    req_index += 1
+                    continue
 
             if self.long_prefill_token_threshold > 0:
                 num_new = min(num_new, self.long_prefill_token_threshold)
@@ -118,6 +123,10 @@ class ColocatedScheduler:
 
             new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
             if new_blocks is None:
+                if not self.reset_on_preempt:
+                    # D-side: never preempt — skip this request for this step
+                    req_index += 1
+                    continue
                 # Preempt
                 if self.policy == SchedulingPolicy.PRIORITY:
                     victim = max(self.running, key=lambda r: (r.priority, r.arrival_time))
@@ -151,7 +160,9 @@ class ColocatedScheduler:
 
                     if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         queue.pop()
-                        self.skipped_waiting.add(request)
+                        # Only move to skipped_waiting if not already there
+                        if queue is self.waiting:
+                            self.skipped_waiting.add(request)
                         continue
 
                     # Prefix cache hit
@@ -161,6 +172,7 @@ class ColocatedScheduler:
                     if num_cached_blocks > 0:
                         num_cached_tokens = num_cached_blocks * self.block_size
                         request.num_computed_tokens = num_cached_tokens
+                        request.is_prefill_chunk = request.num_computed_tokens < request.num_tokens_with_spec
                         self.pool.touch(cached_blocks)
                         for bid in cached_blocks:
                             if bid not in request.block_table:
@@ -175,9 +187,15 @@ class ColocatedScheduler:
 
                     num_new = min(num_new, token_budget)
                     if num_new <= 0:
-                        queue.pop()
-                        self.skipped_waiting.add(request)
-                        continue
+                        # Decode request from disaggregated P→D transfer:
+                        # prefill already done, need to generate 1 token
+                        if not request.is_prefill_chunk:
+                            num_new = 1
+                        else:
+                            queue.pop()
+                            if queue is self.waiting:
+                                self.skipped_waiting.add(request)
+                            continue
 
                     new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
                     if new_blocks is None:
@@ -200,7 +218,8 @@ class ColocatedScheduler:
             self.running.remove(request)
         self.pool.free_request(request)
         request.status = RequestStatus.PREEMPTED
-        request.num_computed_tokens = 0  # must recompute
+        if self.reset_on_preempt:
+            request.num_computed_tokens = 0  # must recompute from scratch
         self.waiting.prepend(request)
 
     def _update_after_schedule(self, output: SchedulerOutput) -> None:
@@ -218,14 +237,17 @@ class ColocatedScheduler:
         self.pool.clock = clock
 
         for req, num_new, _ in output.scheduled_requests:
-            if req.has_prompt_remaining():
-                # Still in prefill — no output tokens generated yet
-                pass
-            else:
-                # Decode — record TTFT on first decode token
+            # Determine how many of num_new are actual decode (output) tokens.
+            # num_computed_tokens was already incremented in _update_after_schedule,
+            # so pre-step value is num_computed_tokens - num_new.
+            pre_step_computed = req.num_computed_tokens - num_new
+            prompt_remaining = max(0, req.num_prompt_tokens - pre_step_computed)
+            decode_tokens = num_new - min(num_new, prompt_remaining)
+
+            if decode_tokens > 0:
                 if req.num_output_tokens == 0 and req.ttft is None:
                     req.ttft = clock - req.arrival_time
-                req.num_output_tokens += num_new
+                req.num_output_tokens += decode_tokens
 
             # Check stop
             if req.num_output_tokens >= req.max_output_len:

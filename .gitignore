@@ -10,7 +10,6 @@ wheels/
 .venv
 
 # Output results
-results/
 
 # Test code
 test/

@@ -19,13 +19,23 @@ def load_config(path=None, model_spec=None):
     # Defaults for null fields
     sim = cfg.setdefault("simulation", {})
     if sim.get("max_num_seqs") is None and model_spec:
-        # Auto-cap max_num_seqs based on available KV memory
-        vram = total_vram_gb(cfg.get("gpu", "3090"))
-        weight_gb = model_weight_gb(model_spec)
-        kv_per_tok = kv_cache_per_token_bytes(model_spec)
-        kv_per_seq_gb = (kv_per_tok * cfg["max_model_len"]) / 1e9
-        kv_budget = max(1, vram - weight_gb - 2)
-        sim["max_num_seqs"] = max(1, int(kv_budget / kv_per_seq_gb))
+        # Derive from block pool: each request needs multiple blocks over its
+        # lifetime. Use avg_seq = max_model_len/4 as a rough per-request budget.
+        # Too high → thrashing; too low → underutilised pool.
+        block_size = sim.get("block_size", 16)
+        nh_kv = model_spec.get("num_kv_heads", model_spec["num_heads"])
+        hd = model_spec["head_dim"]
+        nl = model_spec["num_layers"]
+        bytes_per_block = 2 * nl * nh_kv * hd * block_size * 2
+        kv_mem_gb = sim.get("kv_cache_memory_gb")
+        if kv_mem_gb is None:
+            vram = total_vram_gb(cfg.get("gpu", "3090"))
+            weight_gb = model_weight_gb(model_spec)
+            kv_mem_gb = max(1, vram - weight_gb - 2)
+        num_blocks = max(1, int(kv_mem_gb * 1024**3) // bytes_per_block)
+        est_seq_len = min(cfg["max_model_len"], max(512, cfg["max_model_len"] // 4))
+        blocks_per_req = max(1, est_seq_len // block_size)
+        sim["max_num_seqs"] = max(1, num_blocks // blocks_per_req)
 
     if sim.get("kv_cache_memory_gb") is None:
         if model_spec:
@@ -99,8 +109,9 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
     1. num_heads % tp == 0 (attention head divisibility)
     2. num_kv_heads % tp == 0 (KV head divisibility for GQA)
     3. model_weight/tp + activation_overhead < VRAM (weights must fit)
-    4. KV cache at max context must fit in remaining VRAM:
-       kv_per_token × max_model_len × max_num_seqs / tp < VRAM - weight/tp - activation
+    4. KV cache at expected context must fit in remaining VRAM.
+       Uses estimated average seq length (not max_model_len) since the
+       block pool (PagedAttention) handles dynamic allocation at runtime.
 
     Returns sorted list of valid TP sizes.
     """
@@ -123,16 +134,10 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
         if weight_per_gpu + activation_gb >= vram:
             continue
 
-        # Per-GPU available for KV
-        kv_budget_per_gpu = vram - weight_per_gpu - activation_gb
-        # KV per seq is split across tp GPUs (head parallelism)
-        kv_per_seq_per_gpu_gb = (kv_per_tok * max_model_len) / 1e9 / tp
-
         # Must fit at least 1 request at full context
-        if kv_per_seq_per_gpu_gb > kv_budget_per_gpu:
-            continue
-
-        if kv_per_seq_per_gpu_gb * max_num_seqs <= kv_budget_per_gpu:
+        kv_budget_per_gpu = vram - weight_per_gpu - activation_gb
+        kv_per_seq_per_gpu_gb = (kv_per_tok * max_model_len) / 1e9 / tp
+        if kv_per_seq_per_gpu_gb <= kv_budget_per_gpu:
             valid.append(tp)
 
     return valid if valid else [1]

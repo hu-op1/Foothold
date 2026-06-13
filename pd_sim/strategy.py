@@ -2,7 +2,6 @@
 
 import json
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from pd_sim.engine import SimulationEngine
 from pd_sim.config import valid_tp_sizes, total_vram_gb
@@ -20,7 +19,6 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     mode = cfg["strategy"]["mode"]
     search_cfg = cfg["strategy"]["search"]
     slo = cfg["slo"]
-    workers = cfg["strategy"].get("workers", 1)
     total_gpus = cfg["strategy"]["total_gpus"]
     model_spec = engine.model
     gpu_name = cfg.get("gpu", "3090")
@@ -82,29 +80,13 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     print(f"\n  Model={model_spec['name']} ({model_spec['total_params_b']/1e9:.1f}B params)")
     print(f"  GPU={gpu_name} x{total_gpus} ({total_vram_gb(gpu_name)}GB each)")
     print(f"  Valid TP sizes: {tp_sizes}")
-    print(f"  Evaluating {total} strategies (workers={workers})...\n")
+    print(f"  Evaluating {total} strategies (serial)...\n")
 
     results = []
-
-    if workers <= 1:
-        for i, t in enumerate(tasks, 1):
-            r = _run_one(t, requests, model_spec, hw_params, slo)
-            results.append(r)
-            _print_result(i, total, r)
-    else:
-        future_to_idx = {}
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            for i, t in enumerate(tasks):
-                fut = pool.submit(_run_one, t, requests, model_spec, hw_params, slo)
-                future_to_idx[fut] = (i + 1, t["label"])
-
-            n = 0
-            for fut in as_completed(future_to_idx):
-                idx, label = future_to_idx[fut]
-                r = fut.result()
-                results.append(r)
-                n += 1
-                _print_result(n, total, r)
+    for i, t in enumerate(tasks, 1):
+        r = _run_one(t, requests, model_spec, hw_params, slo)
+        results.append(r)
+        _print_result(i, total, r)
 
     results.sort(key=lambda r: r["score"], reverse=True)
     return results
