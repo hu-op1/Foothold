@@ -8,61 +8,6 @@ from openpyxl.styles import Font, PatternFill, Alignment, numbers
 from openpyxl.utils import get_column_letter
 
 
-def print_comparison_table(results: list[dict], cfg: dict) -> None:
-    """Print a comparison table of strategy results.
-
-    Args:
-        results: list of {label, metrics_raw, score}
-        cfg: simulation config.
-    """
-    trace_path = cfg["trace"]["path"]
-    gpu = cfg.get("gpu", "unknown")
-    total_gpus = cfg["strategy"].get("total_gpus", "?")
-
-    print()
-    print("=" * 120)
-    print("  PD Strategy Comparison")
-    if results:
-        n_reqs = results[0]["metrics_raw"]["num_requests"]
-        print(f"  Trace: {trace_path} ({n_reqs} requests)")
-    print(f"  GPU: {gpu} x{total_gpus}")
-    print("=" * 120)
-
-    header = (
-        f"  {'Strategy':<32} | {'Thrpt':>7} | {'InThrpt':>8} | {'TotalThrpt':>11} | "
-        f"{'TTFTmean':>8} | {'TTFTp99':>8} | {'TPOTmean':>9} | {'TPOTp99':>9} | "
-        f"{'P99lat':>8} | {'TotTime':>8} | {'SLO%':>6} | {'Time':>6}"
-    )
-    print(header)
-    print("  " + "-" * (len(header) - 2))
-
-    best = max(results, key=lambda r: r["score"]) if results else None
-    for entry in results:
-        m = entry["metrics_raw"]
-        marker = " ★" if entry is best else ""
-        tt_s = m.get("total_time_s", 0)
-        print(
-            f"  {entry['label']:<32} | "
-            f"{m['throughput']:>7.0f} | "
-            f"{m['input_throughput']:>8.0f} | "
-            f"{m['total_throughput']:>11.0f} | "
-            f"{m['mean_ttft_ms']:>8.0f} | "
-            f"{m['p99_ttft_ms']:>8.0f} | "
-            f"{m['mean_tpot_ms']:>9.1f} | "
-            f"{m['p99_tpot_ms']:>9.1f} | "
-            f"{m['p99_ms']:>8.0f} | "
-            f"{tt_s:>8.0f} | "
-            f"{entry['slo_score']*100:>5.1f}% | "
-            f"{entry['elapsed']:>4.1f}s{marker}"
-        )
-
-    if best:
-        print()
-        print(f"  ★ Optimal: {best['label']}")
-
-    print()
-
-
 _LABEL_RE = re.compile(r"^(.*?) \(batch=(\d+), thr=(\d+)\)$")
 
 
