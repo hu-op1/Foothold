@@ -152,7 +152,7 @@ def run_pd_sim(args):
     from pd_sim.trace import load_trace
     from pd_sim.engine import SimulationEngine
     from pd_sim.strategy import search
-    from pd_sim.report import print_comparison_table, export_json
+    from pd_sim.report import print_comparison_table, export_xlsx
     from perf_predict.predict import load_model_specs, load_hw_params
 
     # Load model specs first (needed for config defaults)
@@ -198,7 +198,7 @@ def run_pd_sim(args):
 
     # Report
     print_comparison_table(results, cfg)
-    export_json(results, os.path.join("pd_sim", "output", "results.json"))
+    export_xlsx(results, os.path.join("pd_sim", "output", "results.xlsx"))
 
 
 def main():
