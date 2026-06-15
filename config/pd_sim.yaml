@@ -8,7 +8,7 @@ communication:
 
 simulation:
   block_size: 16
-  max_num_seqs: null  # null = auto from KV budget
+  max_num_seqs: 256  # null = auto from KV budget
   kv_cache_memory_gb: null  # null = auto from VRAM - model - activation
   enable_chunked_prefill: true
   scheduling_policy: fcfs

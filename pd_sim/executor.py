@@ -38,12 +38,22 @@ def predict_step(scheduled_requests, model_spec, hw_params):
 
     Args:
         scheduled_requests: list of (request, num_new_tokens).
-            Each request has current num_computed_tokens (pre-step).
+            Each request has current num_computed_tokens (post _update_after_schedule).
         model_spec: dict from model_specs.yaml (hidden_dim, num_heads, etc.)
         hw_params: dict from fitted_params.json
 
     Returns:
         step_time_s: float, seconds for this step's GPU forward pass.
+
+    Roofline param selection:
+      - Projections / LM head are batched matmuls over all tokens together.
+        Their effective bandwidth depends on the total M (batch size), so we
+        select F,B,p from total_new_tokens (M >= 256 → prefill params, else decode).
+      - Attention is per-request (FlashAttention fused kernel).  For prefill
+        requests (large s_q) the fused attention is compute-bound; for decode
+        (s_q = 1) it is memory-bound.  We therefore use prefill params for
+        requests still in the prefill phase and decode params for decode steps.
+      - Elementwise ops use b_effs / overheads which are independent of F,B,p.
     """
     if not scheduled_requests:
         return 0.0
@@ -62,27 +72,44 @@ def predict_step(scheduled_requests, model_spec, hw_params):
     b_effs = hw_params["elem_b_effs"]
     overheads = hw_params["elem_overheads"]
 
-    # Total new tokens this step
+    # Prefill / decode params for per-request attention
+    F_d = hw_params["F_peak_decode"]
+    B_d = hw_params["B_peak_decode"]
+    p_d = hw_params["p_decode"]
+    F_p = hw_params["F_peak_prefill"]
+    B_p = hw_params["B_peak_prefill"]
+    p_p = hw_params["p_prefill"]
+
+    # Total new tokens this step — used for batched projections / LM head
     total_new_tokens = sum(nt for _, nt in scheduled_requests)
     params = _select_roofline_params(total_new_tokens, hw_params)
     F, B, p = params["F"], params["B"], params["p"]
 
-    # ── Projections (per-layer, multiplied by num_layers) ──
+    # ── Projections (batched over all tokens → single F,B,p per step) ──
     proj_time = nl * projections(total_new_tokens, h, inter, F, B, p, nh, nh_kv, hd)
 
     # ── Attention (per-request, per-attention-layer) ──
+    # Prefill requests (is_prefill_chunk=True) have s_q ≫ 1 and are more
+    # compute-heavy; decode requests (s_q=1) are memory-bound.  Use the
+    # appropriate roofline params for each.
     attn_time = 0.0
     for req, num_new in scheduled_requests:
-        kv_len_after = req.num_computed_tokens + num_new
+        # num_computed_tokens was already incremented by _update_after_schedule,
+        # so it already reflects the KV cache length after this step.
+        kv_len_after = req.num_computed_tokens
         if kv_len_after > 0:
-            attn_time += na * attention_fused(1, nh, num_new, kv_len_after, hd, F, B, p)
+            if req.is_prefill_chunk:
+                attn_time += na * attention_fused(1, nh, num_new, kv_len_after, hd, F_p, B_p, p_p)
+            else:
+                attn_time += na * attention_fused(1, nh, num_new, kv_len_after, hd, F_d, B_d, p_d)
 
     # ── Elementwise (per-layer, multiplied by num_layers) ──
+    # b_effs / overheads are independent of the prefill/decode split.
     elem_time = nl * elementwise_ops(
         1, total_new_tokens, h, inter, nh, hd, norm_type, b_effs, overheads
     )
 
-    # ── Output projection (single lm_head, not per-layer) ──
+    # ── Output projection (single lm_head, batched) ──
     lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p)
 
     return proj_time + attn_time + elem_time + lm_head_time

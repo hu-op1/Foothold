@@ -10,7 +10,7 @@ wheels/
 .venv
 
 # Output results
-
+pd_sim/output/
 # Test code
 test/
 

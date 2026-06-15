@@ -109,9 +109,11 @@ class SimulationEngine:
 
         loop_count = 0
         while event_queue or sched.has_requests():
-            # Pop all events at current time
-            if event_queue:
-                self.clock = event_queue[0].time
+            # Only advance clock to next event if the GPU is truly idle.
+            # If there are running/waiting requests, the GPU keeps processing
+            # them without jumping forward in time.
+            if event_queue and not sched.has_requests():
+                self.clock = max(self.clock, event_queue[0].time)
             while event_queue and event_queue[0].time <= self.clock + 1e-9:
                 ev = heapq.heappop(event_queue)
                 if ev.event_type == EventType.ARRIVAL and ev.request:
