@@ -115,18 +115,14 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
     tp = task.get("tp", 1)
 
     if mode == "colocated":
-        metrics = engine.run(list(requests), mode=mode, tp_size=tp)
         dp = task.get("dp", 1)
-        if dp > 1:
-            metrics._scale_throughput(dp)
+        metrics = engine.run(list(requests), mode=mode, tp_size=tp, dp=dp)
     else:
         d_tp = task.get("d_tp", 1)
         dp_d = task.get("dp_d", 1)
         metrics = engine.run(list(requests), mode=mode,
                              pd_ratio=task.get("pd_ratio"),
                              tp_size=tp, d_tp_size=d_tp)
-        if dp_d > 1:
-            metrics._scale_throughput(dp_d)
 
     elapsed = time.perf_counter() - t0
     score = metrics.score(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])

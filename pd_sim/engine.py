@@ -62,7 +62,7 @@ class SimulationEngine:
         return max(1, int(kv_mem_gb * 1024**3) // self.bytes_per_block)
 
     def run(self, requests: list[Request], mode="colocated",
-            chunk_size=None, pd_ratio=None, tp_size=1, d_tp_size=1):
+            chunk_size=None, pd_ratio=None, tp_size=1, d_tp_size=1, dp=1):
         """Run simulation over a list of requests.
 
         Args:
@@ -72,6 +72,7 @@ class SimulationEngine:
             pd_ratio: for disaggregated, (num_prefill, num_decode) GPU counts
             tp_size: tensor parallelism degree on P side (1 = no TP)
             d_tp_size: tensor parallelism degree on D side (1 = no TP on D)
+            dp: data-parallel degree — number of independent ranks
 
         Returns:
             metrics_collector with recorded per-request metrics.
@@ -97,66 +98,101 @@ class SimulationEngine:
         self._max_iterations = max(100_000, total_decode_tokens * 2 + len(requests) * 5)
 
         if mode == "colocated":
-            return self._run_colocated(requests)
+            return self._run_colocated(requests, dp=dp)
         else:
             return self._run_disaggregated(requests, pd_ratio or (1, 1))
 
-    def _run_colocated(self, requests: list[Request]):
-        """Run colocated simulation."""
+    def _run_colocated(self, requests: list[Request], dp: int = 1):
+        """Run colocated simulation.
+
+        When dp > 1, creates dp independent schedulers (each with its own
+        KV cache pool and model weights), routes arrivals to the least-loaded
+        rank, and steps all ranks in parallel.  This matches vLLM's data-
+        parallel architecture where each DP rank is a full EngineCore.
+        """
         from pd_sim.metrics import MetricsCollector
 
-        pool = BlockPool(self.num_blocks, enable_caching=self.enable_cache)
-        pool.bytes_per_block = self.bytes_per_block
-        sched = ColocatedScheduler(pool, self.cfg)
+        # Create dp independent instances
+        pools = [BlockPool(self.num_blocks * self.tp_size,
+                           enable_caching=self.enable_cache) for _ in range(dp)]
+        for p in pools:
+            p.bytes_per_block = self.bytes_per_block
+        scheds = [ColocatedScheduler(pools[i], self.cfg) for i in range(dp)]
+
         metrics = MetricsCollector()
 
         event_queue: list[SimulationEvent] = []
         for r in requests:
             heapq.heappush(event_queue, SimulationEvent(r.arrival_time, EventType.ARRIVAL, r))
 
+        def _pick_rank() -> int:
+            """Least-loaded routing — matches vLLM's DP load balancing."""
+            loads = [len(s.running) + len(s.waiting) for s in scheds]
+            return loads.index(min(loads))
+
+        def _all_idle() -> bool:
+            return all(not s.has_requests() for s in scheds)
+
         loop_count = 0
-        while event_queue or sched.has_requests():
-            # Only advance clock to next event if the GPU is truly idle.
-            # If there are running/waiting requests, the GPU keeps processing
-            # them without jumping forward in time.
-            if event_queue and not sched.has_requests():
+        idle_ticks = 0
+        while event_queue or not _all_idle():
+            # Only advance clock to next event if ALL ranks are truly idle
+            if event_queue and _all_idle():
                 self.clock = max(self.clock, event_queue[0].time)
             while event_queue and event_queue[0].time <= self.clock + 1e-9:
                 ev = heapq.heappop(event_queue)
                 if ev.event_type == EventType.ARRIVAL and ev.request:
-                    sched.add_request(ev.request)
+                    target = _pick_rank()
+                    scheds[target].add_request(ev.request)
 
-            # Schedule and execute one step
-            output = sched.schedule()
-            if output.total_num_scheduled_tokens == 0:
-                if not sched.has_requests():
+            # All ranks schedule independently
+            outputs = [s.schedule() for s in scheds]
+
+            if all(o.total_num_scheduled_tokens == 0 for o in outputs):
+                if _all_idle():
                     break
-                # If there are future arrivals, jump to next arrival; else idle tick
                 if event_queue:
-                    self.clock = event_queue[0].time
+                    idle_ticks = 0
+                    self.clock = max(self.clock, event_queue[0].time)
                 else:
+                    idle_ticks += 1
+                    if idle_ticks > 1000:
+                        raise RuntimeError(
+                            "Colocated DP deadlock: all ranks stalled "
+                            f"(1000 idle ticks). clock={self.clock:.4f}")
                     self.clock += 0.001
                 continue
+            idle_ticks = 0
 
-            sched._update_after_schedule(output)
-            step_time = self._predict_step(
-                [(r, nt) for r, nt, _ in output.scheduled_requests])
-            self.clock += step_time
-            sched.update_from_output(output, self.clock)
+            # Execute all ranks in parallel; wall-clock = max step time
+            max_step = 0.0
+            for i, output in enumerate(outputs):
+                if output.total_num_scheduled_tokens > 0:
+                    scheds[i]._update_after_schedule(output)
+                    t = self._predict_step(
+                        [(r, nt) for r, nt, _ in output.scheduled_requests])
+                    scheds[i].update_from_output(output, self.clock + t)
+                    max_step = max(max_step, t)
 
-            # Record finished requests
-            for r in sched.drain_finished():
-                metrics.record(r)
+            self.clock += max_step
+
+            # Collect finished requests from all ranks
+            for s in scheds:
+                for r in s.drain_finished():
+                    metrics.record(r)
 
             loop_count += 1
             if loop_count > self._max_iterations:
+                loads = [len(s.running) + len(s.waiting) for s in scheds]
                 raise RuntimeError(
                     f"_run_colocated: exceeded {self._max_iterations} iterations. "
-                    f"running={len(sched.running)}, waiting={len(sched.waiting)}, "
-                    f"skipped={len(sched.skipped_waiting)}, clock={self.clock:.6f}"
+                    f"loads={loads}, events={len(event_queue)}, clock={self.clock:.6f}"
                 )
 
-        metrics.cache_hit_rate = pool.cache_hit_rate
+        # Aggregate cache hit rate across all pools
+        total_q = sum(p._cache_queries for p in pools)
+        total_h = sum(p._cache_hits for p in pools)
+        metrics.cache_hit_rate = total_h / total_q if total_q > 0 else 0.0
         return metrics
 
     def _run_disaggregated(self, requests: list[Request], pd_ratio: tuple[int, int]):
