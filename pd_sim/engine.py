@@ -52,6 +52,8 @@ class SimulationEngine:
         self.bw_gb_s = config["communication"]["inter_bw_gb_s"]
         self.latency_us = config["communication"]["inter_latency_us"]
         self.intra_bw_gb_s = config["communication"]["intra_bw_gb_s"]
+        # GPU↔CPU swap bandwidth for D-side preemption (bytes/s)
+        self.cpu_swap_bw = config["communication"].get("cpu_swap_bw_gb_s", 32) * 1e9
 
     def _compute_num_blocks(self):
         kv_mem_gb = self.cfg["simulation"]["kv_cache_memory_gb"]
@@ -100,6 +102,7 @@ class SimulationEngine:
         from pd_sim.metrics import MetricsCollector
 
         pool = BlockPool(self.num_blocks)
+        pool.bytes_per_block = self.bytes_per_block
         sched = ColocatedScheduler(pool, self.cfg)
         metrics = MetricsCollector()
 
@@ -164,6 +167,7 @@ class SimulationEngine:
 
         # P side: pooled GPUs with larger batch budget
         pool_p = BlockPool(self.num_blocks * num_p)
+        pool_p.bytes_per_block = self.bytes_per_block
         p_cfg = _deep_copy_config(self.cfg)
         p_cfg["simulation"]["max_num_batched_tokens"] = (
             self.cfg["simulation"]["max_num_batched_tokens"] * num_p)
@@ -171,10 +175,15 @@ class SimulationEngine:
         p_sched = ColocatedScheduler(pool_p, p_cfg)
 
         # D side: num_d independent instances, each with own pool + scheduler.
-        # D-side never resets num_computed_tokens on preempt — KV cache was
-        # already computed on the P side and transferred.
+        # D-side uses GPU↔CPU swap: when the block pool overflows, running
+        # requests are swapped out to CPU (keeping their computed tokens)
+        # and swapped back in when space frees up — no recomputation.
         d_cfg = _deep_copy_config(self.cfg)
-        d_pools = [BlockPool(self.num_blocks) for _ in range(num_d)]
+        d_pools = [BlockPool(self.num_blocks,
+                             cpu_swap_bw_bytes_per_s=self.cpu_swap_bw)
+                   for _ in range(num_d)]
+        for dp in d_pools:
+            dp.bytes_per_block = self.bytes_per_block
         d_scheds = [ColocatedScheduler(d_pools[i], d_cfg, reset_on_preempt=False)
                     for i in range(num_d)]
 
@@ -209,6 +218,7 @@ class SimulationEngine:
 
         p_time_val: float = 0.0
         loop_count = 0
+        idle_ticks = 0
 
         while (event_queue or stalled_xfers
                or p_sched.has_requests()
@@ -231,13 +241,26 @@ class SimulationEngine:
             d_totals = [o.total_num_scheduled_tokens for o in d_outs]
 
             if p_total == 0 and all(t == 0 for t in d_totals):
+                # No forward progress this step.
                 if event_queue:
+                    idle_ticks = 0
                     self.clock = max(self.clock, event_queue[0].time)
                 elif (not p_sched.has_requests()
                         and not any(s.has_requests() for s in d_scheds)
                         and not stalled_xfers):
                     break
                 else:
+                    idle_ticks += 1
+                    if idle_ticks > 1000:
+                        d_loads = [len(s.running) + len(s.waiting) for s in d_scheds]
+                        raise RuntimeError(
+                            "Disaggregated deadlock: all D instances stalled "
+                            f"(1000 consecutive idle ticks). "
+                            f"d_loads={d_loads}, stalled_xfers={len(stalled_xfers)}, "
+                            f"clock={self.clock:.4f}. "
+                            "Likely cause: max_num_seqs too high for the KV cache "
+                            "block pool — reduce max_num_seqs or increase kv_cache_memory_gb."
+                        )
                     self.clock += 0.001
                 continue
 
@@ -295,9 +318,11 @@ class SimulationEngine:
 
             max_d_time = max(d_times) if d_times else 0.0
             step_time = max(p_time_val, max_d_time)
-            if step_time == 0:
+            total_swap = p_out.swap_time + sum(o.swap_time for o in d_outs)
+            if step_time == 0 and total_swap == 0:
                 step_time = 0.001
-            self.clock += step_time
+            self.clock += step_time + total_swap
+            idle_ticks = 0
 
             loop_count += 1
             if loop_count > self._max_iterations:

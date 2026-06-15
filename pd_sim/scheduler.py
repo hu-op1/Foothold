@@ -57,6 +57,7 @@ class SchedulerOutput:
         self.scheduled_running_reqs: list[tuple[Request, int, list[int]]] = []
         self.preempted_reqs: list[Request] = []
         self.total_num_scheduled_tokens: int = 0
+        self.swap_time: float = 0.0  # GPU↔CPU swap time for this step
 
     @property
     def scheduled_requests(self) -> list[tuple[Request, int, list[int]]]:
@@ -64,7 +65,13 @@ class SchedulerOutput:
 
 
 class ColocatedScheduler:
-    """Scheduler for colocated (P+D on same GPU) or D-only (disaggregated) deployment."""
+    """Scheduler for colocated (P+D on same GPU) or D-only (disaggregated) deployment.
+
+    When *reset_on_preempt* is False and the pool has CPU swap enabled,
+    OOM on running requests triggers swap-out (GPU→CPU) rather than
+    recompute-on-admit.  Swapped-out requests keep their computed tokens
+    and are swapped back in when re-admitted.
+    """
 
     def __init__(self, memory_pool, config, *, reset_on_preempt: bool = True):
         self.pool = memory_pool
@@ -76,6 +83,9 @@ class ColocatedScheduler:
         self.policy = config["simulation"].get("scheduling_policy", SchedulingPolicy.FCFS)
         self.max_model_len = config.get("max_model_len", 131072)
         self.reset_on_preempt = reset_on_preempt
+        # Use swap instead of skip when OOM on D-side
+        self.use_swap = (not reset_on_preempt
+                         and getattr(memory_pool, "cpu_swap_bw", None) is not None)
 
         self.running: list[Request] = []
         self.waiting = RequestQueue()
@@ -123,25 +133,43 @@ class ColocatedScheduler:
 
             new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
             if new_blocks is None:
-                if not self.reset_on_preempt:
-                    # D-side: never preempt — skip this request for this step
+                if self.use_swap:
+                    # D-side with swap: swap out the last running request.
+                    # Its blocks go to CPU memory; num_computed_tokens is preserved
+                    # so it can resume later via swap-in without recomputation.
+                    victim = self.running[-1]
+                    swap_time = self.pool.swap_out(victim, self.block_size)
+                    output.swap_time += swap_time
+                    victim.status = RequestStatus.PREEMPTED
+                    self.running.remove(victim)
+                    self.waiting.prepend(victim)
+                    preempted = True
+                    output.preempted_reqs.append(victim)
+                    if victim == request:
+                        break
+                    new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
+                    if new_blocks is None:
+                        break
+                elif not self.reset_on_preempt:
+                    # D-side without swap: skip this request for this step
                     req_index += 1
                     continue
-                # Preempt
-                if self.policy == SchedulingPolicy.PRIORITY:
-                    victim = max(self.running, key=lambda r: (r.priority, r.arrival_time))
                 else:
-                    victim = self.running[-1]
+                    # Colocated: preempt with recompute
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        victim = max(self.running, key=lambda r: (r.priority, r.arrival_time))
+                    else:
+                        victim = self.running[-1]
 
-                self._preempt(victim)
-                preempted = True
-                output.preempted_reqs.append(victim)
-                if victim == request:
-                    break
-                # Retry after freeing victim's blocks
-                new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
-                if new_blocks is None:
-                    break
+                    self._preempt(victim)
+                    preempted = True
+                    output.preempted_reqs.append(victim)
+                    if victim == request:
+                        break
+                    # Retry after freeing victim's blocks
+                    new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
+                    if new_blocks is None:
+                        break
 
             output.scheduled_running_reqs.append((request, num_new, new_blocks))
             token_budget -= num_new
@@ -164,6 +192,14 @@ class ColocatedScheduler:
                         if queue is self.waiting:
                             self.skipped_waiting.add(request)
                         continue
+
+                    # Swapped-out request: restore blocks from CPU
+                    if self.pool.is_swapped(request.request_id):
+                        t_swap = self.pool.swap_in(request, self.block_size)
+                        if t_swap == float("inf"):
+                            # Not enough free blocks — wait for next step
+                            break
+                        output.swap_time += t_swap
 
                     # Prefix cache hit
                     cached_blocks, num_cached_blocks = self.pool.get_computed_blocks(

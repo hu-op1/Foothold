@@ -5,10 +5,11 @@ communication:
   intra_bw_gb_s: 9.7    # intra-node (NVLink ~900 GB/s, PCIe ~64 GB/s)
   inter_bw_gb_s: 9.7     # inter-node (InfiniBand ~50 GB/s, Ethernet ~12.5 GB/s)
   inter_latency_us: 6.9
+  cpu_swap_bw_gb_s: 9.7   # GPU↔CPU swap bandwidth (PCIe 3.0 x16 ~32 GB/s, PCIe 4.0 ~64 GB/s)
 
 simulation:
   block_size: 16
-  max_num_seqs: 256  # null = auto from KV budget
+  max_num_seqs: 32
   kv_cache_memory_gb: null  # null = auto from VRAM - model - activation
   enable_chunked_prefill: true
   scheduling_policy: fcfs

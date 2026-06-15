@@ -34,13 +34,26 @@ def compute_block_hashes(token_ids: list[int], block_size: int) -> list[bytes]:
 
 
 class BlockPool:
-    """Manages KVCacheBlock allocation with prefix caching via block hash lookup."""
+    """Manages KVCacheBlock allocation with prefix caching via block hash lookup.
 
-    def __init__(self, num_blocks: int, enable_caching: bool = True):
+    Supports GPU↔CPU swap for disaggregated D-side preemption:
+    when the block pool is exhausted, running requests can be swapped out
+    to CPU memory (keeping their computed tokens) and swapped back in
+    later when space frees up, avoiding recomputation.
+    """
+
+    def __init__(self, num_blocks: int, enable_caching: bool = True,
+                 cpu_swap_bw_bytes_per_s: float | None = None):
         if num_blocks <= 0:
             raise ValueError(f"num_blocks must be positive, got {num_blocks}")
         self.num_blocks = num_blocks
         self.enable_caching = enable_caching
+
+        # GPU↔CPU swap bandwidth (bytes/s).  None disables swap.
+        self.cpu_swap_bw = cpu_swap_bw_bytes_per_s
+
+        # Swapped-out requests: request_id → num_blocks
+        self._swapped_out: dict[str, int] = {}
 
         # All blocks. Block 0 is the null block (placeholder).
         self.blocks: list[KVCacheBlock] = [
@@ -211,3 +224,69 @@ class BlockPool:
         """Free all blocks allocated to a request."""
         self.free_blocks([b for b in request.block_table if b >= 0])
         request.block_table.clear()
+
+    # ── GPU ↔ CPU swap ────────────────────────────────────────────────
+
+    def is_swapped(self, request_id: str) -> bool:
+        """Return True if the request's blocks are currently swapped out."""
+        return request_id in self._swapped_out
+
+    def swap_out(self, request: "Request", block_size: int) -> float:
+        """Swap a request's KV cache blocks to CPU.
+
+        Frees physical blocks and records the count for later swap-in.
+        Returns the swap-out time in seconds, or 0 if swap is disabled.
+        """
+        if self.cpu_swap_bw is None:
+            return 0.0
+
+        blocks = [b for b in request.block_table if b >= 0]
+        if not blocks:
+            return 0.0
+
+        total_bytes = len(blocks) * self._block_bytes
+
+        # Save for swap-in
+        self._swapped_out[request.request_id] = len(blocks)
+
+        # Free physical blocks
+        self.free_blocks(blocks)
+        request.block_table.clear()
+
+        return total_bytes / self.cpu_swap_bw
+
+    def swap_in(self, request: "Request", block_size: int) -> float:
+        """Restore a request's KV cache blocks from CPU.
+
+        Allocates fresh blocks; the data transfer is modelled as time only.
+        Returns the swap-in time in seconds, or float('inf') if allocation
+        fails (not enough free blocks).
+        """
+        if self.cpu_swap_bw is None:
+            return 0.0
+
+        num_blocks = self._swapped_out.get(request.request_id)
+        if num_blocks is None:
+            return 0.0
+
+        total_bytes = num_blocks * self._block_bytes
+        swap_time = total_bytes / self.cpu_swap_bw
+
+        # Allocate fresh blocks
+        new_blocks: list[int] = []
+        for _ in range(num_blocks):
+            block = self.get_new_block()
+            if block.is_null:
+                # Rollback
+                self.free_blocks(new_blocks)
+                return float("inf")
+            new_blocks.append(block.block_id)
+
+        del self._swapped_out[request.request_id]
+        request.block_table = new_blocks
+        return swap_time
+
+    @property
+    def _block_bytes(self) -> int:
+        """Bytes per block. Set externally by the engine after construction."""
+        return getattr(self, "bytes_per_block", 8_388_608)  # 8 MiB default
