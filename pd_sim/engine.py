@@ -62,7 +62,7 @@ class SimulationEngine:
         return max(1, int(kv_mem_gb * 1024**3) // self.bytes_per_block)
 
     def run(self, requests: list[Request], mode="colocated",
-            chunk_size=None, pd_ratio=None, tp_size=1):
+            chunk_size=None, pd_ratio=None, tp_size=1, d_tp_size=1):
         """Run simulation over a list of requests.
 
         Args:
@@ -70,12 +70,14 @@ class SimulationEngine:
             mode: "colocated" or "disaggregated"
             chunk_size: for colocated, override chunk size (None = use config)
             pd_ratio: for disaggregated, (num_prefill, num_decode) GPU counts
-            tp_size: tensor parallelism degree (1 = no TP)
+            tp_size: tensor parallelism degree on P side (1 = no TP)
+            d_tp_size: tensor parallelism degree on D side (1 = no TP on D)
 
         Returns:
             metrics_collector with recorded per-request metrics.
         """
         self.tp_size = tp_size
+        self.d_tp_size = d_tp_size
         # Reset request state for fresh simulation run
         for r in requests:
             r.num_computed_tokens = 0
@@ -177,19 +179,24 @@ class SimulationEngine:
         p_cfg["simulation"]["max_num_seqs"] = self.cfg["simulation"]["max_num_seqs"]
         p_sched = ColocatedScheduler(pool_p, p_cfg)
 
-        # D side: num_d independent instances, each with own pool + scheduler.
-        # D-side uses GPU↔CPU swap: when the block pool overflows, running
-        # requests are swapped out to CPU (keeping their computed tokens)
-        # and swapped back in when space frees up — no recomputation.
+        # D side: num_d GPUs grouped into TP groups of size d_tp_size.
+        # Each TP group is one ColocatedScheduler with a pool of
+        # d_tp_size × num_blocks blocks.  num_d_groups = data-parallel degree.
+        d_tp = getattr(self, "d_tp_size", 1)
+        if num_d % d_tp != 0:
+            raise ValueError(
+                f"num_d ({num_d}) must be divisible by d_tp_size ({d_tp})")
+        num_d_groups = num_d // d_tp
+
         d_cfg = _deep_copy_config(self.cfg)
-        d_pools = [BlockPool(self.num_blocks,
+        d_pools = [BlockPool(self.num_blocks * d_tp,
                              enable_caching=self.enable_cache,
                              cpu_swap_bw_bytes_per_s=self.cpu_swap_bw)
-                   for _ in range(num_d)]
+                   for _ in range(num_d_groups)]
         for dp in d_pools:
             dp.bytes_per_block = self.bytes_per_block
         d_scheds = [ColocatedScheduler(d_pools[i], d_cfg, reset_on_preempt=False)
-                    for i in range(num_d)]
+                    for i in range(num_d_groups)]
 
         metrics = MetricsCollector()
 
@@ -288,7 +295,8 @@ class SimulationEngine:
             for i, o in enumerate(d_outs):
                 if o.total_num_scheduled_tokens > 0:
                     dt = self._predict_step(
-                        [(r, nt) for r, nt, _ in o.scheduled_requests])
+                        [(r, nt) for r, nt, _ in o.scheduled_requests],
+                        tp=d_tp)
                     d_scheds[i].update_from_output(o, self.clock + dt)
                     d_times.append(dt)
                 else:
@@ -345,9 +353,15 @@ class SimulationEngine:
         metrics.cache_hit_rate = total_hits / total_queries if total_queries > 0 else 0.0
         return metrics
 
-    def _predict_step(self, scheduled_requests):
-        """Predict step time, using TP if configured."""
-        tp = getattr(self, "tp_size", 1)
+    def _predict_step(self, scheduled_requests, tp=None):
+        """Predict step time, using TP if configured.
+
+        Args:
+            scheduled_requests: list of (request, num_new_tokens)
+            tp: tensor parallelism degree (defaults to self.tp_size)
+        """
+        if tp is None:
+            tp = getattr(self, "tp_size", 1)
         if tp > 1:
             return predict_step_tp(scheduled_requests, self.model, self.hw,
                                    tp, self.intra_bw_gb_s)
