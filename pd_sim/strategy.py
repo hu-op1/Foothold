@@ -138,6 +138,8 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
             "total_input_tokens": metrics.total_input_tokens,
             "total_output_tokens": metrics.total_output_tokens,
             "total_time_s": total_t,
+            "cache_hit_rate": metrics.cache_hit_rate
+            if metrics.cache_hit_rate is not None else 0.0,
         },
         "score": score,
         "elapsed": elapsed,

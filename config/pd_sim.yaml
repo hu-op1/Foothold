@@ -11,6 +11,7 @@ simulation:
   block_size: 16
   max_num_seqs: 32
   kv_cache_memory_gb: null  # null = auto from VRAM - model - activation
+  enable_prefix_caching: true
   enable_chunked_prefill: true
   scheduling_policy: fcfs
 
@@ -24,7 +25,7 @@ strategy:
     tp_sizes: [1, 2, 4]
 
 trace:
-  path: "traces/myllama-2-7b-light.jsonl"
+  path: "traces/myllama-2-7b-heavy.jsonl"
   max_requests: 500
 
 slo:

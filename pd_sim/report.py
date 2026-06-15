@@ -109,6 +109,7 @@ def export_xlsx(results: list[dict], path: str) -> None:
         "total_input_tokens",
         "total_output_tokens",
         "total_time_s",
+        "cache_hit_rate",
         "score",
         "elapsed_s",
     ]
@@ -138,6 +139,7 @@ def export_xlsx(results: list[dict], path: str) -> None:
             m["total_input_tokens"],
             m["total_output_tokens"],
             m["total_time_s"],
+            m.get("cache_hit_rate", 0.0),
             entry["score"],
             entry["elapsed"],
         ]

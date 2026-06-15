@@ -6,6 +6,7 @@ import statistics
 class MetricsCollector:
     def __init__(self):
         self.records: list[dict] = []
+        self.cache_hit_rate: float | None = None  # set by engine after run
 
     def record(self, request) -> None:
         """Record metrics for a finished request."""

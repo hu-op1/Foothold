@@ -55,6 +55,10 @@ class BlockPool:
         # Swapped-out requests: request_id → num_blocks
         self._swapped_out: dict[str, int] = {}
 
+        # Prefix cache statistics
+        self._cache_queries: int = 0
+        self._cache_hits: int = 0
+
         # All blocks. Block 0 is the null block (placeholder).
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_blocks)
@@ -79,6 +83,13 @@ class BlockPool:
         total = self.num_blocks - 1  # exclude null block
         return 1.0 - (self.get_num_free_blocks() / total) if total > 0 else 0.0
 
+    @property
+    def cache_hit_rate(self) -> float:
+        """Prefix cache hit rate (0–1). Returns 0 if caching disabled or no queries."""
+        if self._cache_queries == 0:
+            return 0.0
+        return self._cache_hits / self._cache_queries
+
     # ── prefix cache ───────────────────────────────────────────────────
 
     def get_cached_block(self, block_hash: bytes) -> int | None:
@@ -99,6 +110,9 @@ class BlockPool:
             if block_id is None:
                 break
             cached.append(block_id)
+        if self.enable_caching:
+            self._cache_queries += len(block_hashes)
+            self._cache_hits += len(cached)
         return cached, len(cached)
 
     def _cache_block(self, block: KVCacheBlock) -> None:
@@ -177,7 +191,11 @@ class BlockPool:
                 # Full block — check prefix cache
                 bh = request.block_hashes[bi]
                 cached_id = self.get_cached_block(bh)
+                if self.enable_caching:
+                    self._cache_queries += 1
                 if cached_id is not None:
+                    if self.enable_caching:
+                        self._cache_hits += 1
                     self.touch([cached_id])
                     new_block_ids.append(cached_id)
                     continue

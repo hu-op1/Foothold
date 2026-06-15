@@ -54,6 +54,8 @@ class SimulationEngine:
         self.intra_bw_gb_s = config["communication"]["intra_bw_gb_s"]
         # GPU↔CPU swap bandwidth for D-side preemption (bytes/s)
         self.cpu_swap_bw = config["communication"].get("cpu_swap_bw_gb_s", 32) * 1e9
+        # Prefix caching
+        self.enable_cache = config["simulation"].get("enable_prefix_caching", True)
 
     def _compute_num_blocks(self):
         kv_mem_gb = self.cfg["simulation"]["kv_cache_memory_gb"]
@@ -101,7 +103,7 @@ class SimulationEngine:
         """Run colocated simulation."""
         from pd_sim.metrics import MetricsCollector
 
-        pool = BlockPool(self.num_blocks)
+        pool = BlockPool(self.num_blocks, enable_caching=self.enable_cache)
         pool.bytes_per_block = self.bytes_per_block
         sched = ColocatedScheduler(pool, self.cfg)
         metrics = MetricsCollector()
@@ -152,6 +154,7 @@ class SimulationEngine:
                     f"skipped={len(sched.skipped_waiting)}, clock={self.clock:.6f}"
                 )
 
+        metrics.cache_hit_rate = pool.cache_hit_rate
         return metrics
 
     def _run_disaggregated(self, requests: list[Request], pd_ratio: tuple[int, int]):
@@ -166,7 +169,7 @@ class SimulationEngine:
         num_p, num_d = pd_ratio
 
         # P side: pooled GPUs with larger batch budget
-        pool_p = BlockPool(self.num_blocks * num_p)
+        pool_p = BlockPool(self.num_blocks * num_p, enable_caching=self.enable_cache)
         pool_p.bytes_per_block = self.bytes_per_block
         p_cfg = _deep_copy_config(self.cfg)
         p_cfg["simulation"]["max_num_batched_tokens"] = (
@@ -180,6 +183,7 @@ class SimulationEngine:
         # and swapped back in when space frees up — no recomputation.
         d_cfg = _deep_copy_config(self.cfg)
         d_pools = [BlockPool(self.num_blocks,
+                             enable_caching=self.enable_cache,
                              cpu_swap_bw_bytes_per_s=self.cpu_swap_bw)
                    for _ in range(num_d)]
         for dp in d_pools:
@@ -334,6 +338,11 @@ class SimulationEngine:
                     f"events={len(event_queue)}, clock={self.clock:.6f}"
                 )
 
+        # Aggregate cache hit rate across P + all D pools
+        all_pools = [pool_p] + d_pools
+        total_queries = sum(p._cache_queries for p in all_pools)
+        total_hits = sum(p._cache_hits for p in all_pools)
+        metrics.cache_hit_rate = total_hits / total_queries if total_queries > 0 else 0.0
         return metrics
 
     def _predict_step(self, scheduled_requests):
