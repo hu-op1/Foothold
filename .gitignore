@@ -26,3 +26,5 @@ docs/superpowers
 vllm-0.19.0/
 
 .pytest_cache/
+
+traces\DeepSeek-v4-Pro-Agent
