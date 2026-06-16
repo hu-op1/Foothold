@@ -1,5 +1,5 @@
 gpu: "3090"
-model: "Llama-2-7B"
+model: "Qwen3-8B"
 
 communication:
   intra_bw_gb_s: 9.7    # intra-node (NVLink ~900 GB/s, PCIe ~64 GB/s)

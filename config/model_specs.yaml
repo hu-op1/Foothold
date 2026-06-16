@@ -180,7 +180,7 @@ models:
 
   - name: "Qwen3-8B"
     total_params_b: 8_000_000_000
-    max_model_len: 131072
+    max_model_len: 40960
     hidden_dim: 4096
     intermediate_dim: 12288
     num_heads: 32

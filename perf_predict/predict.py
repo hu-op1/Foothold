@@ -67,7 +67,7 @@ def projections(M, h, inter, F, B, p, nh=None, nh_kv=None, hd=None):
     nh, hd: if nh*hd != h, Q proj outputs nh*hd, K/V output nh_kv*hd, O inputs nh*hd.
     nh_kv defaults to nh (MHA), set for GQA.
     """
-    if nh is None or nh * hd == h:
+    if nh is None or (nh * hd == h and (nh_kv or nh) == nh):
         t = 4 * matmul_time(M, h, h, F, B, p)
     else:
         dim_q = nh * hd
@@ -81,26 +81,39 @@ def projections(M, h, inter, F, B, p, nh=None, nh_kv=None, hd=None):
     return t
 
 
-def attention_fused(b, nh, s_q, s_kv, hd, F, B, p):
+def attention_fused(b, nh, s_q, s_kv, hd, F, B, p, nh_kv=None):
     """FlashAttention: QK^T + softmax + score x V fused in SRAM.
 
     FLOPs unchanged, but intermediate SxS matrix never touches HBM.
     Bytes = Q,K,V reads + O write (no SxS round-trip).
+
+    nh_kv: number of KV heads (defaults to nh for MHA; < nh for GQA).
     """
+    if nh_kv is None:
+        nh_kv = nh
     M_q = b * nh * s_q
-    M_kv = b * nh * s_kv
+    M_kv = b * nh_kv * s_kv
     flops = 4 * M_q * s_kv * hd
-    bytes_moved = 4 * b * nh * max(s_q, s_kv) * hd * DTYPE_BYTES
+    # HBM traffic: Q(read) + K(read) + V(read) + O(write)
+    # Q,O use nh heads; K,V use nh_kv heads
+    bytes_moved = b * hd * DTYPE_BYTES * (nh * s_q + nh_kv * s_kv + nh_kv * s_kv + nh * s_q)
     return roofline_time(flops, bytes_moved, F, B, p)
 
 
-def elementwise_ops(b, s, h, inter, nh, hd, norm_type, b_effs, overheads):
-    """All elementwise ops per layer."""
+def elementwise_ops(b, s, h, inter, nh, hd, norm_type, b_effs, overheads, nh_kv=None):
+    """All elementwise ops per layer.
+
+    nh_kv: number of KV heads (defaults to nh for MHA; < nh for GQA).
+    """
+    if nh_kv is None:
+        nh_kv = nh
     t = 0.0
     N = b * s * h
     t += 2 * elem_time(norm_type, N, b_effs, overheads)
     t += elem_time("swiglu", b * s * inter, b_effs, overheads)
+    # RoPE applied to Q (nh heads) and K (nh_kv heads)
     t += elem_time("rope", b * nh * s * hd, b_effs, overheads)
+    t += elem_time("rope", b * nh_kv * s * hd, b_effs, overheads)
     t += 2 * elem_time("residual_add", N, b_effs, overheads)
     return t
 
@@ -134,9 +147,9 @@ def predict(model, batch, input_len, output_len, hw_params):
     s = input_len
 
     p_proj = projections(M, h, inter, F_p, B_p, p_p, nh, nh_kv, hd)
-    p_elem = elementwise_ops(batch, s, h, inter, nh, hd, norm_type, b_effs, overheads)
+    p_elem = elementwise_ops(batch, s, h, inter, nh, hd, norm_type, b_effs, overheads, nh_kv)
 
-    p_attn = attention_fused(batch, nh, s, s, hd, F_p, B_p, p_p)
+    p_attn = attention_fused(batch, nh, s, s, hd, F_p, B_p, p_p, nh_kv)
 
     p_layer_full = p_proj + p_elem + p_attn
     p_layer_delta = p_proj + p_elem
@@ -154,9 +167,9 @@ def predict(model, batch, input_len, output_len, hw_params):
     s_kv = input_len
 
     d_proj = projections(M, h, inter, F_d, B_d, p_d, nh, nh_kv, hd)
-    d_elem = elementwise_ops(batch, 1, h, inter, nh, hd, norm_type, b_effs, overheads)
+    d_elem = elementwise_ops(batch, 1, h, inter, nh, hd, norm_type, b_effs, overheads, nh_kv)
 
-    d_attn = attention_fused(batch, nh, 1, s_kv, hd, F_d, B_d, p_d)
+    d_attn = attention_fused(batch, nh, 1, s_kv, hd, F_d, B_d, p_d, nh_kv)
 
     d_layer_full = d_proj + d_elem + d_attn
     d_layer_delta = d_proj + d_elem

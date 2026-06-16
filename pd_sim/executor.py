@@ -99,14 +99,14 @@ def predict_step(scheduled_requests, model_spec, hw_params):
         kv_len_after = req.num_computed_tokens
         if kv_len_after > 0:
             if req.is_prefill_chunk:
-                attn_time += na * attention_fused(1, nh, num_new, kv_len_after, hd, F_p, B_p, p_p)
+                attn_time += na * attention_fused(1, nh, num_new, kv_len_after, hd, F_p, B_p, p_p, nh_kv)
             else:
-                attn_time += na * attention_fused(1, nh, num_new, kv_len_after, hd, F_d, B_d, p_d)
+                attn_time += na * attention_fused(1, nh, num_new, kv_len_after, hd, F_d, B_d, p_d, nh_kv)
 
     # ── Elementwise (per-layer, multiplied by num_layers) ──
     # b_effs / overheads are independent of the prefill/decode split.
     elem_time = nl * elementwise_ops(
-        1, total_new_tokens, h, inter, nh, hd, norm_type, b_effs, overheads
+        1, total_new_tokens, h, inter, nh, hd, norm_type, b_effs, overheads, nh_kv
     )
 
     # ── Output projection (single lm_head, batched) ──
