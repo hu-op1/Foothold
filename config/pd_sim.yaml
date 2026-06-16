@@ -25,6 +25,8 @@ strategy:
     tp_sizes: [1, 2, 4]
     decode_tp_sizes: [1, 2, 4]   # D-side TP in disaggregated mode (null = same as tp_sizes)
 
+output: "pd_sim/output/results.xlsx"
+
 trace:
   path: "traces/myllama-2-7b-light.jsonl"
   max_requests: 500

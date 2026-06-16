@@ -197,7 +197,9 @@ def run_pd_sim(args):
     results = search(engine, requests, cfg)
 
     # Export results to xlsx
-    export_xlsx(results, os.path.join("pd_sim", "output", "results.xlsx"))
+    out_path = str(cfg.get("output", "pd_sim/output/results.xlsx"))
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    export_xlsx(results, out_path)
 
 
 def main():
