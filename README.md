@@ -185,6 +185,67 @@ uv run python main.py predict --config <path>    # 指定配置
 - 兼容混合架构：`attn_layers` 控制 full attention 层数，其余层跳过 O(s²) attention
 - 兼容 GQA：K/V 投影矩阵减小，注意力 HBM 读写省带宽，RoPE 分头计算
 
+### Agentic Trace 生成
+
+从真实 coding agent 的会话日志生成 agentic workload trace（JSONL），每行为一个 session，内部包含多轮 chained sub-request。
+
+```bash
+uv run python tools/generate_agent_trace.py \
+    --model Qwen/Qwen3-8B \
+    --sps 0.05 \
+    --seed 42 \
+    --max-sessions 1000 \
+    --output traces/agent_trace.jsonl
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--model` | HF 模型名，用其 tokenizer 生成真实 token ID（**必填**） |
+| `--sps` | 模拟的 session 到达率（sessions/second） |
+| `--seed` | 随机 seed，控制从源数据中选取哪些 session 文件 |
+| `--max-sessions` | 最多取多少个 session（0 = 全部） |
+| `--output` | 输出路径，默认 `traces/agent_trace.jsonl` |
+| `--trace-dir` | 源数据目录，默认 `traces/DeepSeek-v4-Pro-Agent/` |
+
+输出格式：
+
+```json
+{
+  "session_id": 0,
+  "arrival_time_ns": 0,
+  "sub_requests": [
+    {"input_toks": 3208, "output_toks": 11198, "tool_duration_ns": 173000000,
+     "input_tok_ids": [151644, 8948, ...], "output_tok_ids": [785, 1196, ...]},
+    {"input_toks": 14541, "output_toks": 45, "tool_duration_ns": 1408000000,
+     "input_tok_ids": [...], "output_tok_ids": [...]},
+    {"input_toks": 22102, "output_toks": 1437, "tool_duration_ns": 0,
+     "input_tok_ids": [...], "output_tok_ids": [...]}
+  ]
+}
+```
+
+#### 与 ShareGPT 格式的区别
+
+```
+ShareGPT（独立请求）:               Agentic trace（本工具生成）:
+
+req_0: input_toks=1472              session_0:
+req_1: input_toks=1582                sub_0: input_toks= 3208   ← system + user
+req_2: input_toks=1734                sub_1: input_toks=14541   ← + asst_0 + tool_0
+                                      sub_2: input_toks=17151   ← + asst_1 + tool_1
+                                      sub_3: input_toks=22102   ← + asst_2 + tool_2
+```
+
+- **input 逐轮累加**：codiing agent 每轮把前面的对话历史、tool 调用和返回结果全部喂回，输入越来越长
+- **tool_duration_ns**：LLM 调用之间的 tools 执行时延（0~10s 随机），simulator 利用这段时间"等待"而不做实际工具模拟
+- **最后一个 sub-request tool_duration_ns = 0**：session 结束后没有需要等待的工具
+
+#### token ID 生成
+
+- **input**：每轮用 `apply_chat_template(conversation, add_generation_prompt=True)` tokenize **完整对话历史**，产生精确的 chat template token ID（如 Qwen 的 `<|im_start|>` / `<|im_end|>`）
+- **output**：将 assistant 的 thinking、text、tool call 拼接后用 tokenizer encode，产生输出 token ID
+- simulator 可利用递增的 input 序列模拟 prefix caching（前轮 KV cache 直接复用）
+
 ## 4. PD 分离仿真 — `pd_sim/`
 
 事件驱动的 vLLM 推理服务仿真器，支持 colocated（共址）和 disaggregated（P/D 分离 GPU 池）两种部署模式。
