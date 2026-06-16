@@ -3,6 +3,8 @@
 Library module — CLI entry point is main.py.
 """
 
+import sys
+import os
 import yaml
 import json
 from pathlib import Path
@@ -15,9 +17,15 @@ DTYPE_BYTES = 2  # fp16
 
 
 def load_model_specs(path=None):
-    path = path or str(DEFAULT_SPECS)
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    """Load model specs: auto-discover from models/ dir, YAML as fallback.
+
+    Models with a config.json in models/<vendor>/<family>/<model>/ take
+    priority; remaining models are read from model_specs.yaml.
+    """
+    path = Path(path) if path else DEFAULT_SPECS
+    # Delegate to models/ directory discovery with YAML fallback
+    from models import load_model_specs as _disk_load
+    return _disk_load(path)
 
 
 def load_hw_params(path=None):
