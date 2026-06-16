@@ -4,30 +4,34 @@ AI coding agent guidance for this repository. See [CLAUDE.md](CLAUDE.md) for ful
 
 ## Environment
 
-- **Python ≥ 3.14** — many modern features assumed (e.g., `pathlib.Path`, walrus operator, match/case are fine; don't use older compatibility patterns)
-- **Package manager**: `uv` only — never use `pip install` or `python -m pip`
-- **Package index**: Tsinghua mirror (`https://pypi.tuna.tsinghua.edu.cn/simple`). PyTorch wheels from `https://download.pytorch.org/whl/cu128`
-- **GPU required**: All benchmarks need a CUDA-capable NVIDIA GPU with ≥6 GB VRAM. Never try to run benchmarks on a CPU-only machine
+- **Python ≥ 3.14** — modern features (walrus, match/case, `pathlib.Path`) are fine
+- **Package manager**: `uv` only — never `pip install` or `python -m pip`
+- **Package index**: `https://pypi.tuna.tsinghua.edu.cn/simple` (default). PyTorch from `https://download.pytorch.org/whl/cu128`
+- **GPU required**: All operations need a CUDA-capable NVIDIA GPU. Benchmarks need ≥6 GB VRAM.
 
 ## Key conventions
 
-- All modules are library-first — `main.py` is the only CLI entry point
-- Use `pathlib.Path` for all filesystem paths (not `os.path`)
-- Use `torch.cuda.Event` for GPU timing (see `CudaTimer` in `bench/utils.py`)
-- Memory guard: always call `check_memory()` before allocating large tensors to avoid OOM
-- Warmup before timing: `warmup(fn, iters)` before `benchmark(fn, iters)` — both in [bench/utils.py](bench/utils.py)
-- Results are always saved as `.xlsx` via `openpyxl` (not CSV)
+- **`main.py` is the only CLI entry point** — subcommands: `bench`, `fit`, `predict`, `pd-sim`. Legacy `--bench`/`--fit`/`--predict`/`--pd-sim` flags also work
+- Config files by stage: `config/default.yaml` (bench/fit), `config/predict.yaml`, `config/pd_sim.yaml`
+- Results saved as `.xlsx` via `openpyxl` (not CSV)
+- Use `pathlib.Path` for filesystem paths (some legacy uses of `os.path` exist in `main.py` and `bench/`)
+- Use `torch.cuda.Event` for GPU timing — see `CudaTimer`, `warmup()`, `benchmark()` in `bench/utils.py:8`
+- Call `check_memory()` before allocating large tensors to avoid OOM
+- Model specs auto-discovered from `models/<vendor>/<family>/<model>/config.json` (HF format). YAML fallback at `config/model_specs.yaml`
 
-## External repos
+## External repos (standalone — not part of this project, do not modify or import)
 
-`InferSim/`, `LLMServingSim/`, `SimAI/`, `apex_plus/` are standalone reference projects — **not** part of this codebase. Do not modify them and do not expect their imports to work in this project.
-
-## Design docs
-
-- [docs/superpowers/plans/](docs/superpowers/plans/) — implementation plans for past refactors
-- [docs/superpowers/specs/](docs/superpowers/specs/) — detailed design specs for past refactors
-- [docs/simulators_comparison.md](docs/simulators_comparison.md) — comparison of external simulators
+`InferSim/`, `LLMServingSim/`, `SimAI/`, `apex_plus/`, `vllm-0.19.0/`
 
 ## Testing
 
-Test scripts live in `test/` — they are standalone scripts, not a pytest suite. Run them with `uv run python test/<name>.py`. They rely on `results/` data and a CUDA GPU.
+Tests live in `test/` (gitignored — local-only). Run with:
+```bash
+uv run python -m pytest test/                # pytest tests (test_pd_sim.py)
+uv run python test/<script>.py               # standalone scripts (analyze.py, etc.)
+```
+All tests require a CUDA GPU and benchmark/fit result data.
+
+## Design docs
+
+`docs/architecture.md` — comprehensive Chinese-language architecture doc.
