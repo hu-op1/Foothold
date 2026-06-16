@@ -39,7 +39,8 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     # Pre-compute valid TP sizes for this model+GPU
     valid_tps = valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, total_gpus,
                                max_model_len, max_num_seqs,
-                               gpu_memory_utilization=gpu_mem_util)
+                               gpu_memory_utilization=gpu_mem_util,
+                               max_batch_tokens=max(max_tokens_list))
     tp_sizes = [t for t in tp_sizes if t in valid_tps]
     d_tp_sizes = [t for t in d_tp_sizes if t in valid_tps]
     if not tp_sizes:
