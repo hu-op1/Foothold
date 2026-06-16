@@ -49,6 +49,12 @@ class Request:
     kv_transfer_start: float | None = None
     kv_transfer_end: float | None = None
 
+    # Agentic trace: session chaining
+    session_id: str | None = None
+    sub_request_index: int = 0
+    next_sub_request: 'Request | None' = None
+    tool_duration: float = 0.0  # seconds, pause after this sub_request completes
+
     @property
     def num_tokens(self) -> int:
         """Total tokens for this request (prompt + generated output)."""

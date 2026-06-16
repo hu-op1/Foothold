@@ -185,8 +185,9 @@ def run_pd_sim(args):
     # Load trace
     trace_path = cfg["trace"]["path"]
     max_reqs = cfg["trace"].get("max_requests")
-    requests = load_trace(trace_path, max_requests=max_reqs)
-    print(f"Loaded {len(requests)} requests from {trace_path}")
+    trace_format = cfg["trace"].get("format", "sharegpt")
+    requests = load_trace(trace_path, max_requests=max_reqs, format=trace_format)
+    print(f"Loaded {len(requests)} requests from {trace_path} (format={trace_format})")
 
     # Run strategy search
     mode = cfg["strategy"]["mode"]

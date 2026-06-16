@@ -123,7 +123,10 @@ class SimulationEngine:
 
         event_queue: list[SimulationEvent] = []
         for r in requests:
-            heapq.heappush(event_queue, SimulationEvent(r.arrival_time, EventType.ARRIVAL, r))
+            # Only enqueue first sub_request of each session (or standalone ShareGPT).
+            # Chained sub_requests arrive when their predecessor finishes.
+            if r.sub_request_index == 0:
+                heapq.heappush(event_queue, SimulationEvent(r.arrival_time, EventType.ARRIVAL, r))
 
         def _pick_rank() -> int:
             """Least-loaded routing — matches vLLM's DP load balancing."""
@@ -180,6 +183,12 @@ class SimulationEngine:
             for s in scheds:
                 for r in s.drain_finished():
                     metrics.record(r)
+                    # Agentic trace chaining: enqueue next sub_request after tool pause
+                    if r.next_sub_request is not None:
+                        next_req = r.next_sub_request
+                        next_req.arrival_time = self.clock + r.tool_duration
+                        heapq.heappush(event_queue, SimulationEvent(
+                            next_req.arrival_time, EventType.ARRIVAL, next_req))
 
             loop_count += 1
             if loop_count > self._max_iterations:
@@ -241,7 +250,8 @@ class SimulationEngine:
 
         event_queue: list[SimulationEvent] = []
         for r in requests:
-            heapq.heappush(event_queue, SimulationEvent(r.arrival_time, EventType.ARRIVAL, r))
+            if r.sub_request_index == 0:
+                heapq.heappush(event_queue, SimulationEvent(r.arrival_time, EventType.ARRIVAL, r))
 
         def _pick_d_instance() -> int:
             loads = [len(s.running) + len(s.waiting) for s in d_scheds]
@@ -344,6 +354,12 @@ class SimulationEngine:
                 for r in s.drain_finished():
                     metrics.record(r)
                     d_had_finished = True
+                    # Agentic trace chaining: enqueue next sub_request after tool pause
+                    if r.next_sub_request is not None:
+                        next_req = r.next_sub_request
+                        next_req.arrival_time = self.clock + r.tool_duration
+                        heapq.heappush(event_queue, SimulationEvent(
+                            next_req.arrival_time, EventType.ARRIVAL, next_req))
 
             # Only retry stalled transfers if D-side freed blocks.
             # Each D completion frees blocks for at most 1-2 transfers.

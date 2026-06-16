@@ -30,8 +30,9 @@ strategy:
 output: "pd_sim/output/results.xlsx"
 
 trace:
-  path: "traces/myllama-2-7b-light.jsonl"
+  path: "traces/agent_trace_test.jsonl"
   max_requests: 500
+  format: "agentic"  # "sharegpt" or "agentic"
 
 slo:
   ttft_ms: 500
