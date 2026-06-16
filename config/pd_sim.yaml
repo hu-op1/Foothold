@@ -11,6 +11,7 @@ simulation:
   block_size: 16
   max_num_seqs: 32
   kv_cache_memory_gb: null  # null = auto from VRAM - model - activation
+  gpu_memory_utilization: 0.85  # fraction of total VRAM usable for weights + KV cache
   enable_prefix_caching: true
   enable_chunked_prefill: true
   scheduling_policy: fcfs

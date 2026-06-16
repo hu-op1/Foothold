@@ -25,6 +25,7 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     model_spec = engine.model
     gpu_name = cfg.get("gpu", "3090")
     kv_cache_gb = cfg["simulation"]["kv_cache_memory_gb"]
+    gpu_mem_util = cfg["simulation"].get("gpu_memory_utilization", 0.85)
     max_model_len = model_spec.get("max_model_len", 8192)
     max_num_seqs = cfg["simulation"].get("max_num_seqs", 256)
 
@@ -37,7 +38,8 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
 
     # Pre-compute valid TP sizes for this model+GPU
     valid_tps = valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, total_gpus,
-                               max_model_len, max_num_seqs)
+                               max_model_len, max_num_seqs,
+                               gpu_memory_utilization=gpu_mem_util)
     tp_sizes = [t for t in tp_sizes if t in valid_tps]
     d_tp_sizes = [t for t in d_tp_sizes if t in valid_tps]
     if not tp_sizes:

@@ -21,13 +21,14 @@ def load_config(path=None, model_spec=None):
     # max_num_seqs is a user-configured scheduling parameter.
     # It must be set explicitly in pd_sim.yaml; no auto-estimation.
 
+    mem_util = sim.get("gpu_memory_utilization", 0.85)
     if sim.get("kv_cache_memory_gb") is None:
         if model_spec:
             weight_gb = model_weight_gb(model_spec)
-            sim["kv_cache_memory_gb"] = max(1, int(total_vram_gb(cfg.get("gpu", "3090"))
-                                                    - weight_gb - 2))
+            eff_vram = total_vram_gb(cfg.get("gpu", "3090")) * mem_util
+            sim["kv_cache_memory_gb"] = max(1, int(eff_vram - weight_gb - 2))
         else:
-            sim["kv_cache_memory_gb"] = _default_vram(cfg.get("gpu", "3090"))
+            sim["kv_cache_memory_gb"] = _default_vram(cfg.get("gpu", "3090")) * mem_util
 
     strat = cfg.setdefault("strategy", {})
     strat.setdefault("mode", "auto")
@@ -86,20 +87,21 @@ def kv_cache_per_token_bytes(model_spec):
 
 
 def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
-                   max_model_len=8192, max_num_seqs=256):
+                   max_model_len=8192, max_num_seqs=256,
+                   gpu_memory_utilization=0.85):
     """Return list of TP sizes that fit in GPU memory.
 
     Constraints:
     1. num_heads % tp == 0 (attention head divisibility)
     2. num_kv_heads % tp == 0 (KV head divisibility for GQA)
-    3. model_weight/tp + activation_overhead < VRAM (weights must fit)
-    4. KV cache at expected context must fit in remaining VRAM.
+    3. model_weight/tp + activation_overhead < usable VRAM (weights must fit)
+    4. KV cache at expected context must fit in remaining usable VRAM.
        Uses estimated average seq length (not max_model_len) since the
        block pool (PagedAttention) handles dynamic allocation at runtime.
 
     Returns sorted list of valid TP sizes.
     """
-    vram = total_vram_gb(gpu_name)
+    usable_vram = total_vram_gb(gpu_name) * gpu_memory_utilization
     weight_gb = model_weight_gb(model_spec)
     kv_per_tok = kv_cache_per_token_bytes(model_spec)
     nh_kv = model_spec.get("num_kv_heads", model_spec["num_heads"])
@@ -115,11 +117,11 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
             continue
 
         weight_per_gpu = weight_gb / tp
-        if weight_per_gpu + activation_gb >= vram:
+        if weight_per_gpu + activation_gb >= usable_vram:
             continue
 
         # Must fit at least 1 request at full context
-        kv_budget_per_gpu = vram - weight_per_gpu - activation_gb
+        kv_budget_per_gpu = usable_vram - weight_per_gpu - activation_gb
         kv_per_seq_per_gpu_gb = (kv_per_tok * max_model_len) / 1e9 / tp
         if kv_per_seq_per_gpu_gb <= kv_budget_per_gpu:
             valid.append(tp)
@@ -127,9 +129,10 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
     return valid if valid else [1]
 
 
-def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256):
+def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256,
+                  gpu_memory_utilization=0.85):
     """Print a memory breakdown for a given config."""
-    vram = total_vram_gb(gpu_name)
+    usable_vram = total_vram_gb(gpu_name) * gpu_memory_utilization
     weight_gb = model_weight_gb(model_spec)
     kv_per_tok = kv_cache_per_token_bytes(model_spec)
     activation_gb = 2.0
@@ -138,15 +141,15 @@ def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256
     kv_seq_gb = (kv_per_tok * max_model_len) / 1e9 / tp  # per-GPU for one seq
     kv_total_gb = kv_seq_gb * max_num_seqs
     used = w_gpu + kv_total_gb + activation_gb
-    free = vram - used
+    free = usable_vram - used
 
     return {
-        "vram": vram,
+        "vram": usable_vram,
         "weight_per_gpu": w_gpu,
         "kv_per_seq": kv_seq_gb,
         "kv_total": kv_total_gb,
         "activation": activation_gb,
         "used": used,
         "free": free,
-        "fits": used < vram,
+        "fits": used < usable_vram,
     }
