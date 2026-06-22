@@ -14,7 +14,15 @@ from perf_predict.predict import (
     DTYPE_BYTES,
 )
 
-M_SPLIT = 256  # matches fit/matmul.py M_SPLIT
+# Threshold for selecting prefill vs decode roofline params.
+# Originally 256 (matching fit/matmul.py M_SPLIT), but using 256 causes
+# most simulation steps to use decode params (B_peak=786 GB/s instead of
+# 4122 GB/s), making batched matmuls 5.2x slower and inflating TTFT from
+# ~50ms to 5+ seconds due to queue buildup.
+# 32 is chosen because for M >= 32 on RTX 3090, the batched matmul
+# [M, 4096] x [4096, 4096] has arithmetic intensity >= 31.8 FLOP/byte,
+# close to the GPU ridge point (38 FLOP/byte), so prefill params apply.
+M_SPLIT = 32
 
 
 def _select_roofline_params(M_total, hw):
