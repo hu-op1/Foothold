@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import yaml
+from transformers import AutoConfig
 
 HERE = Path(__file__).parent.resolve()
 DEFAULT_CONFIG = HERE.parent / "config" / "search.yaml"
@@ -204,3 +205,181 @@ def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256
         "free": free,
         "fits": used < usable_vram,
     }
+
+
+# ── Model spec loading via transformers ───────────────────────────────
+
+def _first_of(obj, names: list[str]):
+    """Return the first attribute of *obj* that exists and is not None."""
+    for name in names:
+        val = getattr(obj, name, None)
+        if val is not None:
+            return val
+    return None
+
+
+def load_model_spec(model_name: str) -> dict | None:
+    """Load a model spec dict from HuggingFace Hub via AutoConfig.
+
+    Handles common naming variations across model families:
+
+    ==================== =================================================
+    Field                Fallback chain
+    ==================== =================================================
+    hidden_size          cfg.hidden_size (standard across all HF models)
+    num_attention_heads  cfg.num_attention_heads
+    num_key_value_heads  cfg.num_key_value_heads → num_attention_heads
+    head_dim             cfg.head_dim → hidden_size // num_attention_heads
+    num_hidden_layers    cfg.num_hidden_layers (also checks n_layer)
+    intermediate_size    cfg.intermediate_size → hidden_size × 4
+    vocab_size           cfg.vocab_size
+    max_position_emb     cfg.max_position_embeddings → max_sequence_length
+                         → n_positions → 4096
+    norm_type            rms_norm_eps present → "rmsnorm", else "layernorm"
+    layer_types          cfg.layer_types (Qwen3.5 hybrid only)
+    text_config          Unwrapped for multimodal models (Qwen3.5, etc.)
+    ==================== =================================================
+
+    Args:
+        model_name: Full HF model ID (e.g. 'Qwen/Qwen3-8B',
+                    'meta-llama/Llama-2-7b-hf').
+
+    Returns:
+        model_spec dict, or None if config can't be loaded.
+    """
+    try:
+        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    except Exception as e:
+        print(f"ERROR loading config for '{model_name}': {e}")
+        return None
+
+    # Unwrap nested text_config (Qwen3.5 multimodal, etc.)
+    text_cfg = config
+    if hasattr(config, "text_config") and config.text_config is not None:
+        text_cfg = config.text_config
+
+    # ── Resolve each field with explicit fallback chains ──
+    # Missing fields are collected; if any remain unresolved after exhausting
+    # all known aliases, the function fails rather than using a guess.
+    missing = []  # list of (field_label, tried_chain)
+
+    # hidden_size — standard across all HF decoder models
+    h = _first_of(text_cfg, ["hidden_size", "d_model", "n_embd"])
+    if h is None:
+        missing.append(("hidden_size", "hidden_size / d_model / n_embd"))
+
+    # num_attention_heads
+    nh = _first_of(text_cfg, ["num_attention_heads", "n_head"])
+    if nh is None:
+        missing.append(("num_attention_heads", "num_attention_heads / n_head"))
+        nh = 1  # dummy to allow head_dim derivation below
+
+    # num_key_value_heads — defaults to num_attention_heads (no GQA, always correct)
+    nh_kv = _first_of(text_cfg, ["num_key_value_heads", "n_kv_head"])
+    if nh_kv is None:
+        nh_kv = nh
+
+    # num_hidden_layers
+    nl = _first_of(text_cfg, ["num_hidden_layers", "n_layer"])
+    if nl is None:
+        missing.append(("num_hidden_layers", "num_hidden_layers / n_layer"))
+
+    # head_dim — derived when not explicit (always possible if h and nh are known)
+    hd = _first_of(text_cfg, ["head_dim"])
+    if hd is None and h is not None and nh is not None:
+        hd = h // nh
+
+    # intermediate_size
+    inter = _first_of(text_cfg, ["intermediate_size", "ffn_dim"])
+    if inter is None:
+        missing.append(("intermediate_size", "intermediate_size / ffn_dim"))
+
+    # vocab_size
+    vocab = _first_of(text_cfg, ["vocab_size", "padded_vocab_size"])
+    if vocab is None:
+        missing.append(("vocab_size", "vocab_size / padded_vocab_size"))
+
+    # max_position_embeddings
+    max_len = _first_of(text_cfg, [
+        "max_position_embeddings", "max_sequence_length",
+        "n_positions", "max_seq_len",
+    ])
+    if max_len is None:
+        missing.append(("max_position_embeddings",
+                        "max_position_embeddings / max_sequence_length / n_positions / max_seq_len"))
+
+    # norm_type — safe to default to layernorm (doesn't affect FLOPs, only which
+    # elementwise op name is selected; most modern models use rmsnorm anyway)
+    norm_type = "layernorm"
+    if getattr(text_cfg, "rms_norm_eps", None) is not None:
+        norm_type = "rmsnorm"
+    elif getattr(text_cfg, "norm_type", "").lower() == "rms_norm":
+        norm_type = "rmsnorm"
+
+    # tie_word_embeddings — safe to default to False
+    tied = getattr(text_cfg, "tie_word_embeddings", False)
+
+    # ── Fail if any required field could not be resolved ──
+    if missing:
+        print(f"ERROR: cannot determine architecture for '{model_name}':")
+        for field_label, tried in missing:
+            print(f"  - {field_label}: tried {tried} — none found on config object")
+        print(f"  Config class: {type(config).__name__}")
+        print(f"  Available attributes: {sorted(k for k in dir(text_cfg) if not k.startswith('_'))}")
+        return None
+
+    spec: dict = {
+        "name": model_name,
+        "hidden_dim": h,
+        "num_heads": nh,
+        "head_dim": hd,
+        "num_layers": nl,
+        "vocab_size": vocab,
+        "intermediate_dim": inter,
+        "max_model_len": max_len,
+        "total_params_b": _compute_params_from_attrs(
+            h=h, inter=inter, nl=nl, nh=nh, nkv=nh_kv, hd=hd, vocab=vocab, tied=tied
+        ),
+        "norm_type": norm_type,
+    }
+
+    if nh_kv < nh:
+        spec["num_kv_heads"] = nh_kv
+
+    # Hybrid architectures (Qwen3.5 DeltaNet)
+    layer_types = getattr(text_cfg, "layer_types", None)
+    if layer_types:
+        attn = sum(1 for t in layer_types if t == "full_attention")
+        if attn < nl:
+            spec["attn_layers"] = attn
+
+    return spec
+
+
+def _compute_params_from_attrs(*, h, inter, nl, nh, nkv, hd, vocab, tied):
+    """Compute total parameter count (fp16) from architecture dimensions.
+
+    Uses the standard Llama/Qwen decoder-only formula.
+    For hybrid architectures (Qwen3.5 DeltaNet) this is approximate.
+    """
+    # Per-layer weights (no biases):
+    #   Q proj: h × (nh × hd)
+    #   K proj: h × (nkv × hd)
+    #   V proj: h × (nkv × hd)
+    #   O proj: (nh × hd) × h
+    #   Gate:   h × inter
+    #   Up:     h × inter
+    #   Down:   inter × h
+    #   2× RMSNorm: 2 × h
+    per_layer = (
+        2 * h * nh * hd
+        + 2 * h * nkv * hd
+        + 3 * h * inter
+        + 2 * h
+    )
+
+    embed = vocab * h
+    lm_head = 0 if tied else vocab * h
+    final_norm = h
+
+    return embed + nl * per_layer + lm_head + final_norm

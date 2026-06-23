@@ -113,23 +113,18 @@ def run_search(args):
     from sim.engine import SimulationEngine
     from sim.strategy import search
     from sim.report import export_xlsx
-    from models import load_model_specs
-
-    specs = load_model_specs()
-    models = specs.get("models", [])
+    from sim.config import load_model_spec
 
     cfg = load_pd_config(args.config)
     gpu = cfg.get("gpu", "unknown")
 
     model_sel = cfg.get("model")
     if not model_sel:
-        print("Config is missing `model` field. Available models:")
-        for m in models:
-            print(f"  {m['name']}")
+        print("Config is missing `model` field.")
         return
-    model = next((m for m in models if m["name"] == model_sel), None)
+    model = load_model_spec(model_sel)
     if not model:
-        print(f"Model '{model_sel}' not found in model_specs.yaml")
+        print(f"Model '{model_sel}' could not be loaded via AutoConfig")
         return
 
     # Re-load config with model-aware KV cache default
@@ -166,23 +161,18 @@ def run_sim(args):
     from sim.config import load_config as load_pd_config
     from sim.trace import load_trace
     from sim.run_single import run_single
-    from models import load_model_specs
-
-    specs = load_model_specs()
-    models = specs.get("models", [])
+    from sim.config import load_model_spec
 
     cfg = load_pd_config(args.config)
     gpu = cfg.get("gpu", "unknown")
 
     model_sel = cfg.get("model")
     if not model_sel:
-        print("Config is missing `model` field. Available models:")
-        for m in models:
-            print(f"  {m['name']}")
+        print("Config is missing `model` field.")
         return
-    model = next((m for m in models if m["name"] == model_sel), None)
+    model = load_model_spec(model_sel)
     if not model:
-        print(f"Model '{model_sel}' not found in model_specs.yaml")
+        print(f"Model '{model_sel}' could not be loaded via AutoConfig")
         return
 
     cfg = load_pd_config(args.config, model_spec=model)

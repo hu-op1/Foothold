@@ -2,7 +2,7 @@
 # Structure mirrors search.yaml but with scalar strategy values (no grid search).
 
 gpu: "3090"
-model: "Llama-2-7b-hf"
+model: "Qwen/Qwen3-4B"
 
 communication:
   intra_bw_gb_s: 9.7

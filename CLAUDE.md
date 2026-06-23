@@ -7,17 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 LLM inference performance toolchain: **GPU characterization → Roofline fitting → Throughput prediction → PD disaggregation simulation**.
 
 ```
-models/<vendor>/<family>/<model>/config.json    ──→  model_spec dict (auto-discovered)
-                                                          │
-                              ┌───────────────────────────┴──────────────┐
-                              ▼                                           ▼
-config/default.yaml  →  bench/   →  bench/results/<gpu>/*.xlsx    perf_predict/predict.py
-                              │                           │              │
-                              ▼                           │              │
-config/default.yaml  →  fit/  →  fit/results/<gpu>.json   │              │
-                                    (F_peak, B_peak, p)    │              │
-                                         │                 │              │
-                                         └──────┬──────────┴──────────────┘
+config/default.yaml  →  bench/   →  bench/results/<gpu>/*.xlsx
+                                │                           │
+                                ▼                           │
+config/default.yaml  →  fit/  →  fit/results/<gpu>.json     │
+                                    (F_peak, B_peak, p)     │
+                                         │                  │
+                                         └──────┬───────────┘
                                                 ▼
                                     hw_params dict
                                           │
@@ -57,12 +53,12 @@ uv run python -m pytest test/test_sim.py -v       # PD sim tests verbose
 
 ## Architecture
 
-### `models/` — Model spec discovery (auto-discovered from HF configs)
+### Model spec loading
 
-Auto-discovers `config.json` files from `models/<vendor>/<family>/<model>/` using HuggingFace format.
+Model architecture specs are loaded from HuggingFace Hub via `transformers.AutoConfig.from_pretrained()`. No local `config.json` files needed — any model on HuggingFace Hub can be used by specifying its full HF model ID (e.g. `Qwen/Qwen3-8B`, `meta-llama/Llama-2-7b-hf`) in config YAML files.
 
-- `models/__init__.py` — `model_spec_from_config()` maps HF fields (`hidden_size`, `num_attention_heads`, etc.) to model_spec dict. `load_model_specs()` returns `{"models": [...]}` (YAML file at `config/model_specs.yaml` is a fallback for models without a `config.json` on disk).
-- Key handling: GQA (`num_key_value_heads < num_attention_heads` → `num_kv_heads`), Qwen3.5 nested `text_config`, `layer_types` → `attn_layers` for hybrid architectures, `_compute_params()` for exact parameter count from architecture dimensions.
+- `sim/config.py` — `load_model_spec(model_name)` calls `AutoConfig`, maps fields (`hidden_size` → `hidden_dim`, `num_attention_heads` → `num_heads`, etc.) to the internal model_spec dict format. `_compute_params()` derives `total_params_b` from architecture dimensions.
+- Key handling: GQA (`num_key_value_heads < num_attention_heads` → `num_kv_heads`), Qwen3.5 nested `text_config`, `layer_types` → `attn_layers` for hybrid architectures.
 - See [docs/architecture.md](docs/architecture.md) §1 for complete field mapping.
 
 ### Stage 1: `bench/` — GPU kernel microbenchmarks
@@ -124,7 +120,7 @@ CLI with subcommands: `bench`, `fit`, `search`, `sim`. Also supports legacy `--b
 - **FlashAttention model**: `attention_fused()` skips HBM round-trip for S×S score matrix — only reads Q,K,V and writes O.
 - **GQA support**: when `num_kv_heads < num_heads`, projections use different output dims for K/V vs Q/O, attention HBM traffic uses nh_kv for K/V, and RoPE separately applies to Q and K.
 - **Hybrid architectures**: `attn_layers` field lets models like Qwen3.5 mix full attention layers with DeltaNet (no O(s²) attention).
-- **config.json as single source of truth**: model specs auto-discovered from HuggingFace configs in `models/` directory. Parameter counts computed from architecture formula, not hand-maintained. YAML fallback for models without a local `config.json`.
+- **Model specs from HuggingFace Hub**: `sim/config.py:load_model_spec()` uses `AutoConfig.from_pretrained()` to load architecture configs directly from HuggingFace Hub. Parameter counts computed from architecture formula, not hand-maintained. Any HF model ID can be used in config YAMLs.
 - **Activation memory from model architecture**: computed as `batch_tokens × (2h + 3·inter) × 2 + 0.5 GB` instead of hardcoded 2 GB.
 - **DP with independent schedulers**: each DP rank has its own scheduler + block pool + model weights, least-loaded routing, parallel step — matches vLLM DP architecture.
 - **D-side swap over recompute**: disaggregated decode GPUs swap victim to CPU when OOM (preserves `num_computed_tokens`), avoiding full recompute of long contexts.
@@ -139,7 +135,7 @@ CLI with subcommands: `bench`, `fit`, `search`, `sim`. Also supports legacy `--b
 
 - Python ≥ 3.14
 - PyTorch ≥ 2.11.0 with CUDA 12.8 (installed via `https://download.pytorch.org/whl/cu128`)
-- numpy, scipy, pyyaml, openpyxl, tqdm, pytest
+- numpy, scipy, pyyaml, openpyxl, tqdm, pytest, datasets, teich
 - Package index: tsinghua mirror (`https://pypi.tuna.tsinghua.edu.cn/simple`)
 
 ## External repos (git submodules / cloned)
