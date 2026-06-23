@@ -62,7 +62,8 @@ class SimulationEngine:
         return max(1, int(kv_mem_gb * 1024**3) // self.bytes_per_block)
 
     def run(self, requests: list[Request], mode="colocated",
-            chunk_size=None, pd_ratio=None, tp_size=1, d_tp_size=1, dp=1):
+            chunk_size=None, pd_ratio=None, tp_size=1, d_tp_size=1, dp=1,
+            recorder=None):
         """Run simulation over a list of requests.
 
         Args:
@@ -73,6 +74,7 @@ class SimulationEngine:
             tp_size: tensor parallelism degree on P side (1 = no TP)
             d_tp_size: tensor parallelism degree on D side (1 = no TP on D)
             dp: data-parallel degree — number of independent ranks
+            recorder: optional SimRecorder for per-tick + per-request output
 
         Returns:
             metrics_collector with recorded per-request metrics.
@@ -92,17 +94,20 @@ class SimulationEngine:
             r.block_table.clear()
             r.kv_transfer_start = None
             r.kv_transfer_end = None
+            r.scheduled_ts = None
 
         # Safety iteration limit scales with workload (worst case: 1 token/step)
         total_decode_tokens = sum(r.max_output_len for r in requests)
         self._max_iterations = max(100_000, total_decode_tokens * 2 + len(requests) * 5)
 
         if mode == "colocated":
-            return self._run_colocated(requests, dp=dp)
+            return self._run_colocated(requests, dp=dp, recorder=recorder)
         else:
-            return self._run_disaggregated(requests, pd_ratio or (1, 1))
+            return self._run_disaggregated(requests, pd_ratio or (1, 1),
+                                           recorder=recorder)
 
-    def _run_colocated(self, requests: list[Request], dp: int = 1):
+    def _run_colocated(self, requests: list[Request], dp: int = 1,
+                        recorder=None):
         """Run colocated simulation.
 
         When dp > 1, creates dp independent schedulers (each with its own
@@ -169,6 +174,8 @@ class SimulationEngine:
 
             # Execute all ranks in parallel; wall-clock = max step time
             max_step = 0.0
+            step_prompt: int = 0
+            step_gen: int = 0
             for i, output in enumerate(outputs):
                 if output.total_num_scheduled_tokens > 0:
                     scheds[i]._update_after_schedule(output)
@@ -176,13 +183,30 @@ class SimulationEngine:
                         [(r, nt) for r, nt, _ in output.scheduled_requests])
                     scheds[i].update_from_output(output, self.clock + t)
                     max_step = max(max_step, t)
+                    # Count prefill vs decode tokens for this step
+                    for req, num_new, _ in output.scheduled_requests:
+                        pre_step = req.num_computed_tokens - num_new
+                        prompt_rem = max(0, req.num_prompt_tokens - pre_step)
+                        dec = num_new - min(num_new, prompt_rem)
+                        step_prompt += (num_new - dec)
+                        step_gen += dec
 
             self.clock += max_step
+
+            # Record per-tick timeseries
+            if recorder:
+                running = sum(len(s.running) for s in scheds)
+                waiting = sum(len(s.waiting) for s in scheds)
+                usage = (sum(p.get_usage() for p in pools) / max(1, len(pools))) * 100.0
+                recorder.record_tick(self.clock, running, waiting,
+                                     step_prompt, step_gen, usage)
 
             # Collect finished requests from all ranks
             for s in scheds:
                 for r in s.drain_finished():
                     metrics.record(r)
+                    if recorder:
+                        recorder.record_request(r)
                     # Agentic trace chaining: enqueue next sub_request after tool pause
                     if r.next_sub_request is not None:
                         next_req = r.next_sub_request
@@ -204,7 +228,8 @@ class SimulationEngine:
         metrics.cache_hit_rate = total_h / total_q if total_q > 0 else 0.0
         return metrics
 
-    def _run_disaggregated(self, requests: list[Request], pd_ratio: tuple[int, int]):
+    def _run_disaggregated(self, requests: list[Request], pd_ratio: tuple[int, int],
+                            recorder=None):
         """Run disaggregated simulation with multiple independent D instances.
 
         Requests are routed to the least-loaded D instance and admitted directly
@@ -336,6 +361,13 @@ class SimulationEngine:
             p_time_val = self._predict_step(
                 [(r, nt) for r, nt, _ in p_out.scheduled_requests]
             ) if p_total > 0 else 0.0
+            # P-side update: sets scheduled_ts for newly admitted requests
+            if p_total > 0:
+                p_sched.update_from_output(p_out, self.clock + p_time_val)
+
+            # Count P-side tokens (all prefill)
+            step_prompt = sum(nt for _, nt, _ in p_out.scheduled_requests)
+            step_gen = 0
 
             d_times: list[float] = []
             for i, o in enumerate(d_outs):
@@ -345,6 +377,8 @@ class SimulationEngine:
                         tp=d_tp)
                     d_scheds[i].update_from_output(o, self.clock + dt)
                     d_times.append(dt)
+                    # D-side tokens are decode (gen)
+                    step_gen += sum(nt for _, nt, _ in o.scheduled_requests)
                 else:
                     d_times.append(0.0)
 
@@ -353,6 +387,8 @@ class SimulationEngine:
             for s in d_scheds:
                 for r in s.drain_finished():
                     metrics.record(r)
+                    if recorder:
+                        recorder.record_request(r)
                     d_had_finished = True
                     # Agentic trace chaining: enqueue next sub_request after tool pause
                     if r.next_sub_request is not None:
@@ -386,6 +422,19 @@ class SimulationEngine:
             if step_time == 0 and total_swap == 0:
                 step_time = 0.001
             self.clock += step_time + total_swap
+
+            # Record per-tick timeseries
+            if recorder:
+                all_pools = [pool_p] + d_pools
+                running = (len(p_sched.running)
+                           + sum(len(s.running) for s in d_scheds))
+                waiting = (len(p_sched.waiting)
+                           + sum(len(s.waiting) for s in d_scheds))
+                usage = (sum(p.get_usage() for p in all_pools)
+                         / max(1, len(all_pools))) * 100.0
+                recorder.record_tick(self.clock, running, waiting,
+                                     step_prompt, step_gen, usage)
+
             idle_ticks = 0
 
             loop_count += 1

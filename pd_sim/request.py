@@ -40,6 +40,7 @@ class Request:
     finish_time: float | None = None
     ttft: float | None = None
     is_prefill_chunk: bool = True
+    scheduled_ts: float | None = None  # clock when first admitted to running
 
     # Prefix caching
     block_hashes: list[bytes] = field(default_factory=list)

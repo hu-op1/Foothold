@@ -283,6 +283,10 @@ class ColocatedScheduler:
         self.pool.clock = clock
 
         for req, num_new, _ in output.scheduled_requests:
+            # Record first schedule timestamp (for timeseries output)
+            if req.scheduled_ts is None:
+                req.scheduled_ts = clock
+
             # Determine how many of num_new are actual decode (output) tokens.
             # num_computed_tokens was already incremented in _update_after_schedule,
             # so pre-step value is num_computed_tokens - num_new.

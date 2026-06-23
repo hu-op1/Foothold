@@ -1,0 +1,43 @@
+# Single-run simulation config for time-series output.
+# Structure mirrors pd_sim.yaml but with scalar strategy values (no grid search).
+
+gpu: "3090"
+model: "Llama-2-7b-hf"
+
+communication:
+  intra_bw_gb_s: 9.7
+  inter_bw_gb_s: 9.7
+  inter_latency_us: 6.9
+  cpu_swap_bw_gb_s: 9.7
+
+simulation:
+  block_size: 16
+  max_num_seqs: 32
+  max_num_batched_tokens: 4096
+  kv_cache_memory_gb: null
+  activation_memory_gb: null
+  gpu_memory_utilization: 0.85
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  long_prefill_token_threshold: 1024
+  scheduling_policy: fcfs
+
+strategy:
+  mode: colocated       # colocated or disaggregated
+  total_gpus: 2
+  tp_size: 2            # tensor parallelism degree (1 = no TP)
+  # Disaggregated only:
+  pd_ratio: [1, 1]      # [num_prefill_gpus, num_decode_gpus]
+  d_tp_size: 1          # D-side TP
+
+output: "pd_sim/output/results.xlsx"
+
+trace:
+  path: "traces/myllama-2-7b-heavy.jsonl"
+  max_requests: 500
+  format: "sharegpt"
+
+slo:
+  ttft_ms: 500
+  tpot_ms: 50
+  p99_latency_ms: 10000
