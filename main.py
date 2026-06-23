@@ -198,6 +198,18 @@ def run_sim(args):
                tick_seconds=args.tick_seconds)
 
 
+def run_validate(args):
+    """Visualize a sim run (optionally vs LLMServingSim)."""
+    from sim.validate import run as validate_run
+    validate_run(
+        args.output_dir,
+        sim_csv=getattr(args, "sim_csv", None),
+        sim_log=getattr(args, "sim_log", None),
+        title=getattr(args, "title", "foothold sim"),
+        prefix=getattr(args, "prefix", ""),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="GPU Roofline Benchmark Suite — benchmark, fit, search, sim",
@@ -206,7 +218,9 @@ def main():
                "  uv run python main.py bench\n"
                "  uv run python main.py fit\n"
                "  uv run python main.py search\n"
-               "  uv run python main.py sim -o out/run1",
+               "  uv run python main.py sim -o out/run1\n"
+               "  uv run python main.py validate -o out/run1\n"
+               "  uv run python main.py validate -o out/run1 --sim-csv s.csv --sim-log s.log",
     )
 
     subs = parser.add_subparsers(dest="mode", title="modes")
@@ -235,6 +249,17 @@ def main():
     sim_p.add_argument("-o", "--output-dir", default=None)
     sim_p.add_argument("--tick-seconds", type=float, default=0.5)
     sim_p.add_argument("--max-requests", type=int, default=None)
+
+    # ── validate ──
+    val_p = subs.add_parser("validate", help="Visualize sim output (optionally vs LLMServingSim)")
+    val_p.add_argument("-o", "--output-dir", required=True,
+                       help="Path to a finished sim run directory")
+    val_p.add_argument("--sim-csv", default=None,
+                       help="Optional LLMServingSim sim.csv for comparison")
+    val_p.add_argument("--sim-log", default=None,
+                       help="Optional LLMServingSim sim.log for comparison")
+    val_p.add_argument("--title", default="foothold sim", help="Plot title suffix")
+    val_p.add_argument("--prefix", default="", help="Output filename prefix")
 
     # Backward-compat: support --bench / --fit / --search flags too
     parser.add_argument("--bench", action="store_true", dest="_flag_bench",
@@ -272,6 +297,8 @@ def main():
     elif mode == "sim":
         args.config = getattr(args, "config", "config/sim.yaml")
         run_sim(args)
+    elif mode == "validate":
+        run_validate(args)
     else:
         parser.print_help()
 

@@ -2,22 +2,29 @@
 name = "foothold"
 version = "0.1.0"
 description = "Add your description here"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.4.4",
     "scipy>=1.15.0",
     "openpyxl>=3.1.0",
     "pyyaml>=6.0.3",
-    "torch>=2.11.0",
+    "torch==2.11.0",
     "tqdm>=4.65.0",
     "transformers>=5.12.1",
-    "datasets>=3.0",
+    "datasets",
     "teich>=0.2.8",
+    "matplotlib",
 ]
 
-[[tool.uv.index]]
-url = "https://download.pytorch.org/whl/cu128"
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
 
 [[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "tsinghua"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
