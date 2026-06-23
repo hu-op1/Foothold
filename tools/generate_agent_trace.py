@@ -1,7 +1,8 @@
 """Generate agentic-workload trace JSONL from real agent session traces.
 
-Reads pi coding agent trace files from traces/DeepSeek-v4-Pro-Agent/ and produces
-a single JSONL file where each line is one session with chained sub-requests.
+Reads pi coding agent session traces from a HuggingFace dataset
+(ansulev/DeepSeek-v4-Pro-Agent) and produces a single JSONL file
+where each line is one session with chained sub-requests.
 
 Uses the specified model's HuggingFace tokenizer to generate real token IDs,
 reconstructing the conversation text from the trace events.
@@ -29,10 +30,11 @@ from datetime import datetime
 from pathlib import Path
 
 import tqdm
+from datasets import load_dataset
 
 HERE = Path(__file__).parent.resolve()
 ROOT = HERE.parent
-DEFAULT_TRACE_DIR = ROOT / "traces" / "DeepSeek-v4-Pro-Agent"
+DATASET = "ansulev/DeepSeek-v4-Pro-Agent"
 DEFAULT_OUTPUT = ROOT / "traces" / "agent_trace.jsonl"
 
 
@@ -82,8 +84,6 @@ def _build_output_text(content_blocks):
             parts.append(b.get("text", ""))
         elif t == "toolCall":
             tc = b.get("toolCall", {})
-            # Format tool call as the model would generate it
-            # Use <|tool_call|> marker (Qwen convention) — neutral, adds realistic tokens
             parts.append(
                 f"<|tool_call|>\n"
                 f'{{"name": "{tc.get("name", "")}", '
@@ -112,25 +112,23 @@ def load_tokenizer(model_name):
     return tok
 
 
-# ── Session parsing ───────────────────────────────────────────────
+# ── Core: parse trace events into session ─────────────────────────
 
-def parse_session_with_tokenizer(filepath, tokenizer):
-    """Parse one session, reconstruct conversation, tokenize with HF tokenizer.
+def parse_events(events, tokenizer):
+    """Parse a list of trace event dicts into sub_requests with token IDs.
 
-    Returns dict with session_id, original_arrival_s, sub_requests.
-    Each sub-request has real token IDs from the model's tokenizer.
+    Args:
+        events: list of dicts, each a trace event (type='session'|'message').
+        tokenizer: HF tokenizer for encoding conversation turns.
+
+    Returns:
+        tuple of (session_id, original_arrival_s, sub_requests) or None.
     """
-    try:
-        with open(filepath, encoding="utf-8") as f:
-            lines = [json.loads(line) for line in f if line.strip()]
-    except Exception:
+    if not events:
         return None
 
-    if not lines:
-        return None
-
-    # Session metadata
-    session_evt = lines[0]
+    # Session metadata from first event
+    session_evt = events[0]
     if session_evt.get("type") != "session":
         return None
     session_id = session_evt["id"]
@@ -140,8 +138,8 @@ def parse_session_with_tokenizer(filepath, tokenizer):
 
     # Walk events sequentially, building messages and sub-requests
     current_messages = []          # OpenAI-format message dicts
-    sub_requests = []
-    for evt in lines:
+    sub_requests_raw = []
+    for evt in events:
         if evt.get("type") != "message":
             continue
         msg = evt.get("message", {})
@@ -191,7 +189,7 @@ def parse_session_with_tokenizer(filepath, tokenizer):
             current_messages.append(asst_msg)
 
             # --- Store sub-request (tool_duration filled later) ---
-            sub_requests.append({
+            sub_requests_raw.append({
                 "input_tok_ids": input_ids,
                 "output_tok_ids": output_ids,
             })
@@ -206,11 +204,11 @@ def parse_session_with_tokenizer(filepath, tokenizer):
             })
 
     # Build final result with random tool durations (last = 0)
-    result = []
-    for i, sr in enumerate(sub_requests):
-        is_last = (i == len(sub_requests) - 1)
+    sub_requests = []
+    for i, sr in enumerate(sub_requests_raw):
+        is_last = (i == len(sub_requests_raw) - 1)
         tool_dur = 0 if is_last else random.randint(0, 10_000_000_000)
-        result.append({
+        sub_requests.append({
             "input_toks": len(sr["input_tok_ids"]),
             "output_toks": len(sr["output_tok_ids"]),
             "tool_duration_ns": tool_dur,
@@ -218,14 +216,10 @@ def parse_session_with_tokenizer(filepath, tokenizer):
             "output_tok_ids": sr["output_tok_ids"],
         })
 
-    if not result:
+    if not sub_requests:
         return None
 
-    return {
-        "session_id": session_id,
-        "original_arrival_s": original_arrival_s,
-        "sub_requests": result,
-    }
+    return (session_id, original_arrival_s, sub_requests)
 
 
 # ── Main ──────────────────────────────────────────────────────────
@@ -239,46 +233,40 @@ def main():
     parser.add_argument("--sps", type=float, required=True,
                         help="Session arrival rate: sessions per second "
                              "(e.g. 0.05 = one every 20s)")
-    parser.add_argument("--trace-dir", default=str(DEFAULT_TRACE_DIR),
-                        help="Directory containing agent .jsonl session files")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT),
                         help="Output JSONL file path")
     parser.add_argument("--max-sessions", type=int, default=0,
                         help="Cap number of sessions (0 = all)")
     parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for shuffling session file selection")
+                        help="Random seed for shuffling session selection")
     args = parser.parse_args()
 
     # ── Load tokenizer ──
     tokenizer = load_tokenizer(args.model)
 
-    # ── Discover & shuffle trace files ──
-    trace_dir = Path(args.trace_dir)
-    if not trace_dir.is_dir():
-        print(f"ERROR: trace directory not found: {trace_dir}")
-        return 1
+    # ── Stream sessions from HF dataset ──
+    print(f"Loading dataset: {DATASET} (streaming) ...", end=" ", flush=True)
+    ds = load_dataset(DATASET, split="train", streaming=True)
+    ds = ds.shuffle(buffer_size=1000, seed=args.seed)
+    print("connected.")
 
-    all_files = sorted(trace_dir.glob("*.jsonl"))
-    if not all_files:
-        print(f"ERROR: no .jsonl files in {trace_dir}")
-        return 1
-
-    random.seed(args.seed)
-    random.shuffle(all_files)
-    if args.max_sessions and args.max_sessions < len(all_files):
-        all_files = all_files[:args.max_sessions]
-    files = all_files
-
-    print(f"Processing {len(files)} session files from {trace_dir}")
     print(f"Arrival rate: {args.sps} sessions/s  "
           f"(interval: {1/args.sps:.1f}s per session)")
 
     # ── Parse sessions ──
     sessions = []
-    for fp in tqdm.tqdm(files, desc="Parsing sessions"):
-        s = parse_session_with_tokenizer(fp, tokenizer)
-        if s and s["sub_requests"]:
-            sessions.append(s)
+    count = 0
+    for row in tqdm.tqdm(ds, desc="Parsing sessions"):
+        if args.max_sessions and count >= args.max_sessions:
+            break
+        parsed = parse_events(row["trace"], tokenizer)
+        if parsed:
+            sessions.append({
+                "session_id": parsed[0],
+                "original_arrival_s": parsed[1],
+                "sub_requests": parsed[2],
+            })
+        count += 1
 
     if not sessions:
         print("ERROR: no valid sessions found")
