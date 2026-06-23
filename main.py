@@ -181,19 +181,16 @@ def run_sim(args):
     with open(hw_path, encoding="utf-8") as f:
         hw = json.load(f)
 
-    max_reqs = getattr(args, "max_requests", None) or cfg["trace"].get("max_requests")
+    max_reqs = cfg["trace"].get("max_requests")
     requests = load_trace(cfg["trace"]["path"], max_requests=max_reqs,
                           format=cfg["trace"].get("format", "sharegpt"))
     print(f"Loaded {len(requests)} requests from {cfg['trace']['path']}")
 
-    output_dir = getattr(args, "output_dir", None)
-    if not output_dir:
-        import time as _time
-        output_dir = f"sim/output/{_time.strftime('%Y%m%d-%H%M%S')}"
+    output_dir = cfg.get("output") or f"sim/output/{model_sel}"
+    tick = cfg.get("tick_seconds", 0.5)
 
     print(f"Model: {model['name']}  GPU: {gpu}  Output: {output_dir}")
 
-    tick = getattr(args, "tick_seconds", 0.5)
     run_single(cfg, model, hw, requests,
                output_dir=output_dir,
                tick_seconds=tick)
@@ -202,8 +199,7 @@ def run_sim(args):
 def run_validate(args):
     """Visualize a sim run (optionally vs LLMServingSim)."""
     from sim.validate import run as validate_run
-    # Support both subcommand (-o) and flag form (--validate -o <dir>)
-    output_dir = getattr(args, "output_dir", None) or getattr(args, "_flag_output_dir", None)
+    output_dir = getattr(args, "output_dir", None)
     if not output_dir:
         print("validate requires -o/--output-dir")
         return
@@ -224,9 +220,9 @@ def main():
                "  uv run python main.py bench\n"
                "  uv run python main.py fit\n"
                "  uv run python main.py search\n"
-               "  uv run python main.py sim -o out/run1\n"
-               "  uv run python main.py validate -o out/run1\n"
-               "  uv run python main.py validate -o out/run1 --sim-csv s.csv --sim-log s.log",
+               "  uv run python main.py sim\n"
+               "  uv run python main.py validate -o sim/output/my_run\n"
+               "  uv run python main.py validate -o sim/output/my_run --sim-csv s.csv --sim-log s.log",
     )
 
     subs = parser.add_subparsers(dest="mode", title="modes")
@@ -252,9 +248,6 @@ def main():
     # ── sim ──
     sim_p = subs.add_parser("sim", help="Run a single simulation with time-series output")
     sim_p.add_argument("--config", default="config/sim.yaml")
-    sim_p.add_argument("-o", "--output-dir", default=None)
-    sim_p.add_argument("--tick-seconds", type=float, default=0.5)
-    sim_p.add_argument("--max-requests", type=int, default=None)
 
     # ── validate ──
     val_p = subs.add_parser("validate", help="Visualize sim output (optionally vs LLMServingSim)")
@@ -277,8 +270,6 @@ def main():
     parser.add_argument("--sim", action="store_true", dest="_flag_sim",
                         help=argparse.SUPPRESS)
     parser.add_argument("--validate", action="store_true", dest="_flag_validate",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("-o", "--output-dir", default=None, dest="_flag_output_dir",
                         help=argparse.SUPPRESS)
     parser.add_argument("--config", default="config/default.yaml", dest="_flag_config",
                         help=argparse.SUPPRESS)

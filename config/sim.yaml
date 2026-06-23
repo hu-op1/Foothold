@@ -2,7 +2,7 @@
 # Structure mirrors search.yaml but with scalar strategy values (no grid search).
 
 gpu: "3090"
-model: "Qwen/Qwen3-4B"
+model: "meta-llama/Llama-2-7b-hf"
 
 communication:
   intra_bw_gb_s: 9.7
@@ -12,14 +12,14 @@ communication:
 
 simulation:
   block_size: 16
-  max_num_seqs: 32
-  max_num_batched_tokens: 4096
+  max_num_seqs: 256
+  max_num_batched_tokens: 2048
   kv_cache_memory_gb: null
   activation_memory_gb: null
   gpu_memory_utilization: 0.85
   enable_prefix_caching: true
   enable_chunked_prefill: true
-  long_prefill_token_threshold: 1024
+  long_prefill_token_threshold: 2048
   scheduling_policy: fcfs
 
 strategy:
@@ -30,7 +30,8 @@ strategy:
   pd_ratio: [1, 1]      # [num_prefill_gpus, num_decode_gpus]
   d_tp_size: 1          # D-side TP
 
-output: "sim/output/results.xlsx"
+output: "sim/output/llama-2-7b-tp2-heavy"
+tick_seconds: 0.5            # timeseries downsampling interval
 
 trace:
   path: "traces/myllama-2-7b-heavy.jsonl"
