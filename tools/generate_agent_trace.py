@@ -305,6 +305,12 @@ def main():
             out.write(json.dumps(s, ensure_ascii=False) + "\n")
 
     print(f"\nDone: {total_sessions} sessions, {total_sub_requests} sub-requests")
+    print("\n--- Per-session input/output ---")
+    for s in sessions:
+        total_in = sum(sr["input_toks"] for sr in s["sub_requests"])
+        total_out = sum(sr["output_toks"] for sr in s["sub_requests"])
+        print(f"  session {s['session_id']}: input={total_in} output={total_out} "
+              f"({len(s['sub_requests'])} steps)")
     print(f"Arrival range: {sessions[0]['arrival_time_ns']/1e9:.1f}s → "
           f"{sessions[-1]['arrival_time_ns']/1e9:.1f}s "
           f"(duration: {(sessions[-1]['arrival_time_ns'] - sessions[0]['arrival_time_ns'])/1e9:.1f}s)")
