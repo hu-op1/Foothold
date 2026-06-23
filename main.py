@@ -186,23 +186,29 @@ def run_sim(args):
                           format=cfg["trace"].get("format", "sharegpt"))
     print(f"Loaded {len(requests)} requests from {cfg['trace']['path']}")
 
-    output_dir = args.output_dir
+    output_dir = getattr(args, "output_dir", None)
     if not output_dir:
         import time as _time
         output_dir = f"sim/output/{_time.strftime('%Y%m%d-%H%M%S')}"
 
     print(f"Model: {model['name']}  GPU: {gpu}  Output: {output_dir}")
 
+    tick = getattr(args, "tick_seconds", 0.5)
     run_single(cfg, model, hw, requests,
                output_dir=output_dir,
-               tick_seconds=args.tick_seconds)
+               tick_seconds=tick)
 
 
 def run_validate(args):
     """Visualize a sim run (optionally vs LLMServingSim)."""
     from sim.validate import run as validate_run
+    # Support both subcommand (-o) and flag form (--validate -o <dir>)
+    output_dir = getattr(args, "output_dir", None) or getattr(args, "_flag_output_dir", None)
+    if not output_dir:
+        print("validate requires -o/--output-dir")
+        return
     validate_run(
-        args.output_dir,
+        output_dir,
         sim_csv=getattr(args, "sim_csv", None),
         sim_log=getattr(args, "sim_log", None),
         title=getattr(args, "title", "foothold sim"),
@@ -268,6 +274,12 @@ def main():
                         dest="_flag_fit", help=argparse.SUPPRESS)
     parser.add_argument("--search", action="store_true", dest="_flag_search",
                         help=argparse.SUPPRESS)
+    parser.add_argument("--sim", action="store_true", dest="_flag_sim",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--validate", action="store_true", dest="_flag_validate",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("-o", "--output-dir", default=None, dest="_flag_output_dir",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--config", default="config/default.yaml", dest="_flag_config",
                         help=argparse.SUPPRESS)
 
@@ -282,6 +294,10 @@ def main():
             mode = "fit"
         elif getattr(args, "_flag_search", False):
             mode = "search"
+        elif getattr(args, "_flag_sim", False):
+            mode = "sim"
+        elif getattr(args, "_flag_validate", False):
+            mode = "validate"
 
     if mode == "bench":
         args.config = getattr(args, "config", "config/default.yaml")
@@ -295,7 +311,9 @@ def main():
         args.config = getattr(args, "config", "config/search.yaml")
         run_search(args)
     elif mode == "sim":
-        args.config = getattr(args, "config", "config/sim.yaml")
+        # Support both subcommand (with --config, -o, etc.) and --sim flag
+        if not hasattr(args, "config") or args.config is None:
+            args.config = "config/sim.yaml"
         run_sim(args)
     elif mode == "validate":
         run_validate(args)
