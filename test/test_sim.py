@@ -1,4 +1,4 @@
-"""Integration tests for pd_sim module."""
+"""Integration tests for sim module."""
 
 import json
 import os
@@ -40,14 +40,14 @@ def hw():
 
 @pytest.fixture
 def config():
-    from pd_sim.config import load_config
+    from sim.config import load_config
     cfg = load_config()
     cfg["max_model_len"] = 8192
     return cfg
 
 
 def test_load_jsonl_trace():
-    from pd_sim.trace import load_trace
+    from sim.trace import load_trace
     with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
         _make_jsonl_trace(f.name, num=5)
         path = f.name
@@ -62,8 +62,8 @@ def test_load_jsonl_trace():
 
 
 def test_block_pool_allocation():
-    from pd_sim.memory import BlockPool, compute_block_hashes
-    from pd_sim.request import Request
+    from sim.memory import BlockPool, compute_block_hashes
+    from sim.request import Request
 
     pool = BlockPool(50)
     r = Request("test", 0.0, list(range(200)), 50)
@@ -78,8 +78,8 @@ def test_block_pool_allocation():
 
 
 def test_prefix_cache_hit():
-    from pd_sim.memory import BlockPool, compute_block_hashes
-    from pd_sim.request import Request
+    from sim.memory import BlockPool, compute_block_hashes
+    from sim.request import Request
 
     pool = BlockPool(200)
     block_size = 16
@@ -99,8 +99,8 @@ def test_prefix_cache_hit():
 
 
 def test_colocated_simulation(model, hw, config):
-    from pd_sim.engine import SimulationEngine
-    from pd_sim.trace import load_trace
+    from sim.engine import SimulationEngine
+    from sim.trace import load_trace
 
     with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
         _make_jsonl_trace(f.name, num=10)
@@ -119,8 +119,8 @@ def test_colocated_simulation(model, hw, config):
 
 
 def test_disaggregated_simulation(model, hw, config):
-    from pd_sim.engine import SimulationEngine
-    from pd_sim.trace import load_trace
+    from sim.engine import SimulationEngine
+    from sim.trace import load_trace
 
     with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
         _make_jsonl_trace(f.name, num=10)
@@ -138,9 +138,9 @@ def test_disaggregated_simulation(model, hw, config):
 
 
 def test_strategy_search(model, hw, config):
-    from pd_sim.engine import SimulationEngine
-    from pd_sim.strategy import search
-    from pd_sim.trace import load_trace
+    from sim.engine import SimulationEngine
+    from sim.strategy import search
+    from sim.trace import load_trace
 
     with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
         _make_jsonl_trace(f.name, num=5)
@@ -166,8 +166,8 @@ def test_strategy_search(model, hw, config):
 
 def test_executor_vs_predict_consistency(model, hw):
     """Verify executor step-time roughly matches predict() for single request."""
-    from pd_sim.executor import predict_step
-    from pd_sim.request import Request
+    from sim.executor import predict_step
+    from sim.request import Request
     from perf_predict.predict import predict
 
     r = Request("test", 0.0, list(range(512)), 128)
@@ -189,8 +189,8 @@ def test_executor_vs_predict_consistency(model, hw):
 
 def test_jsonl_prefix_caching_in_simulation(model, hw, config):
     """Verify prefix cache actually reduces prefill time in colocated sim."""
-    from pd_sim.engine import SimulationEngine
-    from pd_sim.trace import load_trace
+    from sim.engine import SimulationEngine
+    from sim.trace import load_trace
 
     # Two requests sharing the same prefix
     shared_ids = list(range(256))  # 256 shared tokens

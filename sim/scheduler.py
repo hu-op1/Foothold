@@ -2,7 +2,7 @@
 
 from collections import deque
 
-from pd_sim.request import Request, RequestStatus, FinishReason
+from sim.request import Request, RequestStatus, FinishReason
 
 
 class SchedulingPolicy:

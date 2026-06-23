@@ -27,10 +27,10 @@ fit/  →  fit/results/<gpu>.json   (F_peak, B_peak, p, B_eff, overhead)
                        │
             ┌──────────┴──────────┐
             ▼                     ▼
-     perf_predict/predict.py  pd_sim/
+     perf_predict/predict.py  sim/
        (throughput pred)      (PD disaggregation sim)
                                        │
-                                  config/pd_sim.yaml
+                                  config/search.yaml
                                   (sim params, SLO, strategy search)
 ```
 
@@ -161,7 +161,7 @@ t += elem_time("rope", b * nh * s * hd, b_effs, overheads)
 t += elem_time("rope", b * nh_kv * s * hd, b_effs, overheads)
 ```
 
-**`executor.py`** 同步修复（[pd_sim/executor.py](pd_sim/executor.py#L102-L110)）：传入 `nh_kv`。
+**`executor.py`** 同步修复（[sim/executor.py](sim/executor.py#L102-L110)）：传入 `nh_kv`。
 
 ### 2.3 GQA 效果
 
@@ -195,7 +195,7 @@ kv_cache_pool = usable_vram - model_weight - activation
 
 ### 3.2 权重计算
 
-`pd_sim/config.py::model_weight_gb()`：
+`sim/config.py::model_weight_gb()`：
 
 ```
 weight_gb = total_params_b × 2 / 1e9   (fp16 = 2 bytes/param)
@@ -205,7 +205,7 @@ weight_gb = total_params_b × 2 / 1e9   (fp16 = 2 bytes/param)
 
 ### 3.3 激活值计算
 
-`pd_sim/config.py::activation_memory_gb()`，不再使用硬编码的 2GB：
+`sim/config.py::activation_memory_gb()`，不再使用硬编码的 2GB：
 
 ```
 activation = batch_tokens × (2h + 3·inter) × 2 bytes  +  0.5 GB (CUDA)
@@ -244,7 +244,7 @@ residual [S, h]  →  RMSNorm [S, h]  →  gate [S, inter]  ─┐
 
 激活值随 TP 动态计算：`activation_memory_gb(model_spec, max_batch_tokens, tp)`。
 
-## 4. PD 分离仿真 (`pd_sim/`)
+## 4. PD 分离仿真 (`sim/`)
 
 ### 4.1 事件驱动引擎
 
@@ -328,7 +328,7 @@ bytes_per_block = 2(K+V) × nl × nh_kv × hd × block_size × 2(bytes)
                 = 2 × 32 × 32 × 128 × 16 × 2 = 8,388,608（≈ 8 MiB）
 ```
 
-`num_blocks = kv_cache_memory_gb × 1024³ / bytes_per_block`。`kv_cache_memory_gb` 默认为 `usable_vram - model_weights - activation`（每 GPU 独立计算），可在 `pd_sim.yaml` 中覆盖。
+`num_blocks = kv_cache_memory_gb × 1024³ / bytes_per_block`。`kv_cache_memory_gb` 默认为 `usable_vram - model_weights - activation`（每 GPU 独立计算），可在 `search.yaml` 中覆盖。
 
 #### 4.3.2 Prefix Caching（APC）
 
@@ -437,7 +437,7 @@ score, elapsed_s
 
 ### 4.6 `max_num_seqs` 配置
 
-`max_num_seqs` 是用户指定的调度参数（`pd_sim.yaml` 的 `simulation` 节），**不做自动估算**。过大的值会导致 block pool 耗尽（每个请求在 decode 阶段逐步消耗 block）。1024 block 的池加 32 并发意味着平均每请求只能用 32 block ≈ 512 token，对应平均序列长度刚好到极限。长请求出现时可能触发 swap 或死锁。
+`max_num_seqs` 是用户指定的调度参数（`search.yaml` 的 `simulation` 节），**不做自动估算**。过大的值会导致 block pool 耗尽（每个请求在 decode 阶段逐步消耗 block）。1024 block 的池加 32 并发意味着平均每请求只能用 32 block ≈ 512 token，对应平均序列长度刚好到极限。长请求出现时可能触发 swap 或死锁。
 
 ### 4.7 请求到达速率与参数敏感性
 

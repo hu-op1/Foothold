@@ -11,8 +11,8 @@ AI coding agent guidance for this repository. See [CLAUDE.md](CLAUDE.md) for ful
 
 ## Key conventions
 
-- **`main.py` is the only CLI entry point** — subcommands: `bench`, `fit`, `predict`, `pd-sim`. Legacy `--bench`/`--fit`/`--predict`/`--pd-sim` flags also work
-- Config files by stage: `config/default.yaml` (bench/fit), `config/predict.yaml`, `config/pd_sim.yaml`
+- **`main.py` is the only CLI entry point** — subcommands: `bench`, `fit`, `search`, `sim`. Legacy `--bench`/`--fit`/`--search` flags also work
+- Config files by stage: `config/default.yaml` (bench/fit), `config/predict.yaml`, `config/search.yaml`, `config/sim.yaml`
 - Results saved as `.xlsx` via `openpyxl` (not CSV)
 - Use `pathlib.Path` for filesystem paths (some legacy uses of `os.path` exist in `main.py` and `bench/`)
 - Use `torch.cuda.Event` for GPU timing — see `CudaTimer`, `warmup()`, `benchmark()` in `bench/utils.py:8`
@@ -27,7 +27,7 @@ AI coding agent guidance for this repository. See [CLAUDE.md](CLAUDE.md) for ful
 
 Tests live in `test/` (gitignored — local-only). Run with:
 ```bash
-uv run python -m pytest test/                # pytest tests (test_pd_sim.py)
+uv run python -m pytest test/                # pytest tests (test_sim.py)
 uv run python test/<script>.py               # standalone scripts (analyze.py, etc.)
 ```
 All tests require a CUDA GPU and benchmark/fit result data.

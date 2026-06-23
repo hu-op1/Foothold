@@ -1,6 +1,6 @@
 """KV cache transfer model for disaggregated prefill→decode communication."""
 
-from pd_sim.request import Request
+from sim.request import Request
 
 
 DTYPE_BYTES = 2  # fp16

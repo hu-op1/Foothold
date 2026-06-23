@@ -5,8 +5,8 @@ import time
 
 from tqdm import tqdm
 
-from pd_sim.engine import SimulationEngine
-from pd_sim.config import valid_tp_sizes, total_vram_gb
+from sim.engine import SimulationEngine
+from sim.config import valid_tp_sizes, total_vram_gb
 
 
 def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:

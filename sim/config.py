@@ -1,10 +1,10 @@
-"""Load pd_sim configuration from YAML with defaults."""
+"""Load sim configuration from YAML with defaults."""
 
 from pathlib import Path
 import yaml
 
 HERE = Path(__file__).parent.resolve()
-DEFAULT_CONFIG = HERE.parent / "config" / "pd_sim.yaml"
+DEFAULT_CONFIG = HERE.parent / "config" / "search.yaml"
 
 
 def load_config(path=None, model_spec=None):
@@ -19,7 +19,7 @@ def load_config(path=None, model_spec=None):
     # Defaults for null fields
     sim = cfg.setdefault("simulation", {})
     # max_num_seqs is a user-configured scheduling parameter.
-    # It must be set explicitly in pd_sim.yaml; no auto-estimation.
+    # It must be set explicitly in search.yaml; no auto-estimation.
 
     mem_util = sim.get("gpu_memory_utilization", 0.85)
     # Activation memory: null → auto-compute, number → override
@@ -118,7 +118,7 @@ def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1):
       - The attention-block peak (input+Q+K+V+attn_out) is smaller than FFN
         peak for all practical models (intermediate > hidden).
 
-    Set ``activation_memory_gb`` in pd_sim.yaml to override with a fixed value.
+    Set ``activation_memory_gb`` in search.yaml to override with a fixed value.
     """
     h = model_spec["hidden_dim"]
     inter = model_spec.get("intermediate_dim", h * 4)

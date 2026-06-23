@@ -18,9 +18,9 @@ import json
 import os
 import time
 
-from pd_sim.engine import SimulationEngine
-from pd_sim.recorder import SimRecorder
-from pd_sim.report import export_xlsx
+from sim.engine import SimulationEngine
+from sim.recorder import SimRecorder
+from sim.report import export_xlsx
 
 
 def run_single(

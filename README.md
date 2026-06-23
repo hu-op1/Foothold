@@ -30,9 +30,9 @@ config/default.yaml  →  fit/  →  fit/results/<gpu>.json   │              �
                                           │
                               ┌───────────┴───────────┐
                               ▼                       ▼
-                     perf_predict/predict.py    pd_sim/
+                     perf_predict/predict.py    sim/
                      (throughput pred)          (PD disaggregation sim)
-                                                config/pd_sim.yaml
+                                                config/search.yaml
 ```
 
 ## 0. 模型建模 — `models/`
@@ -246,16 +246,16 @@ req_2: input_toks=1734                sub_1: input_toks=14541   ← + asst_0 + t
 - **output**：将 assistant 的 thinking、text、tool call 拼接后用 tokenizer encode，产生输出 token ID
 - simulator 可利用递增的 input 序列模拟 prefix caching（前轮 KV cache 直接复用）
 
-## 4. PD 分离仿真 — `pd_sim/`
+## 4. PD 分离仿真 — `sim/`
 
 事件驱动的 vLLM 推理服务仿真器，支持 colocated（共址）和 disaggregated（P/D 分离 GPU 池）两种部署模式。
 
 ```bash
-uv run python main.py pd-sim                      # 从 config/pd_sim.yaml
-uv run python main.py pd-sim --config <path>      # 指定配置
+uv run python main.py search                     # 从 config/search.yaml
+uv run python main.py search --config <path>     # 指定配置
 ```
 
-### 配置 — [config/pd_sim.yaml](config/pd_sim.yaml)
+### 配置 — [config/search.yaml](config/search.yaml)
 
 ```yaml
 gpu: "3090"
@@ -324,14 +324,14 @@ score = throughput × compliance
 
 ```bash
 uv run python -m pytest test/                        # 全部测试
-uv run python -m pytest test/test_pd_sim.py -v       # PD sim 测试
+uv run python -m pytest test/test_sim.py -v       # PD sim 测试
 ```
 
 ## 目录结构
 
 ```
 foothold/
-├── main.py                     # CLI 入口：bench / fit / predict / pd-sim
+├── main.py                     # CLI 入口：bench / fit / search / sim
 ├── models/                     # HF config.json 自动发现 → model_spec
 │   ├── __init__.py             # 映射、解析、参数计算
 │   ├── Qwen/Qwen3/             # Qwen3-4B, -8B
@@ -340,7 +340,8 @@ foothold/
 ├── config/
 │   ├── default.yaml            # 硬件标定配置（bench/fit）
 │   ├── predict.yaml            # 吞吐预测配置
-│   ├── pd_sim.yaml             # PD 分离仿真配置
+│   ├── search.yaml             # PD 策略搜索配置
+│   ├── sim.yaml                # 单次模拟配置
 │   └── model_specs.yaml        # 模型参数（仅 fallback）
 ├── bench/                      # GPU kernel 基准测试
 │   ├── matmul.py, elementwise.py
@@ -352,12 +353,12 @@ foothold/
 ├── perf_predict/               # 模型吞吐预测
 │   ├── predict.py              # 预测主逻辑
 │   └── fitted_params.json      # 默认硬件参数
-├── pd_sim/                     # PD 分离仿真
+├── sim/                     # PD 分离仿真
 │   ├── engine.py, scheduler.py, memory.py, executor.py
 │   ├── config.py, trace.py, strategy.py
 │   ├── metrics.py, report.py, communication.py, request.py
 ├── test/                       # 测试
-│   ├── test_pd_sim.py          # pd_sim 集成测试
+│   ├── test_sim.py             # sim 集成测试
 │   └── ...
 ├── bench/results/<gpu>/        # [gitignored] benchmark 输出
 ├── fit/results/                # [gitignored] 拟合结果

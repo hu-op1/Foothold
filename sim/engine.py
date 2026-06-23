@@ -4,11 +4,11 @@ import heapq
 from enum import Enum, auto
 from dataclasses import dataclass, field
 
-from pd_sim.request import Request, RequestStatus, FinishReason
-from pd_sim.memory import BlockPool, compute_block_hashes
-from pd_sim.scheduler import ColocatedScheduler
-from pd_sim.executor import predict_step, predict_step_tp
-from pd_sim.communication import (
+from sim.request import Request, RequestStatus, FinishReason
+from sim.memory import BlockPool, compute_block_hashes
+from sim.scheduler import ColocatedScheduler
+from sim.executor import predict_step, predict_step_tp
+from sim.communication import (
     effective_xfer_overhead,
     transfer_blocks,
 )
@@ -115,7 +115,7 @@ class SimulationEngine:
         rank, and steps all ranks in parallel.  This matches vLLM's data-
         parallel architecture where each DP rank is a full EngineCore.
         """
-        from pd_sim.metrics import MetricsCollector
+        from sim.metrics import MetricsCollector
 
         # Create dp independent instances
         pools = [BlockPool(self.num_blocks * self.tp_size,
@@ -236,7 +236,7 @@ class SimulationEngine:
         to the D running queue (with KV transfer). Waiting requests never hold
         D-side blocks — only running requests do.
         """
-        from pd_sim.metrics import MetricsCollector
+        from sim.metrics import MetricsCollector
 
         num_p, num_d = pd_ratio
 

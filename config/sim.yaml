@@ -1,5 +1,5 @@
 # Single-run simulation config for time-series output.
-# Structure mirrors pd_sim.yaml but with scalar strategy values (no grid search).
+# Structure mirrors search.yaml but with scalar strategy values (no grid search).
 
 gpu: "3090"
 model: "Llama-2-7b-hf"
@@ -30,7 +30,7 @@ strategy:
   pd_ratio: [1, 1]      # [num_prefill_gpus, num_decode_gpus]
   d_tp_size: 1          # D-side TP
 
-output: "pd_sim/output/results.xlsx"
+output: "sim/output/results.xlsx"
 
 trace:
   path: "traces/myllama-2-7b-heavy.jsonl"

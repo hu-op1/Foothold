@@ -23,9 +23,9 @@ config/default.yaml  →  fit/  →  fit/results/<gpu>.json   │              �
                                           │
                               ┌───────────┴───────────┐
                               ▼                       ▼
-                     perf_predict/predict.py    pd_sim/
+                     perf_predict/predict.py    sim/
                      (throughput pred)          (PD disaggregation sim)
-                                                config/pd_sim.yaml
+                                                config/search.yaml
 ```
 
 ## Commands
@@ -46,13 +46,13 @@ uv run python main.py --fit                          # Legacy flag form
 uv run python main.py predict                        # Predict from config/predict.yaml
 uv run python main.py predict --config <path>        # Override predict config
 
-# PD disaggregation simulation (stage 4)
-uv run python main.py pd-sim                         # Run from config/pd_sim.yaml
-uv run python main.py pd-sim --config <path>         # Override pd-sim config
+# PD disaggregation strategy search (stage 4)
+uv run python main.py search                        # Run from config/search.yaml
+uv run python main.py search --config <path>        # Override search config
 
 # Tests
 uv run python -m pytest test/                        # All tests
-uv run python -m pytest test/test_pd_sim.py -v       # PD sim tests verbose
+uv run python -m pytest test/test_sim.py -v       # PD sim tests verbose
 ```
 
 ## Architecture
@@ -94,27 +94,27 @@ Given fitted roofline params + model architecture specs, predicts prefill/decode
 - `perf_predict/fitted_params.json` — Default fitted hardware params for quick testing.
 - Supports GQA (Q/K/V projection dims, attention HBM traffic, RoPE elementwise) and hybrid architectures (DeltaNet + full attention mix).
 
-### Stage 4: `pd_sim/` — PD disaggregation simulator (event-driven)
+### Stage 4: `sim/` — PD disaggregation simulator (event-driven)
 
 Simulates vLLM-style inference serving with colocated and disaggregated (separate prefill/decode GPU pools) configurations.
 
-- `pd_sim/config.py` — Loads `config/pd_sim.yaml` with model-aware defaults: `activation_memory_gb()` computes peak activation from model arch × max_batched_tokens (no longer hardcoded). `valid_tp_sizes()` checks head divisibility + memory constraints. GPU VRAM lookup table for known GPU models.
-- `pd_sim/engine.py` — `SimulationEngine` with event-driven loop. Clock advances only when all GPUs are truly idle. Two modes: `_run_colocated` (data-parallel via least-loaded routing) and `_run_disaggregated` (P pool → KV transfer → D pool with swap preemption).
-- `pd_sim/scheduler.py` — vLLM v1 two-phase scheduler: Phase 1 iterates running queue (decode tokens + chunked prefill, OOM handling via preemption or swap), Phase 2 admits from waiting queue with token budget + prefill threshold.
-- `pd_sim/memory.py` — `BlockPool` with PagedAttention block allocation, prefix caching (SHA-256 based), and GPU↔CPU swap support for D-side OOM recovery.
-- `pd_sim/executor.py` — `predict_step()` computes single-step GPU time using roofline. Attention uses **per-request params** (prefill params for prefill chunks, decode params for decode steps). Projections use unified params based on total batch M. `predict_step_tp()` adds all-reduce overhead for tensor parallelism.
-- `pd_sim/trace.py` — Loads JSONL request traces into `Request` objects.
-- `pd_sim/strategy.py` — Grid search over `tp_sizes × max_batched_tokens × prefill_thresholds × pd_ratios × decode_tp_sizes`. Results scored by `throughput × SLO_compliance` and exported to xlsx.
-- `pd_sim/report.py` — xlsx export with per-strategy metrics.
-- `pd_sim/communication.py` — KV transfer cost modeling with overlap.
-- `pd_sim/metrics.py` — TTFT/TPOT/latency distribution tracking.
-- `pd_sim/request.py` — `Request` dataclass with lifecycle state.
+- `sim/config.py` — Loads `config/search.yaml` with model-aware defaults: `activation_memory_gb()` computes peak activation from model arch × max_batched_tokens (no longer hardcoded). `valid_tp_sizes()` checks head divisibility + memory constraints. GPU VRAM lookup table for known GPU models.
+- `sim/engine.py` — `SimulationEngine` with event-driven loop. Clock advances only when all GPUs are truly idle. Two modes: `_run_colocated` (data-parallel via least-loaded routing) and `_run_disaggregated` (P pool → KV transfer → D pool with swap preemption).
+- `sim/scheduler.py` — vLLM v1 two-phase scheduler: Phase 1 iterates running queue (decode tokens + chunked prefill, OOM handling via preemption or swap), Phase 2 admits from waiting queue with token budget + prefill threshold.
+- `sim/memory.py` — `BlockPool` with PagedAttention block allocation, prefix caching (SHA-256 based), and GPU↔CPU swap support for D-side OOM recovery.
+- `sim/executor.py` — `predict_step()` computes single-step GPU time using roofline. Attention uses **per-request params** (prefill params for prefill chunks, decode params for decode steps). Projections use unified params based on total batch M. `predict_step_tp()` adds all-reduce overhead for tensor parallelism.
+- `sim/trace.py` — Loads JSONL request traces into `Request` objects.
+- `sim/strategy.py` — Grid search over `tp_sizes × max_batched_tokens × prefill_thresholds × pd_ratios × decode_tp_sizes`. Results scored by `throughput × SLO_compliance` and exported to xlsx.
+- `sim/report.py` — xlsx export with per-strategy metrics.
+- `sim/communication.py` — KV transfer cost modeling with overlap.
+- `sim/metrics.py` — TTFT/TPOT/latency distribution tracking.
+- `sim/request.py` — `Request` dataclass with lifecycle state.
 
 See [docs/architecture.md](docs/architecture.md) §4 for detailed design rationale, DP architecture, swap mechanics, and prefix caching behavior.
 
 ### Entry point: `main.py`
 
-CLI with subcommands: `bench`, `fit`, `predict`, `pd-sim`. Also supports legacy `--bench`/`--fit`/`--predict`/`--pd-sim` flags for backward compat.
+CLI with subcommands: `bench`, `fit`, `search`, `sim`. Also supports legacy `--bench`/`--fit`/`--search` flags for backward compat.
 
 ## Key design decisions
 
@@ -133,7 +133,7 @@ CLI with subcommands: `bench`, `fit`, `predict`, `pd-sim`. Also supports legacy 
 
 - `config/default.yaml` — Hardware benchmark config (`gpu`, matmul/elementwise grid, dtype, `max_memory_gb`). Used by `bench` and `fit`.
 - `config/predict.yaml` — Predict config (`gpu`, `model`, `batch`, `input_len`, `output_len`, `params`). Used by `predict`.
-- `config/pd_sim.yaml` — PD sim config (`gpu`, `model`, communication bandwidth, simulation parameters, strategy search space, SLO targets, trace path). Used by `pd-sim`.
+- `config/search.yaml` — Strategy search config (`gpu`, `model`, communication bandwidth, simulation parameters, strategy search space, SLO targets, trace path). Used by `search`.
 
 ## Dependencies
 

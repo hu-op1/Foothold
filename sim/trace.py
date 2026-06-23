@@ -2,7 +2,7 @@
 
 import json
 
-from pd_sim.request import Request
+from sim.request import Request
 
 
 def load_trace(path, max_requests=None, format="sharegpt"):

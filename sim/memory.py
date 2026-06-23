@@ -165,7 +165,7 @@ class BlockPool:
         Returns list of newly allocated block_ids in order,
         or None if allocation fails (OOM).
         """
-        from pd_sim.request import Request
+        from sim.request import Request
 
         new_block_ids: list[int] = []
         new_start = request.num_computed_tokens
