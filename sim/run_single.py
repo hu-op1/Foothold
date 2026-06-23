@@ -148,6 +148,6 @@ def run_single(
     print(f"  TPOT mean:  {metrics.mean_tpot() * 1000:.1f} ms")
     print(f"  Requests:   {metrics.num_requests}")
     print(f"  Output:     {output_dir}")
-    print(f"    meta.json  requests.jsonl  timeseries.csv  results.xlsx")
+    print(f"  meta.json  requests.jsonl  timeseries.csv  results.xlsx")
 
     return output_dir
