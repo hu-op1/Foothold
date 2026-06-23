@@ -11,6 +11,7 @@ Single simulation with time-series output:
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -112,9 +113,8 @@ def run_search(args):
     from sim.engine import SimulationEngine
     from sim.strategy import search
     from sim.report import export_xlsx
-    from perf_predict.predict import load_model_specs, load_hw_params
+    from models import load_model_specs
 
-    # Load model specs first (needed for config defaults)
     specs = load_model_specs()
     models = specs.get("models", [])
 
@@ -137,9 +137,8 @@ def run_search(args):
 
     # Load hardware params
     hw_path = cfg.get("params") or os.path.join(FIT_RESULTS, f"{gpu}.json")
-    if not os.path.exists(hw_path):
-        hw_path = "perf_predict/fitted_params.json"
-    hw = load_hw_params(hw_path)
+    with open(hw_path, encoding="utf-8") as f:
+        hw = json.load(f)
 
     # Load trace
     trace_path = cfg["trace"]["path"]
@@ -167,7 +166,7 @@ def run_sim(args):
     from sim.config import load_config as load_pd_config
     from sim.trace import load_trace
     from sim.run_single import run_single
-    from perf_predict.predict import load_model_specs, load_hw_params
+    from models import load_model_specs
 
     specs = load_model_specs()
     models = specs.get("models", [])
@@ -189,9 +188,8 @@ def run_sim(args):
     cfg = load_pd_config(args.config, model_spec=model)
 
     hw_path = cfg.get("params") or os.path.join(FIT_RESULTS, f"{gpu}.json")
-    if not os.path.exists(hw_path):
-        hw_path = "perf_predict/fitted_params.json"
-    hw = load_hw_params(hw_path)
+    with open(hw_path, encoding="utf-8") as f:
+        hw = json.load(f)
 
     max_reqs = getattr(args, "max_requests", None) or cfg["trace"].get("max_requests")
     requests = load_trace(cfg["trace"]["path"], max_requests=max_reqs,

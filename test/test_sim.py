@@ -26,16 +26,16 @@ def _make_jsonl_trace(path, num=5, shared_prefix_ids=None):
 
 @pytest.fixture
 def model():
-    from perf_predict.predict import load_model_specs
+    from models import load_model_specs
     specs = load_model_specs()
-    return next(m for m in specs["models"] if m["name"] == "Llama-3.2-1B")
+    return next(m for m in specs["models"] if m["name"] == "Llama-2-7b-hf")
 
 
 @pytest.fixture
 def hw():
-    from perf_predict.predict import load_hw_params
-    path = "fit/results/3090.json"
-    return load_hw_params(path)
+    import json
+    with open("fit/results/3090.json", encoding="utf-8") as f:
+        return json.load(f)
 
 
 @pytest.fixture
@@ -162,29 +162,6 @@ def test_strategy_search(model, hw, config):
         assert best["score"] > 0
     finally:
         os.unlink(path)
-
-
-def test_executor_vs_predict_consistency(model, hw):
-    """Verify executor step-time roughly matches predict() for single request."""
-    from sim.executor import predict_step
-    from sim.request import Request
-    from perf_predict.predict import predict
-
-    r = Request("test", 0.0, list(range(512)), 128)
-    r.num_computed_tokens = 0
-    r.is_prefill_chunk = True
-
-    prefill_step = predict_step([(r, 512)], model, hw)
-
-    pred = predict(model, 1, 512, 128, hw)
-    pred_prefill_s = pred["prefill_ms"] / 1000
-
-    ratio = prefill_step / pred_prefill_s if pred_prefill_s > 0 else 0
-    assert 0.5 < ratio < 2.0, (
-        f"prefill_step={prefill_step:.4f}s, "
-        f"predict_prefill={pred_prefill_s:.4f}s, "
-        f"ratio={ratio:.2f}"
-    )
 
 
 def test_jsonl_prefix_caching_in_simulation(model, hw, config):

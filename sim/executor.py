@@ -1,12 +1,6 @@
 """Roofline-based step-time prediction for mixed prefill/decode batches."""
 
-import sys
-import os
-
-# Allow importing from root
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from perf_predict.predict import (
+from sim.roofline import (
     matmul_time,
     projections,
     attention_fused,
