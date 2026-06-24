@@ -32,18 +32,18 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     max_tokens_list = search_cfg.get("max_batched_tokens", [8192])
     thresholds_list = search_cfg.get("prefill_thresholds", [1024])
     pd_ratios = search_cfg.get("pd_ratios", [[1, 1]])
-    tp_sizes = search_cfg.get("tp_sizes", [1])
-    d_tp_sizes = search_cfg.get("decode_tp_sizes") or tp_sizes
-    pp_sizes = search_cfg.get("pp_sizes", [1])
-    d_pp_sizes = search_cfg.get("decode_pp_sizes") or pp_sizes
+    p_tp_sizes = search_cfg.get("p_tp_sizes") or search_cfg.get("tp_sizes", [1])
+    d_tp_sizes = search_cfg.get("decode_tp_sizes") or p_tp_sizes
+    p_pp_sizes = search_cfg.get("p_pp_sizes") or search_cfg.get("pp_sizes", [1])
+    d_pp_sizes = search_cfg.get("decode_pp_sizes") or p_pp_sizes
     hw_params = engine.hw
 
     # Pre-compute valid PP sizes for this model
     valid_pps = valid_pp_sizes(model_spec, total_gpus)
-    pp_sizes = [p for p in pp_sizes if p in valid_pps]
+    p_pp_sizes = [p for p in p_pp_sizes if p in valid_pps]
     d_pp_sizes = [p for p in d_pp_sizes if p in valid_pps]
-    if not pp_sizes:
-        pp_sizes = [1]
+    if not p_pp_sizes:
+        p_pp_sizes = [1]
     if not d_pp_sizes:
         d_pp_sizes = [1]
 
@@ -54,17 +54,17 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                                max_model_len, max_num_seqs,
                                gpu_memory_utilization=gpu_mem_util,
                                max_batch_tokens=max(max_tokens_list))
-    tp_sizes = [t for t in tp_sizes if t in valid_tps]
+    p_tp_sizes = [t for t in p_tp_sizes if t in valid_tps]
     d_tp_sizes = [t for t in d_tp_sizes if t in valid_tps]
-    if not tp_sizes:
-        tp_sizes = [1]
+    if not p_tp_sizes:
+        p_tp_sizes = [1]
     if not d_tp_sizes:
         d_tp_sizes = [1]
 
     tasks: list[dict] = []
 
-    for pp in pp_sizes:
-        for tp in tp_sizes:
+    for pp in p_pp_sizes:
+        for tp in p_tp_sizes:
             # Colocated: each replica = tp × pp GPUs
             replica_gpus = tp * pp
             for max_tokens in max_tokens_list:
@@ -116,7 +116,7 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     total = len(tasks)
     print(f"\n  Model={model_spec['name']} ({model_spec['total_params_b']/1e9:.1f}B params)")
     print(f"  GPU={gpu_name} x{total_gpus} ({total_vram_gb(gpu_name)}GB each)")
-    print(f"  Valid TP sizes: {tp_sizes}")
+    print(f"  Valid P-TP sizes: {p_tp_sizes}")
     print(f"  Evaluating {total} strategies...\n")
 
     results = []

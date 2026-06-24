@@ -2,12 +2,11 @@
 """GPU roofline benchmark suite — benchmark, fit, strategy search.
 
 Usage:
-    uv run python main.py bench                   # GPU kernel microbenchmarks
-    uv run python main.py fit                     # Roofline model fitting
-    uv run python main.py search                  # PD disaggregation strategy search
-
-Single simulation with time-series output:
-    uv run python main.py sim -o out/my_run/
+    uv run python main.py --bench                   # GPU kernel microbenchmarks
+    uv run python main.py --fit                     # Roofline model fitting
+    uv run python main.py --search                  # PD disaggregation strategy search
+    uv run python main.py --sim                     # Single simulation
+    uv run python main.py --validate -o out/        # Visualize sim output
 """
 
 import argparse
@@ -83,7 +82,7 @@ def run_fit(args):
 
     cfg = load_config(args.config)
 
-    bench_dir = args.fit or bench_results_dir(cfg)
+    bench_dir = args.fit_dir or bench_results_dir(cfg)
     matmul_xlsx = os.path.join(bench_dir, "matmul.xlsx")
     elem_xlsx = os.path.join(bench_dir, "elementwise.xlsx")
 
@@ -217,99 +216,68 @@ def main():
         description="GPU Roofline Benchmark Suite — benchmark, fit, search, sim",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
-               "  uv run python main.py bench\n"
-               "  uv run python main.py fit\n"
-               "  uv run python main.py search\n"
-               "  uv run python main.py sim\n"
-               "  uv run python main.py validate -o sim/output/my_run\n"
-               "  uv run python main.py validate -o sim/output/my_run --sim-csv s.csv --sim-log s.log",
+               "  uv run python main.py --bench\n"
+               "  uv run python main.py --fit\n"
+               "  uv run python main.py --search\n"
+               "  uv run python main.py --sim\n"
+               "  uv run python main.py --validate -o sim/output/my_run\n"
+               "  uv run python main.py --validate -o sim/output/my_run --sim-csv s.csv --sim-log s.log",
     )
 
-    subs = parser.add_subparsers(dest="mode", title="modes")
-    subs.required = False
-
-    # ── bench ──
-    bench_p = subs.add_parser("bench", help="Run GPU kernel benchmarks")
-    bench_p.add_argument("--config", default="config/default.yaml",
-                         help="Benchmark config (default: config/default.yaml)")
-
-    # ── fit ──
-    fit_p = subs.add_parser("fit", help="Fit roofline model from benchmark data")
-    fit_p.add_argument("--config", default="config/default.yaml",
-                       help="Benchmark config for GPU name (default: config/default.yaml)")
-    fit_p.add_argument("--dir", default=None, metavar="DIR",
-                       help="Override bench results directory")
-
-    # ── search ──
-    search_p = subs.add_parser("search", help="Grid search for optimal PD strategy")
-    search_p.add_argument("--config", default="config/search.yaml",
-                      help="Simulation config (default: config/search.yaml)")
-
-    # ── sim ──
-    sim_p = subs.add_parser("sim", help="Run a single simulation with time-series output")
-    sim_p.add_argument("--config", default="config/sim.yaml")
-
-    # ── validate ──
-    val_p = subs.add_parser("validate", help="Visualize sim output (optionally vs LLMServingSim)")
-    val_p.add_argument("-o", "--output-dir", required=True,
-                       help="Path to a finished sim run directory")
-    val_p.add_argument("--sim-csv", default=None,
-                       help="Optional LLMServingSim sim.csv for comparison")
-    val_p.add_argument("--sim-log", default=None,
-                       help="Optional LLMServingSim sim.log for comparison")
-    val_p.add_argument("--title", default="foothold sim", help="Plot title suffix")
-    val_p.add_argument("--prefix", default="", help="Output filename prefix")
-
-    # Backward-compat: support --bench / --fit / --search flags too
-    parser.add_argument("--bench", action="store_true", dest="_flag_bench",
-                        help=argparse.SUPPRESS)
+    # ── Mode flags ──
+    parser.add_argument("--bench", action="store_true", dest="bench",
+                        help="Run GPU kernel benchmarks")
     parser.add_argument("--fit", default=None, nargs="?", const="", metavar="DIR",
-                        dest="_flag_fit", help=argparse.SUPPRESS)
-    parser.add_argument("--search", action="store_true", dest="_flag_search",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--sim", action="store_true", dest="_flag_sim",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--validate", action="store_true", dest="_flag_validate",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--config", default="config/default.yaml", dest="_flag_config",
-                        help=argparse.SUPPRESS)
+                        dest="fit", help="Fit roofline model from benchmark data [DIR=bench results dir]")
+    parser.add_argument("--search", action="store_true", dest="search",
+                        help="Grid search for optimal PD strategy")
+    parser.add_argument("--sim", action="store_true", dest="sim",
+                        help="Run a single simulation with time-series output")
+    parser.add_argument("--validate", action="store_true", dest="validate",
+                        help="Visualize sim output (optionally vs LLMServingSim)")
+
+    # ── Shared options ──
+    parser.add_argument("--config", default=None, dest="config",
+                        help="Config file path (default: config/default.yaml for --bench/--fit, "
+                             "config/search.yaml for --search, config/sim.yaml for --sim)")
+    parser.add_argument("--dir", default=None, metavar="DIR", dest="dir",
+                        help="Override bench results directory (for --fit)")
+    parser.add_argument("-o", "--output-dir", default=None, dest="output_dir",
+                        help="Output directory (for --validate)")
+    parser.add_argument("--sim-csv", default=None, dest="sim_csv",
+                        help="LLMServingSim sim.csv for comparison (for --validate)")
+    parser.add_argument("--sim-log", default=None, dest="sim_log",
+                        help="LLMServingSim sim.log for comparison (for --validate)")
+    parser.add_argument("--title", default="foothold sim", dest="title",
+                        help="Plot title suffix (for --validate)")
+    parser.add_argument("--prefix", default="", dest="prefix",
+                        help="Output filename prefix (for --validate)")
 
     args = parser.parse_args()
 
-    # Route based on subparser mode, fall back to flags for backward compat
-    mode = args.mode
-    if mode is None:
-        if getattr(args, "_flag_bench", False):
-            mode = "bench"
-        elif getattr(args, "_flag_fit", None) is not None:
-            mode = "fit"
-        elif getattr(args, "_flag_search", False):
-            mode = "search"
-        elif getattr(args, "_flag_sim", False):
-            mode = "sim"
-        elif getattr(args, "_flag_validate", False):
-            mode = "validate"
-
-    if mode == "bench":
-        args.config = getattr(args, "config", "config/default.yaml")
-        run_benchmarks(args)
-    elif mode == "fit":
-        fit_dir = getattr(args, "dir", None)
-        args.fit = fit_dir if fit_dir else getattr(args, "_flag_fit", "")
-        args.config = getattr(args, "config", "config/default.yaml")
-        run_fit(args)
-    elif mode == "search":
-        args.config = getattr(args, "config", "config/search.yaml")
-        run_search(args)
-    elif mode == "sim":
-        # Support both subcommand (with --config, -o, etc.) and --sim flag
-        if not hasattr(args, "config") or args.config is None:
-            args.config = "config/sim.yaml"
-        run_sim(args)
-    elif mode == "validate":
-        run_validate(args)
-    else:
+    # Count how many mode flags are set
+    mode_flags = [args.bench, args.fit is not None, args.search, args.sim, args.validate]
+    if sum(mode_flags) != 1:
         parser.print_help()
+        if sum(mode_flags) > 1:
+            print("\nError: specify exactly one mode flag", file=sys.stderr)
+        sys.exit(1)
+
+    if args.bench:
+        args.config = args.config or "config/default.yaml"
+        run_benchmarks(args)
+    elif args.fit is not None:
+        args.config = args.config or "config/default.yaml"
+        args.fit_dir = args.dir or args.fit or ""
+        run_fit(args)
+    elif args.search:
+        args.config = args.config or "config/search.yaml"
+        run_search(args)
+    elif args.sim:
+        args.config = args.config or "config/sim.yaml"
+        run_sim(args)
+    elif args.validate:
+        run_validate(args)
 
 
 if __name__ == "__main__":

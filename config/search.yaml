@@ -24,10 +24,10 @@ strategy:
     pd_ratios: [1, 1]
     max_batched_tokens: [256, 512, 1024, 2048, 4096, 8192]
     prefill_thresholds: [256, 512, 1024, 2048]
-    tp_sizes: [2]
-    decode_tp_sizes: [1]   # D-side TP in disaggregated mode (null = same as tp_sizes)
-    pp_sizes: [1]          # pipeline parallelism (layers split across GPUs)
-    decode_pp_sizes: [1]   # D-side PP in disaggregated mode (null = same as pp_sizes)
+    p_tp_sizes: [2]          # P-side TP (D-side uses decode_tp_sizes)
+    decode_tp_sizes: [1]     # D-side TP in disaggregated mode (null = same as p_tp_sizes)
+    p_pp_sizes: [1]          # P-side PP (D-side uses decode_pp_sizes)
+    decode_pp_sizes: [1]     # D-side PP in disaggregated mode (null = same as p_pp_sizes)
 
 output: "sim/output/results.xlsx"
 

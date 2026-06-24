@@ -42,10 +42,6 @@ def run_single(
     sim_cfg = cfg.get("simulation", cfg)
     strat = cfg.get("strategy", {})
     mode = strat.get("mode", "colocated")
-    total_gpus = strat.get("total_gpus", 1)
-    tp_size = strat.get("tp_size", 1)
-    pp_size = strat.get("pp_size", 1)
-    d_pp_size = strat.get("d_pp_size", 1)
     max_tokens = sim_cfg.get("max_num_batched_tokens", 8192)
     threshold = sim_cfg.get("long_prefill_token_threshold", 1024)
     slo = cfg.get("slo", {})
@@ -65,18 +61,31 @@ def run_single(
 
     t0 = time.perf_counter()
 
+    tp_size = pp_size = 1
+    dp = 0
+    pd_ratio = (1, 1)
+    d_tp = d_pp = 1
+
     if mode == "colocated":
+        tp_size = strat.get("tp_size", 1)
+        pp_size = strat.get("pp_size", 1)
+        total_gpus = strat.get("total_gpus", 1)
         dp = total_gpus // (tp_size * pp_size)
         metrics = engine.run(list(requests), mode="colocated",
                              tp_size=tp_size, dp=dp, pp_size=pp_size,
                              recorder=recorder)
     else:
         pd_ratio = strat.get("pd_ratio", [1, 1])
+        p_tp = strat.get("p_tp_size", 1)
+        p_pp = strat.get("p_pp_size", 1)
         d_tp = strat.get("d_tp_size", 1)
+        d_pp = strat.get("d_pp_size", 1)
+        tp_size, pp_size = p_tp, p_pp
+        total_gpus = p_tp * p_pp * pd_ratio[0] + d_tp * d_pp * pd_ratio[1]
         metrics = engine.run(list(requests), mode="disaggregated",
-                             pd_ratio=pd_ratio, tp_size=tp_size,
+                             pd_ratio=pd_ratio, tp_size=p_tp,
                              d_tp_size=d_tp,
-                             pp_size=pp_size, d_pp_size=d_pp_size,
+                             pp_size=p_pp, d_pp_size=d_pp,
                              recorder=recorder)
 
     elapsed = time.perf_counter() - t0
@@ -107,7 +116,7 @@ def run_single(
     if mode == "disaggregated":
         meta_extra["pd_ratio"] = list(pd_ratio)
         meta_extra["d_tp_size"] = d_tp
-        meta_extra["d_pp_size"] = d_pp_size
+        meta_extra["d_pp_size"] = d_pp
     if mode == "colocated":
         meta_extra["dp"] = dp
 
