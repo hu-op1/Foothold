@@ -134,19 +134,43 @@ def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1):
     return (peak_bytes + cuda_overhead) / 1e9 / tp
 
 
+def valid_pp_sizes(model_spec, num_gpus):
+    """Return list of PP sizes that are valid for this model.
+
+    Constraints:
+    1. num_layers % pp == 0 (layer divisibility)
+    2. pp <= num_gpus
+
+    Returns sorted list of valid PP sizes from {1, 2, 4, 8}.
+    """
+    nl = model_spec["num_layers"]
+    valid = []
+    for pp in [1, 2, 4, 8]:
+        if pp > num_gpus:
+            continue
+        if nl % pp != 0:
+            continue
+        valid.append(pp)
+    return valid if valid else [1]
+
+
 def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
                    max_model_len=8192, max_num_seqs=256,
                    gpu_memory_utilization=0.85,
-                   max_batch_tokens=8192):
+                   max_batch_tokens=8192,
+                   pp=1):
     """Return list of TP sizes that fit in GPU memory.
 
     Constraints:
     1. num_heads % tp == 0 (attention head divisibility)
     2. num_kv_heads % tp == 0 (KV head divisibility for GQA)
-    3. model_weight/tp + activation < usable VRAM (weights must fit)
+    3. model_weight/(tp×pp) + activation < usable VRAM (weights must fit)
     4. KV cache at expected context must fit in remaining usable VRAM.
        Uses estimated average seq length (not max_model_len) since the
        block pool (PagedAttention) handles dynamic allocation at runtime.
+
+    When pp > 1, each GPU only holds weights for nl/pp layers and KV cache
+    for those layers only, reducing per-GPU memory pressure.
 
     Activation memory is computed from model architecture × max_batch_tokens,
     not a fixed constant.
@@ -160,21 +184,24 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
 
     valid = []
     for tp in [1, 2, 4, 8]:
-        if tp > num_gpus:
+        if tp * pp > num_gpus:
             continue
         if model_spec["num_heads"] % tp != 0:
             continue
         if nh_kv % tp != 0:
             continue
 
+        # Activation per GPU is the same regardless of PP (peak per-layer).
+        # TP divides the activation tensor.
         act_gb = activation_memory_gb(model_spec, max_batch_tokens, tp)
-        weight_per_gpu = weight_gb / tp
+        # PP splits layers → each GPU holds 1/(tp×pp) of weights
+        weight_per_gpu = weight_gb / (tp * pp)
         if weight_per_gpu + act_gb >= usable_vram:
             continue
 
-        # Must fit at least 1 request at full context
+        # KV cache: PP splits layers, TP splits heads → 1/(pp×tp) per GPU
         kv_budget_per_gpu = usable_vram - weight_per_gpu - act_gb
-        kv_per_seq_per_gpu_gb = (kv_per_tok * max_model_len) / 1e9 / tp
+        kv_per_seq_per_gpu_gb = (kv_per_tok * max_model_len) / 1e9 / (pp * tp)
         if kv_per_seq_per_gpu_gb <= kv_budget_per_gpu:
             valid.append(tp)
 
@@ -182,15 +209,19 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
 
 
 def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256,
-                  gpu_memory_utilization=0.85, max_batch_tokens=8192):
-    """Print a memory breakdown for a given config."""
+                  gpu_memory_utilization=0.85, max_batch_tokens=8192,
+                  pp=1):
+    """Print a memory breakdown for a given config.
+
+    When pp > 1, weights and KV cache are split across pipeline stages.
+    """
     usable_vram = total_vram_gb(gpu_name) * gpu_memory_utilization
     weight_gb = model_weight_gb(model_spec)
     kv_per_tok = kv_cache_per_token_bytes(model_spec)
     act_gb = activation_memory_gb(model_spec, max_batch_tokens, tp)
 
-    w_gpu = weight_gb / tp
-    kv_seq_gb = (kv_per_tok * max_model_len) / 1e9 / tp  # per-GPU for one seq
+    w_gpu = weight_gb / (tp * pp)
+    kv_seq_gb = (kv_per_tok * max_model_len) / 1e9 / (pp * tp)  # per-GPU for one seq
     kv_total_gb = kv_seq_gb * max_num_seqs
     used = w_gpu + kv_total_gb + act_gb
     free = usable_vram - used

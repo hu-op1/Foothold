@@ -34,6 +34,7 @@ class SimulationEngine:
         self.model = model_spec
         self.hw = hw_params
         self.clock: float = 0.0
+        self.pp_size = 1
 
         # Model dimensions
         self.nh_kv = model_spec.get("num_kv_heads", model_spec["num_heads"])
@@ -41,11 +42,13 @@ class SimulationEngine:
         self.nl = model_spec["num_layers"]
         self.block_size = config["simulation"]["block_size"]
 
-        # Bytes per KV cache block
+        # Bytes per KV cache block (all layers — used for KV transfer).
         self.bytes_per_block = (
             2 * self.nl * self.nh_kv * self.hd
             * self.block_size * 2  # 2 bytes dtype
         )
+        # Base num_blocks (pp=1).  Callers should scale by pp_size when
+        # creating pools because each GPU stores KV for only nl/pp layers.
         self.num_blocks = self._compute_num_blocks()
 
         # Network params
@@ -63,6 +66,7 @@ class SimulationEngine:
 
     def run(self, requests: list[Request], mode="colocated",
             chunk_size=None, pd_ratio=None, tp_size=1, d_tp_size=1, dp=1,
+            pp_size=1, d_pp_size=1,
             recorder=None):
         """Run simulation over a list of requests.
 
@@ -73,6 +77,8 @@ class SimulationEngine:
             pd_ratio: for disaggregated, (num_prefill, num_decode) GPU counts
             tp_size: tensor parallelism degree on P side (1 = no TP)
             d_tp_size: tensor parallelism degree on D side (1 = no TP on D)
+            pp_size: pipeline parallelism degree on P side (1 = no PP)
+            d_pp_size: pipeline parallelism degree on D side (1 = no PP on D)
             dp: data-parallel degree — number of independent ranks
             recorder: optional SimRecorder for per-tick + per-request output
 
@@ -81,6 +87,8 @@ class SimulationEngine:
         """
         self.tp_size = tp_size
         self.d_tp_size = d_tp_size
+        self.pp_size = pp_size
+        self.d_pp_size = d_pp_size
         # Reset request state for fresh simulation run
         for r in requests:
             r.num_computed_tokens = 0
@@ -101,24 +109,32 @@ class SimulationEngine:
         self._max_iterations = max(100_000, total_decode_tokens * 2 + len(requests) * 5)
 
         if mode == "colocated":
-            return self._run_colocated(requests, dp=dp, recorder=recorder)
+            return self._run_colocated(requests, dp=dp, pp=pp_size, recorder=recorder)
         else:
             return self._run_disaggregated(requests, pd_ratio or (1, 1),
+                                           pp=pp_size, d_pp=d_pp_size,
                                            recorder=recorder)
 
     def _run_colocated(self, requests: list[Request], dp: int = 1,
-                        recorder=None):
+                        pp: int = 1, recorder=None):
         """Run colocated simulation.
 
         When dp > 1, creates dp independent schedulers (each with its own
         KV cache pool and model weights), routes arrivals to the least-loaded
         rank, and steps all ranks in parallel.  This matches vLLM's data-
         parallel architecture where each DP rank is a full EngineCore.
+
+        Each DP rank represents a PP×TP group (pp_size × tp_size GPUs).
+        Total GPU count = dp × tp_size × pp_size.
         """
         from sim.metrics import MetricsCollector
 
-        # Create dp independent instances
-        pools = [BlockPool(self.num_blocks * self.tp_size,
+        # num_blocks is for a single GPU with pp=1.
+        # PP: nl/pp layers → pp× more blocks per GPU.
+        # TP: nh_kv/tp heads → tp× more blocks per GPU.
+        # Each DP rank pool = num_blocks × tp_size × pp_size.
+        blocks_per_pool = self.num_blocks * self.tp_size * pp
+        pools = [BlockPool(blocks_per_pool,
                            enable_caching=self.enable_cache) for _ in range(dp)]
         for p in pools:
             p.bytes_per_block = self.bytes_per_block
@@ -180,7 +196,8 @@ class SimulationEngine:
                 if output.total_num_scheduled_tokens > 0:
                     scheds[i]._update_after_schedule(output)
                     t = self._predict_step(
-                        [(r, nt) for r, nt, _ in output.scheduled_requests])
+                        [(r, nt) for r, nt, _ in output.scheduled_requests],
+                        pp=pp)
                     scheds[i].update_from_output(output, self.clock + t)
                     max_step = max(max_step, t)
                     # Count prefill vs decode tokens for this step
@@ -229,19 +246,25 @@ class SimulationEngine:
         return metrics
 
     def _run_disaggregated(self, requests: list[Request], pd_ratio: tuple[int, int],
+                            pp: int = 1, d_pp: int = 1,
                             recorder=None):
         """Run disaggregated simulation with multiple independent D instances.
 
         Requests are routed to the least-loaded D instance and admitted directly
         to the D running queue (with KV transfer). Waiting requests never hold
         D-side blocks — only running requests do.
+
+        P side: pp × tp GPUs per replica, dp_p = p / (pp × tp) replicas.
+        D side: d_pp × d_tp GPUs per replica, dp_d = d / (d_pp × d_tp) replicas.
         """
         from sim.metrics import MetricsCollector
 
         num_p, num_d = pd_ratio
 
-        # P side: pooled GPUs with larger batch budget
-        pool_p = BlockPool(self.num_blocks * num_p, enable_caching=self.enable_cache)
+        # P side: pooled GPUs with larger batch budget.
+        # Each P GPU gets num_blocks × pp (nl/pp layers → pp× more blocks).
+        # num_p GPUs total → pool sized for all of them.
+        pool_p = BlockPool(self.num_blocks * num_p * pp, enable_caching=self.enable_cache)
         pool_p.bytes_per_block = self.bytes_per_block
         p_cfg = _deep_copy_config(self.cfg)
         p_cfg["simulation"]["max_num_batched_tokens"] = (
@@ -249,17 +272,20 @@ class SimulationEngine:
         p_cfg["simulation"]["max_num_seqs"] = self.cfg["simulation"]["max_num_seqs"]
         p_sched = ColocatedScheduler(pool_p, p_cfg)
 
-        # D side: num_d GPUs grouped into TP groups of size d_tp_size.
-        # Each TP group is one ColocatedScheduler with a pool of
-        # d_tp_size × num_blocks blocks.  num_d_groups = data-parallel degree.
+        # D side: num_d GPUs grouped into (d_tp × d_pp) groups per replica.
+        # Each TP×PP group is one ColocatedScheduler with a pool of
+        # d_tp × num_blocks blocks. num_d_groups = DP degree on D side.
         d_tp = getattr(self, "d_tp_size", 1)
-        if num_d % d_tp != 0:
+        d_pp_size = d_pp
+        per_replica_gpus = d_tp * d_pp_size
+        if num_d % per_replica_gpus != 0:
             raise ValueError(
-                f"num_d ({num_d}) must be divisible by d_tp_size ({d_tp})")
-        num_d_groups = num_d // d_tp
+                f"num_d ({num_d}) must be divisible by d_tp×d_pp "
+                f"({d_tp}×{d_pp_size}={per_replica_gpus})")
+        num_d_groups = num_d // per_replica_gpus
 
         d_cfg = _deep_copy_config(self.cfg)
-        d_pools = [BlockPool(self.num_blocks * d_tp,
+        d_pools = [BlockPool(self.num_blocks * d_tp * d_pp_size,
                              enable_caching=self.enable_cache,
                              cpu_swap_bw_bytes_per_s=self.cpu_swap_bw)
                    for _ in range(num_d_groups)]
@@ -359,7 +385,8 @@ class SimulationEngine:
                     p_sched.running.remove(req)
 
             p_time_val = self._predict_step(
-                [(r, nt) for r, nt, _ in p_out.scheduled_requests]
+                [(r, nt) for r, nt, _ in p_out.scheduled_requests],
+                pp=pp
             ) if p_total > 0 else 0.0
             # P-side update: sets scheduled_ts for newly admitted requests
             if p_total > 0:
@@ -374,7 +401,7 @@ class SimulationEngine:
                 if o.total_num_scheduled_tokens > 0:
                     dt = self._predict_step(
                         [(r, nt) for r, nt, _ in o.scheduled_requests],
-                        tp=d_tp)
+                        tp=d_tp, pp=d_pp)
                     d_scheds[i].update_from_output(o, self.clock + dt)
                     d_times.append(dt)
                     # D-side tokens are decode (gen)
@@ -454,18 +481,22 @@ class SimulationEngine:
         metrics.cache_hit_rate = total_hits / total_queries if total_queries > 0 else 0.0
         return metrics
 
-    def _predict_step(self, scheduled_requests, tp=None):
-        """Predict step time, using TP if configured.
+    def _predict_step(self, scheduled_requests, tp=None, pp=None):
+        """Predict step time, using TP and/or PP if configured.
 
         Args:
             scheduled_requests: list of (request, num_new_tokens)
             tp: tensor parallelism degree (defaults to self.tp_size)
+            pp: pipeline parallelism degree (defaults to self.pp_size)
         """
         if tp is None:
             tp = getattr(self, "tp_size", 1)
-        if tp > 1:
+        if pp is None:
+            pp = getattr(self, "pp_size", 1)
+        if tp > 1 or pp > 1:
             return predict_step_tp(scheduled_requests, self.model, self.hw,
-                                   tp, self.intra_bw_gb_s)
+                                   tp, self.intra_bw_gb_s,
+                                   pp_size=pp)
         return predict_step(scheduled_requests, self.model, self.hw)
 
     def _compute_xfer(self, request: Request, prefill_time: float) -> float:

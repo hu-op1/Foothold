@@ -117,18 +117,112 @@ def predict_step(scheduled_requests, model_spec, hw_params):
     return proj_time + attn_time + elem_time + lm_head_time
 
 
+def predict_step_pp(scheduled_requests, model_spec, hw_params,
+                    pp_size, intra_node_bw_gb_s):
+    """Predict step time with pipeline parallelism.
+
+    Splits model layers evenly across *pp_size* pipeline stages.
+    Each stage computes ``num_layers / pp_size`` layers and sends
+    hidden states to the next stage (``pp_size - 1`` transfers).
+
+    Uses the optimistic (pipelined) model: all stages execute in parallel,
+    so compute time divides by pp_size while inter-stage communication
+    adds fixed overhead.
+
+    Args:
+        pp_size: number of pipeline stages (GPUs in the PP dimension).
+        intra_node_bw_gb_s: intra-node bandwidth for inter-stage P2P (GB/s).
+
+    Returns:
+        step_time_s with PP overhead.
+    """
+    if pp_size <= 1:
+        return predict_step(scheduled_requests, model_spec, hw_params)
+
+    if not scheduled_requests:
+        return 0.0
+
+    h = model_spec["hidden_dim"]
+    inter = model_spec.get("intermediate_dim", h * 4)
+    nh = model_spec["num_heads"]
+    nh_kv = model_spec.get("num_kv_heads", nh)
+    hd = model_spec["head_dim"]
+    vs = model_spec["vocab_size"]
+    norm_type = model_spec.get("norm_type", "rmsnorm")
+    nl = model_spec["num_layers"]
+    na = model_spec.get("attn_layers", nl)
+
+    b_effs = hw_params["elem_b_effs"]
+    overheads = hw_params["elem_overheads"]
+
+    total_new_tokens = sum(nt for _, nt in scheduled_requests)
+
+    # Per-stage layer counts (last stage gets remainder if uneven)
+    layers_per_stage = nl // pp_size
+    attn_per_stage = na // pp_size
+
+    # ── Roofline params ──
+    # Projections / LM head use total M to pick prefill vs decode params
+    params = _select_roofline_params(total_new_tokens, hw_params)
+    F, B, p = params["F"], params["B"], params["p"]
+
+    F_d, B_d, p_d = hw_params["F_peak_decode"], hw_params["B_peak_decode"], hw_params["p_decode"]
+    F_p, B_p, p_p = hw_params["F_peak_prefill"], hw_params["B_peak_prefill"], hw_params["p_prefill"]
+
+    # ── Per-stage projections (Q/K/V/O + gate/up/down × layers_per_stage) ──
+    proj_time = layers_per_stage * projections(
+        total_new_tokens, h, inter, F, B, p, nh, nh_kv, hd)
+
+    # ── Per-stage attention (per-request, per-attention-layer) ──
+    attn_time = 0.0
+    for req, num_new in scheduled_requests:
+        kv_len_after = req.num_computed_tokens
+        if kv_len_after > 0:
+            if req.is_prefill_chunk:
+                attn_time += attn_per_stage * attention_fused(
+                    1, nh, num_new, kv_len_after, hd, F_p, B_p, p_p, nh_kv)
+            else:
+                attn_time += attn_per_stage * attention_fused(
+                    1, nh, num_new, kv_len_after, hd, F_d, B_d, p_d, nh_kv)
+
+    # ── Per-stage elementwise ops ──
+    elem_time = layers_per_stage * elementwise_ops(
+        1, total_new_tokens, h, inter, nh, hd, norm_type, b_effs, overheads, nh_kv)
+
+    # ── LM head (only on last stage, but sequential pipeline model
+    #      means it's still on the critical path) ──
+    lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p)
+
+    # ── Inter-stage communication: (pp_size - 1) transfers ──
+    # Each transfer sends hidden states for all tokens: tokens × h × 2 bytes
+    inter_stage_bytes = total_new_tokens * h * DTYPE_BYTES
+    inter_stage_comm = (pp_size - 1) * inter_stage_bytes / (intra_node_bw_gb_s * 1e9)
+
+    return proj_time + attn_time + elem_time + lm_head_time + inter_stage_comm
+
+
 def predict_step_tp(scheduled_requests, model_spec, hw_params,
-                    num_gpus, intra_node_bw_gb_s):
-    """Predict step time with tensor parallelism.
+                    num_gpus, intra_node_bw_gb_s,
+                    pp_size=1):
+    """Predict step time with tensor parallelism (and optional pipeline parallelism).
+
+    When pp_size > 1, pipeline parallelism is applied first (splitting layers
+    across stages), then TP divides the per-stage compute and adds all-reduce.
 
     Args:
         num_gpus: number of GPUs in the TP group.
         intra_node_bw_gb_s: intra-node bandwidth for all-reduce (GB/s).
+        pp_size: pipeline parallelism degree (1 = no PP).
 
     Returns:
-        step_time_s with TP overhead.
+        step_time_s with TP (+PP) overhead.
     """
-    single_time = predict_step(scheduled_requests, model_spec, hw_params)
+    if pp_size > 1:
+        single_time = predict_step_pp(scheduled_requests, model_spec, hw_params,
+                                       pp_size, intra_node_bw_gb_s)
+    else:
+        single_time = predict_step(scheduled_requests, model_spec, hw_params)
+
     if num_gpus <= 1:
         return single_time
 

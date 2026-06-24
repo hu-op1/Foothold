@@ -26,9 +26,11 @@ strategy:
   mode: colocated       # colocated or disaggregated
   total_gpus: 2
   tp_size: 2            # tensor parallelism degree (1 = no TP)
+  pp_size: 1            # pipeline parallelism degree (1 = no PP)
   # Disaggregated only:
   pd_ratio: [1, 1]      # [num_prefill_gpus, num_decode_gpus]
   d_tp_size: 1          # D-side TP
+  d_pp_size: 1          # D-side PP
 
 output: "sim/output/llama-2-7b-tp2-heavy"
 tick_seconds: 0.5            # timeseries downsampling interval

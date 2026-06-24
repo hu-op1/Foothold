@@ -44,6 +44,8 @@ def run_single(
     mode = strat.get("mode", "colocated")
     total_gpus = strat.get("total_gpus", 1)
     tp_size = strat.get("tp_size", 1)
+    pp_size = strat.get("pp_size", 1)
+    d_pp_size = strat.get("d_pp_size", 1)
     max_tokens = sim_cfg.get("max_num_batched_tokens", 8192)
     threshold = sim_cfg.get("long_prefill_token_threshold", 1024)
     slo = cfg.get("slo", {})
@@ -64,15 +66,18 @@ def run_single(
     t0 = time.perf_counter()
 
     if mode == "colocated":
-        dp = total_gpus // tp_size
+        dp = total_gpus // (tp_size * pp_size)
         metrics = engine.run(list(requests), mode="colocated",
-                             tp_size=tp_size, dp=dp, recorder=recorder)
+                             tp_size=tp_size, dp=dp, pp_size=pp_size,
+                             recorder=recorder)
     else:
         pd_ratio = strat.get("pd_ratio", [1, 1])
         d_tp = strat.get("d_tp_size", 1)
         metrics = engine.run(list(requests), mode="disaggregated",
                              pd_ratio=pd_ratio, tp_size=tp_size,
-                             d_tp_size=d_tp, recorder=recorder)
+                             d_tp_size=d_tp,
+                             pp_size=pp_size, d_pp_size=d_pp_size,
+                             recorder=recorder)
 
     elapsed = time.perf_counter() - t0
     recorder.finish()
@@ -90,6 +95,7 @@ def run_single(
         "gpu": gpu_name,
         "total_gpus": total_gpus,
         "tp_size": tp_size,
+        "pp_size": pp_size,
         "max_batched_tokens": max_tokens,
         "prefill_threshold": threshold,
         "throughput_tok_s": metrics.throughput(),
@@ -101,6 +107,7 @@ def run_single(
     if mode == "disaggregated":
         meta_extra["pd_ratio"] = list(pd_ratio)
         meta_extra["d_tp_size"] = d_tp
+        meta_extra["d_pp_size"] = d_pp_size
     if mode == "colocated":
         meta_extra["dp"] = dp
 

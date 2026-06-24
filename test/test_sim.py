@@ -26,9 +26,8 @@ def _make_jsonl_trace(path, num=5, shared_prefix_ids=None):
 
 @pytest.fixture
 def model():
-    from models import load_model_specs
-    specs = load_model_specs()
-    return next(m for m in specs["models"] if m["name"] == "Llama-2-7b-hf")
+    from sim.config import load_model_spec
+    return load_model_spec("meta-llama/Llama-2-7b-hf")
 
 
 @pytest.fixture

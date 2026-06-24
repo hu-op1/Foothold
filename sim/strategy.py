@@ -6,7 +6,7 @@ import time
 from tqdm import tqdm
 
 from sim.engine import SimulationEngine
-from sim.config import valid_tp_sizes, total_vram_gb
+from sim.config import valid_tp_sizes, valid_pp_sizes, total_vram_gb
 
 
 def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
@@ -34,9 +34,22 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     pd_ratios = search_cfg.get("pd_ratios", [[1, 1]])
     tp_sizes = search_cfg.get("tp_sizes", [1])
     d_tp_sizes = search_cfg.get("decode_tp_sizes") or tp_sizes
+    pp_sizes = search_cfg.get("pp_sizes", [1])
+    d_pp_sizes = search_cfg.get("decode_pp_sizes") or pp_sizes
     hw_params = engine.hw
 
-    # Pre-compute valid TP sizes for this model+GPU
+    # Pre-compute valid PP sizes for this model
+    valid_pps = valid_pp_sizes(model_spec, total_gpus)
+    pp_sizes = [p for p in pp_sizes if p in valid_pps]
+    d_pp_sizes = [p for p in d_pp_sizes if p in valid_pps]
+    if not pp_sizes:
+        pp_sizes = [1]
+    if not d_pp_sizes:
+        d_pp_sizes = [1]
+
+    # Pre-compute valid TP sizes for this model+GPU.
+    # Pass pp=1 for the initial filter — the full cross-product is validated
+    # in the loop below where pp is known.
     valid_tps = valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, total_gpus,
                                max_model_len, max_num_seqs,
                                gpu_memory_utilization=gpu_mem_util,
@@ -50,46 +63,55 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
 
     tasks: list[dict] = []
 
-    for tp in tp_sizes:
-        for max_tokens in max_tokens_list:
-            for threshold in thresholds_list:
-                if threshold > max_tokens:
-                    continue
+    for pp in pp_sizes:
+        for tp in tp_sizes:
+            # Colocated: each replica = tp × pp GPUs
+            replica_gpus = tp * pp
+            for max_tokens in max_tokens_list:
+                for threshold in thresholds_list:
+                    if threshold > max_tokens:
+                        continue
 
-                # Colocated: TP=tp, DP = total_gpus / tp independent instances
-                if mode in ("colocated", "auto") and total_gpus % tp == 0:
-                    dp = total_gpus // tp
-                    label = f"Colo TP{tp} DP{dp} (batch={max_tokens}, thr={threshold})"
-                    local_cfg = _deep_copy_config(cfg)
-                    local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
-                    local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
-                    tasks.append({
-                        "label": label, "cfg": local_cfg, "mode": "colocated",
-                        "tp": tp, "dp": dp,
-                    })
+                    # Colocated: DP = total_gpus / (tp × pp) independent replicas
+                    if mode in ("colocated", "auto") and total_gpus % replica_gpus == 0:
+                        dp = total_gpus // replica_gpus
+                        pp_str = f"PP{pp} " if pp > 1 else ""
+                        label = f"Colo {pp_str}TP{tp} DP{dp} (batch={max_tokens}, thr={threshold})"
+                        local_cfg = _deep_copy_config(cfg)
+                        local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
+                        local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
+                        tasks.append({
+                            "label": label, "cfg": local_cfg, "mode": "colocated",
+                            "tp": tp, "dp": dp, "pp": pp,
+                        })
 
-                # Disaggregated: P side TP=tp, D side TP=d_tp
-                if mode in ("disaggregated", "auto"):
-                    for pd_ratio in pd_ratios:
-                        p, d = pd_ratio if isinstance(pd_ratio, (list, tuple)) else (pd_ratio, 1)
-                        if p % tp != 0:
-                            continue
-                        dp_p = p // tp
-                        for d_tp in d_tp_sizes:
-                            if d % d_tp != 0:
+                    # Disaggregated: P side TP=tp, PP=pp; D side TP=d_tp, PP=d_pp
+                    if mode in ("disaggregated", "auto"):
+                        for pd_ratio in pd_ratios:
+                            p, d = pd_ratio if isinstance(pd_ratio, (list, tuple)) else (pd_ratio, 1)
+                            if p % replica_gpus != 0:
                                 continue
-                            dp_d = d // d_tp
-                            label = (f"Disagg {p}P(TP{tp}×{dp_p}):{d}D(TP{d_tp}×{dp_d}) "
-                                     f"(batch={max_tokens}, thr={threshold})")
-                            local_cfg = _deep_copy_config(cfg)
-                            local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
-                            local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
-                            tasks.append({
-                                "label": label, "cfg": local_cfg,
-                                "mode": "disaggregated", "pd_ratio": (p, d),
-                                "tp": tp, "dp_p": dp_p,
-                                "d_tp": d_tp, "dp_d": dp_d,
-                            })
+                            dp_p = p // replica_gpus
+                            for d_pp in d_pp_sizes:
+                                for d_tp in d_tp_sizes:
+                                    d_replica = d_tp * d_pp
+                                    if d % d_replica != 0:
+                                        continue
+                                    dp_d = d // d_replica
+                                    pp_str = f"PP{pp} " if pp > 1 else ""
+                                    d_pp_str = f"PP{d_pp} " if d_pp > 1 else ""
+                                    label = (f"Disagg {p}P({pp_str}TP{tp}×{dp_p})"
+                                             f":{d}D({d_pp_str}TP{d_tp}×{dp_d}) "
+                                             f"(batch={max_tokens}, thr={threshold})")
+                                    local_cfg = _deep_copy_config(cfg)
+                                    local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
+                                    local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
+                                    tasks.append({
+                                        "label": label, "cfg": local_cfg,
+                                        "mode": "disaggregated", "pd_ratio": (p, d),
+                                        "tp": tp, "dp_p": dp_p, "pp": pp,
+                                        "d_tp": d_tp, "dp_d": dp_d, "d_pp": d_pp,
+                                    })
 
     total = len(tasks)
     print(f"\n  Model={model_spec['name']} ({model_spec['total_params_b']/1e9:.1f}B params)")
@@ -116,16 +138,20 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
     engine = SimulationEngine(task["cfg"], model_spec, hw_params)
     mode = task["mode"]
     tp = task.get("tp", 1)
+    pp = task.get("pp", 1)
 
     if mode == "colocated":
         dp = task.get("dp", 1)
-        metrics = engine.run(list(requests), mode=mode, tp_size=tp, dp=dp)
+        metrics = engine.run(list(requests), mode=mode, tp_size=tp, dp=dp,
+                             pp_size=pp)
     else:
         d_tp = task.get("d_tp", 1)
+        d_pp = task.get("d_pp", 1)
         dp_d = task.get("dp_d", 1)
         metrics = engine.run(list(requests), mode=mode,
                              pd_ratio=task.get("pd_ratio"),
-                             tp_size=tp, d_tp_size=d_tp)
+                             tp_size=tp, d_tp_size=d_tp,
+                             pp_size=pp, d_pp_size=d_pp)
 
     elapsed = time.perf_counter() - t0
     score = metrics.score(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
