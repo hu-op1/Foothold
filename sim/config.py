@@ -141,16 +141,10 @@ def valid_pp_sizes(model_spec, num_gpus):
     1. num_layers % pp == 0 (layer divisibility)
     2. pp <= num_gpus
 
-    Returns sorted list of valid PP sizes from {1, 2, 4, 8}.
+    Returns sorted list of all valid PP sizes ≤ num_gpus.
     """
     nl = model_spec["num_layers"]
-    valid = []
-    for pp in [1, 2, 4, 8]:
-        if pp > num_gpus:
-            continue
-        if nl % pp != 0:
-            continue
-        valid.append(pp)
+    valid = [pp for pp in range(1, num_gpus + 1) if nl % pp == 0]
     return valid if valid else [1]
 
 
@@ -183,7 +177,7 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
     nh_kv = model_spec.get("num_kv_heads", model_spec["num_heads"])
 
     valid = []
-    for tp in [1, 2, 4, 8]:
+    for tp in range(1, num_gpus + 1):
         if tp * pp > num_gpus:
             continue
         if model_spec["num_heads"] % tp != 0:

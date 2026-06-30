@@ -102,7 +102,10 @@ def export_xlsx(results: list[dict], path: str) -> None:
             entry["elapsed"],
         ]
         for col, val in enumerate(values, 1):
-            ws.cell(row=row, column=col, value=val)
+            cell = ws.cell(row=row, column=col, value=val)
+            # Apply 3-decimal format to float columns (skip strategy_type, batch, thr)
+            if isinstance(val, float):
+                cell.number_format = '0.000'
 
     # Auto-width columns
     for col in range(1, len(headers) + 1):

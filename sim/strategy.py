@@ -34,6 +34,9 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     max_tokens_list = search_cfg.get("max_batched_tokens", [8192])
     thresholds_list = search_cfg.get("prefill_thresholds", [1024])
     max_workers = search_cfg.get("max_workers", 1)
+    enable_tp = search_cfg.get("tp", True)
+    enable_pp = search_cfg.get("pp", True)
+    enable_dp = search_cfg.get("dp", True)
     hw_params = engine.hw
 
     # Auto-generate PD ratios: all (p, d) where p + d = total_gpus, p>=1, d>=1
@@ -45,8 +48,8 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                                max_model_len, max_num_seqs,
                                gpu_memory_utilization=gpu_mem_util,
                                max_batch_tokens=max(max_tokens_list))
-    p_tp_sizes = d_tp_sizes = valid_tps
-    p_pp_sizes = d_pp_sizes = valid_pps
+    p_tp_sizes = d_tp_sizes = valid_tps if enable_tp else [1]
+    p_pp_sizes = d_pp_sizes = valid_pps if enable_pp else [1]
 
     tasks: list[dict] = []
 
@@ -60,10 +63,11 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                         continue
 
                     # Colocated: DP = total_gpus / (tp × pp) independent replicas
-                    if mode in ("colocated", "both") and total_gpus % replica_gpus == 0:
+                    if (mode in ("colocated", "both")
+                            and total_gpus % replica_gpus == 0
+                            and (enable_dp or total_gpus // replica_gpus == 1)):
                         dp = total_gpus // replica_gpus
-                        pp_str = f"PP{pp} " if pp > 1 else ""
-                        label = f"Colo {pp_str}TP{tp} DP{dp} (batch={max_tokens}, thr={threshold})"
+                        label = f"Colo PP{pp} TP{tp} DP{dp} (batch={max_tokens}, thr={threshold})"
                         local_cfg = _deep_copy_config(cfg)
                         local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
                         local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
@@ -85,10 +89,10 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                                     if d % d_replica != 0:
                                         continue
                                     dp_d = d // d_replica
-                                    pp_str = f"PP{pp} " if pp > 1 else ""
-                                    d_pp_str = f"PP{d_pp} " if d_pp > 1 else ""
-                                    label = (f"Disagg {p}P({pp_str}TP{tp}×{dp_p})"
-                                             f":{d}D({d_pp_str}TP{d_tp}×{dp_d}) "
+                                    if not enable_dp and (dp_p != 1 or dp_d != 1):
+                                        continue
+                                    label = (f"Disagg {p}P(PP{pp} TP{tp} DP{dp_p})"
+                                             f":{d}D(PP{d_pp} TP{d_tp} DP{dp_d}) "
                                              f"(batch={max_tokens}, thr={threshold})")
                                     local_cfg = _deep_copy_config(cfg)
                                     local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
