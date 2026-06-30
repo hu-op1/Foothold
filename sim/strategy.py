@@ -1,7 +1,9 @@
 """Grid search over colocated and disaggregated strategy parameters."""
 
+import copy
 import json
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from tqdm import tqdm
 
@@ -31,35 +33,20 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
 
     max_tokens_list = search_cfg.get("max_batched_tokens", [8192])
     thresholds_list = search_cfg.get("prefill_thresholds", [1024])
-    pd_ratios = search_cfg.get("pd_ratios", [[1, 1]])
-    p_tp_sizes = search_cfg.get("p_tp_sizes") or search_cfg.get("tp_sizes", [1])
-    d_tp_sizes = search_cfg.get("decode_tp_sizes") or p_tp_sizes
-    p_pp_sizes = search_cfg.get("p_pp_sizes") or search_cfg.get("pp_sizes", [1])
-    d_pp_sizes = search_cfg.get("decode_pp_sizes") or p_pp_sizes
+    max_workers = search_cfg.get("max_workers", 1)
     hw_params = engine.hw
 
-    # Pre-compute valid PP sizes for this model
-    valid_pps = valid_pp_sizes(model_spec, total_gpus)
-    p_pp_sizes = [p for p in p_pp_sizes if p in valid_pps]
-    d_pp_sizes = [p for p in d_pp_sizes if p in valid_pps]
-    if not p_pp_sizes:
-        p_pp_sizes = [1]
-    if not d_pp_sizes:
-        d_pp_sizes = [1]
+    # Auto-generate PD ratios: all (p, d) where p + d = total_gpus, p>=1, d>=1
+    pd_ratios = [[p, total_gpus - p] for p in range(1, total_gpus)]
 
-    # Pre-compute valid TP sizes for this model+GPU.
-    # Pass pp=1 for the initial filter — the full cross-product is validated
-    # in the loop below where pp is known.
+    # Auto-generate TP/PP sizes from model+GPU constraints
+    valid_pps = valid_pp_sizes(model_spec, total_gpus)
     valid_tps = valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, total_gpus,
                                max_model_len, max_num_seqs,
                                gpu_memory_utilization=gpu_mem_util,
                                max_batch_tokens=max(max_tokens_list))
-    p_tp_sizes = [t for t in p_tp_sizes if t in valid_tps]
-    d_tp_sizes = [t for t in d_tp_sizes if t in valid_tps]
-    if not p_tp_sizes:
-        p_tp_sizes = [1]
-    if not d_tp_sizes:
-        d_tp_sizes = [1]
+    p_tp_sizes = d_tp_sizes = valid_tps
+    p_pp_sizes = d_pp_sizes = valid_pps
 
     tasks: list[dict] = []
 
@@ -73,7 +60,7 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                         continue
 
                     # Colocated: DP = total_gpus / (tp × pp) independent replicas
-                    if mode in ("colocated", "auto") and total_gpus % replica_gpus == 0:
+                    if mode in ("colocated", "both") and total_gpus % replica_gpus == 0:
                         dp = total_gpus // replica_gpus
                         pp_str = f"PP{pp} " if pp > 1 else ""
                         label = f"Colo {pp_str}TP{tp} DP{dp} (batch={max_tokens}, thr={threshold})"
@@ -86,7 +73,7 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                         })
 
                     # Disaggregated: P side TP=tp, PP=pp; D side TP=d_tp, PP=d_pp
-                    if mode in ("disaggregated", "auto"):
+                    if mode in ("disaggregated", "both"):
                         for pd_ratio in pd_ratios:
                             p, d = pd_ratio if isinstance(pd_ratio, (list, tuple)) else (pd_ratio, 1)
                             if p % replica_gpus != 0:
@@ -120,11 +107,22 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     print(f"  Evaluating {total} strategies...\n")
 
     results = []
-    for t in tqdm(tasks, desc="  Searching", unit="strat",
+    if max_workers > 1:
+        with tqdm(total=len(tasks), desc="  Searching", unit="strat",
                   bar_format="{desc}: {percentage:3.0f}% |{bar}| "
-                             "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]"):
-        r = _run_one(t, requests, model_spec, hw_params, slo)
-        results.append(r)
+                             "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_run_one, t, requests, model_spec, hw_params, slo): t
+                          for t in tasks}
+                for future in as_completed(futures):
+                    results.append(future.result())
+                    pbar.update(1)
+    else:
+        for t in tqdm(tasks, desc="  Searching", unit="strat",
+                      bar_format="{desc}: {percentage:3.0f}% |{bar}| "
+                                 "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]"):
+            r = _run_one(t, requests, model_spec, hw_params, slo)
+            results.append(r)
 
     results.sort(key=lambda r: r["score"], reverse=True)
     return results
@@ -132,8 +130,10 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
 
 def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
              slo: dict) -> dict:
-    """Run a single strategy task. Top-level function for picklability."""
+    """Run a single strategy task. Deep-copies requests to avoid shared-state
+    races when running multiple strategies concurrently via max_workers."""
     t0 = time.perf_counter()
+    local_requests = copy.deepcopy(list(requests))
 
     engine = SimulationEngine(task["cfg"], model_spec, hw_params)
     mode = task["mode"]
@@ -142,13 +142,13 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
 
     if mode == "colocated":
         dp = task.get("dp", 1)
-        metrics = engine.run(list(requests), mode=mode, tp_size=tp, dp=dp,
+        metrics = engine.run(local_requests, mode=mode, tp_size=tp, dp=dp,
                              pp_size=pp)
     else:
         d_tp = task.get("d_tp", 1)
         d_pp = task.get("d_pp", 1)
         dp_d = task.get("dp_d", 1)
-        metrics = engine.run(list(requests), mode=mode,
+        metrics = engine.run(local_requests, mode=mode,
                              pd_ratio=task.get("pd_ratio"),
                              tp_size=tp, d_tp_size=d_tp,
                              pp_size=pp, d_pp_size=d_pp)

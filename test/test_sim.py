@@ -148,10 +148,11 @@ def test_strategy_search(model, hw, config):
     try:
         reqs = load_trace(path)
 
-        config["strategy"]["mode"] = "auto"
-        config["strategy"]["search"]["chunk_sizes"] = [256]
-        config["strategy"]["search"]["max_batched_tokens"] = [2048]
-        config["strategy"]["search"]["pd_ratios"] = [[1, 1]]
+        config["strategy"]["mode"] = "colocated"
+        config["strategy"]["total_gpus"] = 1
+        config["strategy"]["search"]["max_workers"] = 1
+        config["strategy"]["search"]["max_batched_tokens"] = [256, 2048]
+        config["strategy"]["search"]["prefill_thresholds"] = [256]
 
         engine = SimulationEngine(config, model, hw)
         results = search(engine, reqs, config)

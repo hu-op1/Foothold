@@ -1,5 +1,5 @@
 gpu: "3090"
-model: "meta-llama/Llama-2-7b-hf"
+model: "Qwen/Qwen3-4B"
 
 communication:
   intra_bw_gb_s: 9.7    # intra-node (NVLink ~900 GB/s, PCIe ~64 GB/s)
@@ -18,23 +18,20 @@ simulation:
   scheduling_policy: fcfs
 
 strategy:
-  mode: colocated # auto/colocated/disaggregated
-  total_gpus: 2
+  mode: both  # both / colocated / disaggregated
+  total_gpus: 4
   search:
-    pd_ratios: [1, 1]
     max_batched_tokens: [256, 512, 1024, 2048, 4096, 8192]
     prefill_thresholds: [256, 512, 1024, 2048]
-    p_tp_sizes: [2]          # P-side TP (D-side uses decode_tp_sizes)
-    decode_tp_sizes: [1]     # D-side TP in disaggregated mode (null = same as p_tp_sizes)
-    p_pp_sizes: [1]          # P-side PP (D-side uses decode_pp_sizes)
-    decode_pp_sizes: [1]     # D-side PP in disaggregated mode (null = same as p_pp_sizes)
+    max_workers: 8  # parallel processes for strategy evaluation (1 = sequential)
+    # pd_ratios, tp_sizes, pp_sizes are auto-generated from total_gpus + model constraints
 
-output: "sim/output/results.xlsx"
+output: "sim/output/search.xlsx"
 
 trace:
-  path: "traces/myllama-2-7b-heavy.jsonl"
-  max_requests: 500
-  format: "sharegpt"  # "sharegpt" or "agentic"
+  path: "traces/agent_trace_test.jsonl"
+  max_requests: 1
+  format: "agentic"  # "sharegpt" or "agentic"
 
 slo:
   ttft_ms: 500

@@ -43,7 +43,7 @@ def load_config(path=None, model_spec=None):
     sim["activation_memory_gb"] = act_conf
 
     strat = cfg.setdefault("strategy", {})
-    strat.setdefault("mode", "auto")
+    strat.setdefault("mode", "both")
 
     # Use search list first value as simulation default
     search = strat.setdefault("search", {})
