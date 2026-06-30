@@ -19,21 +19,22 @@ simulation:
 
 strategy:
   mode: both  # both / colocated / disaggregated
-  total_gpus: 16
+  total_gpus: 64
   search:
     max_batched_tokens: [8192]
     prefill_thresholds: [8192]
-    max_workers: 4  # parallel processes for strategy evaluation (1 = sequential)
+    max_workers: 8  # parallel processes for strategy evaluation (1 = sequential)
     tp: true   # enable TP dimension in search
     pp: true   # enable PP dimension in search
-    dp: false   # enable DP dimension in search
+    dp: true   # enable DP dimension in search
     # pd_ratios, tp_sizes, pp_sizes are auto-generated from total_gpus + model constraints
+    gpu_sweep: [1, 2, 4, 8, 16]  # sweep GPU counts for scalability curve (null = single run)
 
 output: "sim/output/search.xlsx"
 
 trace:
   path: "traces/agent_trace_test.jsonl"
-  max_requests: 1
+  max_requests: 5
   format: "agentic"  # "sharegpt" or "agentic"
 
 slo:

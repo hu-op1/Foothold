@@ -17,6 +17,9 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     Cartesian product: tp_sizes × max_batched_tokens × prefill_thresholds
                        × (colocated + each P:D ratio)
 
+    If cfg["strategy"]["search"]["gpu_sweep"] is set, sweeps over GPU counts
+    and attaches a scalability_summary to the first result.
+
     Returns list of {label, metrics_raw, score, elapsed, slo_score}
     sorted by score descending.
     """
@@ -30,6 +33,97 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     gpu_mem_util = cfg["simulation"].get("gpu_memory_utilization", 0.85)
     max_model_len = model_spec.get("max_model_len", 8192)
     max_num_seqs = cfg["simulation"].get("max_num_seqs", 256)
+    hw_params = engine.hw
+
+    gpu_sweep = search_cfg.get("gpu_sweep")
+    if isinstance(gpu_sweep, list) and len(gpu_sweep) > 0:
+        return _search_with_sweep(
+            gpu_sweep, mode, search_cfg, slo, model_spec, gpu_name,
+            kv_cache_gb, gpu_mem_util, max_model_len, max_num_seqs,
+            hw_params, requests, cfg)
+
+    return _search_one(total_gpus, mode, search_cfg, slo, model_spec,
+                       gpu_name, kv_cache_gb, gpu_mem_util, max_model_len,
+                       max_num_seqs, hw_params, requests, cfg)
+
+
+def _search_with_sweep(gpu_sweep: list[int], mode, search_cfg, slo,
+                       model_spec, gpu_name, kv_cache_gb, gpu_mem_util,
+                       max_model_len, max_num_seqs, hw_params, requests,
+                       cfg) -> list[dict]:
+    """Sweep over GPU counts, returning all results with scalability summary."""
+    all_results = []
+    scalability = []  # [{gpus, best_colo, best_disagg}, ...]
+
+    for n_gpus in gpu_sweep:
+        print(f"\n{'='*60}")
+        print(f"  GPU count: {n_gpus}")
+        print(f"{'='*60}")
+        batch = _search_one(n_gpus, mode, search_cfg, slo, model_spec,
+                            gpu_name, kv_cache_gb, gpu_mem_util, max_model_len,
+                            max_num_seqs, hw_params, requests, cfg)
+
+        # Tag each result with its GPU count for downstream grouping
+        for r in batch:
+            r["total_gpus"] = n_gpus
+
+        all_results.extend(batch)
+
+        # Extract best per-mode for this GPU count (prefer SLO-compliant, fall back to raw throughput)
+        colo_all = sorted(
+            [r for r in batch if r.get("mode_label") == "colocated"],
+            key=lambda r: r["metrics_raw"]["throughput"], reverse=True)
+        disagg_all = sorted(
+            [r for r in batch if r.get("mode_label") == "disaggregated"],
+            key=lambda r: r["metrics_raw"]["throughput"], reverse=True)
+        colo_slo = [r for r in colo_all if r["slo_score"] > 0]
+        disagg_slo = [r for r in disagg_all if r["slo_score"] > 0]
+
+        best_colo = colo_slo[0] if colo_slo else (colo_all[0] if colo_all else None)
+        best_disagg = disagg_slo[0] if disagg_slo else (disagg_all[0] if disagg_all else None)
+
+        scalability.append({
+            "total_gpus": n_gpus,
+            "best_colo": best_colo,
+            "best_disagg": best_disagg,
+        })
+
+        if best_colo:
+            print(f"  Best colo: {best_colo['label']} "
+                  f"→ throughput={best_colo['metrics_raw']['throughput']:.1f} tok/s")
+        else:
+            print(f"  Best colo: (none meeting SLO)")
+        if best_disagg:
+            print(f"  Best disaggregated: {best_disagg['label']} "
+                  f"→ throughput={best_disagg['metrics_raw']['throughput']:.1f} tok/s")
+        else:
+            print(f"  Best disaggregated: (none meeting SLO)")
+
+    # Print scalability summary table
+    print(f"\n{'='*70}")
+    print(f"  Scalability Summary")
+    print(f"  {'GPUs':<6} {'Best Colo (tok/s)':<20} {'Best Disagg (tok/s)':<22} {'Winner'}")
+    print(f"  {'-'*60}")
+    for s in scalability:
+        ct = s["best_colo"]["metrics_raw"]["throughput"] if s["best_colo"] else 0
+        dt = s["best_disagg"]["metrics_raw"]["throughput"] if s["best_disagg"] else 0
+        winner = "Colocated" if ct >= dt else "Disaggregated"
+        print(f"  {s['total_gpus']:<6} {ct:<20.1f} {dt:<22.1f} {winner}")
+
+    # Sort all results by score
+    all_results.sort(key=lambda r: r["score"], reverse=True)
+
+    # Attach scalability summary to first result for report export
+    if all_results:
+        all_results[0]["_scalability"] = scalability
+
+    return all_results
+
+
+def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
+                gpu_name, kv_cache_gb, gpu_mem_util, max_model_len,
+                max_num_seqs, hw_params, requests, cfg) -> list[dict]:
+    """Run grid search for a single GPU count."""
 
     max_tokens_list = search_cfg.get("max_batched_tokens", [8192])
     thresholds_list = search_cfg.get("prefill_thresholds", [1024])
@@ -37,7 +131,6 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     enable_tp = search_cfg.get("tp", True)
     enable_pp = search_cfg.get("pp", True)
     enable_dp = search_cfg.get("dp", True)
-    hw_params = engine.hw
 
     # Auto-generate PD ratios: all (p, d) where p + d = total_gpus, p>=1, d>=1
     pd_ratios = [[p, total_gpus - p] for p in range(1, total_gpus)]
@@ -69,11 +162,13 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                         dp = total_gpus // replica_gpus
                         label = f"Colo PP{pp} TP{tp} DP{dp} (batch={max_tokens}, thr={threshold})"
                         local_cfg = _deep_copy_config(cfg)
+                        local_cfg["strategy"]["total_gpus"] = total_gpus
                         local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
                         local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
                         tasks.append({
                             "label": label, "cfg": local_cfg, "mode": "colocated",
-                            "tp": tp, "dp": dp, "pp": pp,
+                            "tp": tp, "dp": dp, "pp": pp, "total_gpus": total_gpus,
+                            "mode_label": "colocated",
                         })
 
                     # Disaggregated: P side TP=tp, PP=pp; D side TP=d_tp, PP=d_pp
@@ -95,6 +190,7 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                                              f":{d}D(PP{d_pp} TP{d_tp} DP{dp_d}) "
                                              f"(batch={max_tokens}, thr={threshold})")
                                     local_cfg = _deep_copy_config(cfg)
+                                    local_cfg["strategy"]["total_gpus"] = total_gpus
                                     local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
                                     local_cfg["simulation"]["long_prefill_token_threshold"] = threshold
                                     tasks.append({
@@ -102,13 +198,15 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                                         "mode": "disaggregated", "pd_ratio": (p, d),
                                         "tp": tp, "dp_p": dp_p, "pp": pp,
                                         "d_tp": d_tp, "dp_d": dp_d, "d_pp": d_pp,
+                                        "total_gpus": total_gpus,
+                                        "mode_label": "disaggregated",
                                     })
 
     total = len(tasks)
-    print(f"\n  Model={model_spec['name']} ({model_spec['total_params_b']/1e9:.1f}B params)")
+    print(f"  Model={model_spec['name']} ({model_spec['total_params_b']/1e9:.1f}B params)")
     print(f"  GPU={gpu_name} x{total_gpus} ({total_vram_gb(gpu_name)}GB each)")
     print(f"  Valid P-TP sizes: {p_tp_sizes}")
-    print(f"  Evaluating {total} strategies...\n")
+    print(f"  Evaluating {total} strategies...")
 
     results = []
     if max_workers > 1:
@@ -164,6 +262,8 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
     total_t = metrics.total_time
     result = {
         "label": task["label"],
+        "mode_label": task.get("mode_label", task.get("mode", "")),
+        "total_gpus": task.get("total_gpus", 0),
         "metrics_raw": {
             "throughput": metrics.throughput(),
             "input_throughput": metrics.input_throughput(),
