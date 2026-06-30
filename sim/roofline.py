@@ -40,24 +40,33 @@ def elem_time(op_name, N, b_effs, overheads):
 
 # ── layer ops ───────────────────────────────────────────────────────────
 
-def projections(M, h, inter, F, B, p, nh=None, nh_kv=None, hd=None):
-    """Q/K/V/O (4×) + FFN up/gate (2×) + FFN down.
+def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None):
+    """Q/K/V/O projections for attention layers.
 
     nh, hd: if nh*hd != h, Q proj outputs nh*hd, K/V output nh_kv*hd, O inputs nh*hd.
     nh_kv defaults to nh (MHA), set for GQA.
     """
     if nh is None or (nh * hd == h and (nh_kv or nh) == nh):
-        t = 4 * matmul_time(M, h, h, F, B, p)
-    else:
-        dim_q = nh * hd
-        dim_kv = (nh_kv or nh) * hd
-        t = matmul_time(M, h, dim_q, F, B, p)       # Q proj
-        t += matmul_time(M, h, dim_kv, F, B, p)      # K proj
-        t += matmul_time(M, h, dim_kv, F, B, p)      # V proj
-        t += matmul_time(M, dim_q, h, F, B, p)       # O proj
-    t += 2 * matmul_time(M, h, inter, F, B, p)
+        return 4 * matmul_time(M, h, h, F, B, p)
+    dim_q = nh * hd
+    dim_kv = (nh_kv or nh) * hd
+    t = matmul_time(M, h, dim_q, F, B, p)       # Q proj
+    t += matmul_time(M, h, dim_kv, F, B, p)      # K proj
+    t += matmul_time(M, h, dim_kv, F, B, p)      # V proj
+    t += matmul_time(M, dim_q, h, F, B, p)       # O proj
+    return t
+
+
+def ffn_projections(M, h, inter, F, B, p):
+    """FFN projections: gate/up (2×) + down."""
+    t = 2 * matmul_time(M, h, inter, F, B, p)
     t += matmul_time(M, inter, h, F, B, p)
     return t
+
+
+def projections(M, h, inter, F, B, p, nh=None, nh_kv=None, hd=None):
+    """Q/K/V/O (4×) + FFN up/gate (2×) + FFN down — convenience wrapper."""
+    return attn_projections(M, h, F, B, p, nh, nh_kv, hd) + ffn_projections(M, h, inter, F, B, p)
 
 
 def attention_fused(b, nh, s_q, s_kv, hd, F, B, p, nh_kv=None):
@@ -78,17 +87,35 @@ def attention_fused(b, nh, s_q, s_kv, hd, F, B, p, nh_kv=None):
 
 
 def elementwise_ops(b, s, h, inter, nh, hd, norm_type, b_effs, overheads, nh_kv=None):
-    """All elementwise ops per layer.
-
-    nh_kv: number of KV heads (defaults to nh for MHA; < nh for GQA).
-    """
+    """All elementwise ops per layer — convenience wrapper."""
     if nh_kv is None:
         nh_kv = nh
-    t = 0.0
-    N = b * s * h
-    t += 2 * elem_time(norm_type, N, b_effs, overheads)
-    t += elem_time("swiglu", b * s * inter, b_effs, overheads)
-    t += elem_time("rope", b * nh * s * hd, b_effs, overheads)
-    t += elem_time("rope", b * nh_kv * s * hd, b_effs, overheads)
-    t += 2 * elem_time("residual_add", N, b_effs, overheads)
+    t = norm_ops(b, s, h, norm_type, b_effs, overheads)
+    t += swiglu_op(b, s, inter, b_effs, overheads)
+    t += rope_op(b, s, nh, nh_kv, hd, b_effs, overheads)
+    t += residual_add_ops(b, s, h, b_effs, overheads)
     return t
+
+
+def norm_ops(b, s, h, norm_type, b_effs, overheads):
+    """2 × norm per layer (pre-attention + pre-FFN)."""
+    N = b * s * h
+    return 2 * elem_time(norm_type, N, b_effs, overheads)
+
+
+def swiglu_op(b, s, inter, b_effs, overheads):
+    """SiLU gating in FFN (1× per layer)."""
+    return elem_time("swiglu", b * s * inter, b_effs, overheads)
+
+
+def rope_op(b, s, nh, nh_kv, hd, b_effs, overheads):
+    """RoPE for Q and K (2× per layer)."""
+    t = elem_time("rope", b * nh * s * hd, b_effs, overheads)
+    t += elem_time("rope", b * nh_kv * s * hd, b_effs, overheads)
+    return t
+
+
+def residual_add_ops(b, s, h, b_effs, overheads):
+    """2 × residual addition per layer (post-attention + post-FFN)."""
+    N = b * s * h
+    return 2 * elem_time("residual_add", N, b_effs, overheads)

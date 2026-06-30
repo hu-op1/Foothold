@@ -156,6 +156,9 @@ def run_single(
         "score": score,
         "elapsed": elapsed,
     }]
+    # Add time breakdown percentages
+    breakdown = metrics.time_breakdown_pct()
+    xlsx_result[0]["metrics_raw"].update(breakdown)
     export_xlsx(xlsx_result, os.path.join(output_dir, "results.xlsx"))
 
     print(f"\nSimulation complete ({elapsed:.1f}s)")

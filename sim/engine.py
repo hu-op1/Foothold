@@ -60,6 +60,17 @@ class SimulationEngine:
         # Prefix caching
         self.enable_cache = config["simulation"].get("enable_prefix_caching", True)
 
+        # Per-step time breakdown accumulator (reset in run())
+        self.time_acc: dict[str, float] = {}
+
+    @staticmethod
+    def _zero_step_dict() -> dict[str, float]:
+        return {"total": 0.0, "attn_proj": 0.0, "ffn_proj": 0.0,
+                "attn_prefill": 0.0, "attn_decode": 0.0,
+                "rmsnorm": 0.0, "swiglu": 0.0, "rope": 0.0,
+                "residual_add": 0.0, "lm_head": 0.0,
+                "all_reduce": 0.0, "inter_stage_comm": 0.0}
+
     def _compute_num_blocks(self):
         kv_mem_gb = self.cfg["simulation"]["kv_cache_memory_gb"]
         return max(1, int(kv_mem_gb * 1024**3) // self.bytes_per_block)
@@ -103,6 +114,14 @@ class SimulationEngine:
             r.kv_transfer_start = None
             r.kv_transfer_end = None
             r.scheduled_ts = None
+
+        # Reset time breakdown accumulator
+        self.time_acc = {"attn_proj": 0.0, "ffn_proj": 0.0,
+                         "attn_prefill": 0.0, "attn_decode": 0.0,
+                         "rmsnorm": 0.0, "swiglu": 0.0, "rope": 0.0,
+                         "residual_add": 0.0, "lm_head": 0.0,
+                         "all_reduce": 0.0, "inter_stage_comm": 0.0,
+                         "kv_transfer": 0.0, "swap": 0.0}
 
         # Safety iteration limit scales with workload (worst case: 1 token/step)
         total_decode_tokens = sum(r.max_output_len for r in requests)
@@ -195,11 +214,15 @@ class SimulationEngine:
             for i, output in enumerate(outputs):
                 if output.total_num_scheduled_tokens > 0:
                     scheds[i]._update_after_schedule(output)
-                    t = self._predict_step(
+                    step = self._predict_step(
                         [(r, nt) for r, nt, _ in output.scheduled_requests],
                         pp=pp)
-                    scheds[i].update_from_output(output, self.clock + t)
-                    max_step = max(max_step, t)
+                    scheds[i].update_from_output(output, self.clock + step["total"])
+                    max_step = max(max_step, step["total"])
+                    # Accumulate time breakdown components
+                    for k, v in step.items():
+                        if k != "total":
+                            self.time_acc[k] += v
                     # Count prefill vs decode tokens for this step
                     for req, num_new, _ in output.scheduled_requests:
                         pre_step = req.num_computed_tokens - num_new
@@ -243,6 +266,7 @@ class SimulationEngine:
         total_q = sum(p._cache_queries for p in pools)
         total_h = sum(p._cache_hits for p in pools)
         metrics.cache_hit_rate = total_h / total_q if total_q > 0 else 0.0
+        metrics.time_breakdown = dict(self.time_acc)
         return metrics
 
     def _run_disaggregated(self, requests: list[Request], pd_ratio: tuple[int, int],
@@ -384,10 +408,15 @@ class SimulationEngine:
                 if req in p_sched.running:
                     p_sched.running.remove(req)
 
-            p_time_val = self._predict_step(
+            p_step = self._predict_step(
                 [(r, nt) for r, nt, _ in p_out.scheduled_requests],
                 pp=pp
-            ) if p_total > 0 else 0.0
+            ) if p_total > 0 else self._zero_step_dict()
+            p_time_val = p_step["total"]
+            # Accumulate P-side time breakdown
+            for k, v in p_step.items():
+                if k != "total":
+                    self.time_acc[k] += v
             # P-side update: sets scheduled_ts for newly admitted requests
             if p_total > 0:
                 p_sched.update_from_output(p_out, self.clock + p_time_val)
@@ -399,11 +428,15 @@ class SimulationEngine:
             d_times: list[float] = []
             for i, o in enumerate(d_outs):
                 if o.total_num_scheduled_tokens > 0:
-                    dt = self._predict_step(
+                    d_step = self._predict_step(
                         [(r, nt) for r, nt, _ in o.scheduled_requests],
                         tp=d_tp, pp=d_pp)
-                    d_scheds[i].update_from_output(o, self.clock + dt)
-                    d_times.append(dt)
+                    d_scheds[i].update_from_output(o, self.clock + d_step["total"])
+                    d_times.append(d_step["total"])
+                    # Accumulate D-side time breakdown
+                    for k, v in d_step.items():
+                        if k != "total":
+                            self.time_acc[k] += v
                     # D-side tokens are decode (gen)
                     step_gen += sum(nt for _, nt, _ in o.scheduled_requests)
                 else:
@@ -443,9 +476,15 @@ class SimulationEngine:
                 if not _try_admit_to_d(req, p_side_blocks, d_idx, self.clock + p_time_val):
                     stalled_xfers.append((req, p_side_blocks, d_idx))
 
+            # Accumulate KV transfer time for successfully admitted requests
+            for req in p_done:
+                if req.kv_transfer_end is not None and req.kv_transfer_start is not None:
+                    self.time_acc["kv_transfer"] += req.kv_transfer_end - req.kv_transfer_start
+
             max_d_time = max(d_times) if d_times else 0.0
             step_time = max(p_time_val, max_d_time)
             total_swap = p_out.swap_time + sum(o.swap_time for o in d_outs)
+            self.time_acc["swap"] += total_swap
             if step_time == 0 and total_swap == 0:
                 step_time = 0.001
             self.clock += step_time + total_swap
@@ -479,6 +518,7 @@ class SimulationEngine:
         total_queries = sum(p._cache_queries for p in all_pools)
         total_hits = sum(p._cache_hits for p in all_pools)
         metrics.cache_hit_rate = total_hits / total_queries if total_queries > 0 else 0.0
+        metrics.time_breakdown = dict(self.time_acc)
         return metrics
 
     def _predict_step(self, scheduled_requests, tp=None, pp=None):

@@ -158,7 +158,7 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
     slo_info = metrics.slo_compliance(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
 
     total_t = metrics.total_time
-    return {
+    result = {
         "label": task["label"],
         "metrics_raw": {
             "throughput": metrics.throughput(),
@@ -188,6 +188,10 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
         "elapsed": elapsed,
         "slo_score": slo_info["score"],
     }
+    # Add time breakdown percentages
+    breakdown = metrics.time_breakdown_pct()
+    result["metrics_raw"].update(breakdown)
+    return result
 
 
 def _deep_copy_config(cfg: dict) -> dict:

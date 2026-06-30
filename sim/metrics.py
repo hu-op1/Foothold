@@ -7,6 +7,7 @@ class MetricsCollector:
     def __init__(self):
         self.records: list[dict] = []
         self.cache_hit_rate: float | None = None  # set by engine after run
+        self.time_breakdown: dict[str, float] | None = None  # set by engine after run
 
     def record(self, request) -> None:
         """Record metrics for a finished request."""
@@ -140,6 +141,15 @@ class MetricsCollector:
         """Combined throughput × SLO compliance score."""
         slo = self.slo_compliance(ttft_ms, tpot_ms, p99_ms)
         return self.throughput() * slo["score"]
+
+    def time_breakdown_pct(self) -> dict[str, float]:
+        """Return each time component as % of total accumulated time."""
+        if not self.time_breakdown:
+            return {}
+        total = sum(self.time_breakdown.values())
+        if total == 0:
+            return {}
+        return {f"{k}_pct": v / total * 100 for k, v in self.time_breakdown.items()}
 
     def _scale_throughput(self, factor: int, scale_ttft: bool = True) -> None:
         """Scale throughput by factor (for DP / multi-instance scaling).
