@@ -11,8 +11,8 @@ AI coding agent guidance for this repository. See [CLAUDE.md](CLAUDE.md) for ful
 
 ## Key conventions
 
-- **`main.py` is the only CLI entry point** — subcommands: `bench`, `fit`, `search`, `sim`. Legacy `--bench`/`--fit`/`--search` flags also work
-- Config files by stage: `config/default.yaml` (bench/fit), `config/predict.yaml`, `config/search.yaml`, `config/sim.yaml`
+- **`main.py` is the only CLI entry point** — subcommands: `bench`, `fit`, `search`, `sim`, `validate`
+- Config files by stage: `config/bench.yaml` (bench/fit), `config/search.yaml` (search), `config/sim.yaml` (sim)
 - Results saved as `.xlsx` via `openpyxl` (not CSV)
 - Use `pathlib.Path` for filesystem paths (some legacy uses of `os.path` exist in `main.py` and `bench/`)
 - Use `torch.cuda.Event` for GPU timing — see `CudaTimer`, `warmup()`, `benchmark()` in `bench/utils.py:8`

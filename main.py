@@ -238,7 +238,7 @@ def main():
 
     # ── Shared options ──
     parser.add_argument("--config", default=None, dest="config",
-                        help="Config file path (default: config/default.yaml for --bench/--fit, "
+                        help="Config file path (default: config/bench.yaml for --bench/--fit, "
                              "config/search.yaml for --search, config/sim.yaml for --sim)")
     parser.add_argument("--dir", default=None, metavar="DIR", dest="dir",
                         help="Override bench results directory (for --fit)")
@@ -264,10 +264,10 @@ def main():
         sys.exit(1)
 
     if args.bench:
-        args.config = args.config or "config/default.yaml"
+        args.config = args.config or "config/bench.yaml"
         run_benchmarks(args)
     elif args.fit is not None:
-        args.config = args.config or "config/default.yaml"
+        args.config = args.config or "config/bench.yaml"
         args.fit_dir = args.dir or args.fit or ""
         run_fit(args)
     elif args.search:

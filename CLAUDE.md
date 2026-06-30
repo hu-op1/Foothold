@@ -4,24 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-LLM inference performance toolchain: **GPU characterization → Roofline fitting → Throughput prediction → PD disaggregation simulation**.
+LLM inference performance toolchain: **GPU characterization → Roofline fitting → PD disaggregation simulation**.
 
 ```
-config/default.yaml  →  bench/   →  bench/results/<gpu>/*.xlsx
+config/bench.yaml  →  bench/   →  bench/results/<gpu>/*.xlsx
                                 │                           │
                                 ▼                           │
-config/default.yaml  →  fit/  →  fit/results/<gpu>.json     │
+config/bench.yaml  →  fit/  →  fit/results/<gpu>.json     │
                                     (F_peak, B_peak, p)     │
                                          │                  │
                                          └──────┬───────────┘
                                                 ▼
                                     hw_params dict
                                           │
-                              ┌───────────┴───────────┐
-                              ▼                       ▼
-                     perf_predict/predict.py    sim/
-                     (throughput pred)          (PD disaggregation sim)
-                                                config/search.yaml
+                                          ▼
+                                     sim/
+                                     (PD disaggregation sim)
+                                     config/search.yaml
+                                     config/sim.yaml
 ```
 
 ## Commands
@@ -38,13 +38,12 @@ uv run python main.py fit                            # Fit from bench/results/<g
 uv run python main.py fit --dir <path>               # Override bench results dir
 uv run python main.py --fit                          # Legacy flag form
 
-# Throughput prediction (stage 3)
-uv run python main.py predict                        # Predict from config/predict.yaml
-uv run python main.py predict --config <path>        # Override predict config
-
-# PD disaggregation strategy search (stage 4)
-uv run python main.py search                        # Run from config/search.yaml
+# PD disaggregation simulation (stage 3)
+uv run python main.py search                        # Strategy grid search from config/search.yaml
 uv run python main.py search --config <path>        # Override search config
+uv run python main.py sim                          # Single simulation from config/sim.yaml
+uv run python main.py --sim                        # Legacy flag form
+uv run python main.py --search                     # Legacy flag form
 
 # Tests
 uv run python -m pytest test/                        # All tests
@@ -82,15 +81,7 @@ Two backends, set via `fit_all(results, backend=...)`:
 
 Output: `fit/results/<gpu>.json`
 
-### Stage 3: `perf_predict/` — End-to-end throughput prediction
-
-Given fitted roofline params + model architecture specs, predicts prefill/decode latency and tokens/s.
-
-- `perf_predict/predict.py` — Computes per-layer time as sum of projections (roofline), attention (FlashAttention-fused roofline), elementwise ops (B_eff model). Multiplies by num_layers. Prefill: all tokens parallel, O(s²) attention. Decode: 1 token at a time + KV cache, O(s_kv) attention.
-- `perf_predict/fitted_params.json` — Default fitted hardware params for quick testing.
-- Supports GQA (Q/K/V projection dims, attention HBM traffic, RoPE elementwise) and hybrid architectures (DeltaNet + full attention mix).
-
-### Stage 4: `sim/` — PD disaggregation simulator (event-driven)
+### Stage 3: `sim/` — PD disaggregation simulator (event-driven)
 
 Simulates vLLM-style inference serving with colocated and disaggregated (separate prefill/decode GPU pools) configurations.
 
@@ -127,9 +118,9 @@ CLI with subcommands: `bench`, `fit`, `search`, `sim`. Also supports legacy `--b
 
 ## Configuration
 
-- `config/default.yaml` — Hardware benchmark config (`gpu`, matmul/elementwise grid, dtype, `max_memory_gb`). Used by `bench` and `fit`.
-- `config/predict.yaml` — Predict config (`gpu`, `model`, `batch`, `input_len`, `output_len`, `params`). Used by `predict`.
+- `config/bench.yaml` — Hardware benchmark config (`gpu`, matmul/elementwise grid, dtype, `max_memory_gb`). Used by `bench` and `fit`.
 - `config/search.yaml` — Strategy search config (`gpu`, `model`, communication bandwidth, simulation parameters, strategy search space, SLO targets, trace path). Used by `search`.
+- `config/sim.yaml` — Single-run simulation config (same structure as search.yaml but scalar strategy values, no grid search). Used by `sim`.
 
 ## Dependencies
 
