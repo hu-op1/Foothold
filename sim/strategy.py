@@ -1,7 +1,13 @@
-"""Grid search over colocated and disaggregated strategy parameters."""
+"""Grid search over colocated and disaggregated strategy parameters.
+
+Checkpoint/resume: each completed strategy is appended as one JSON line to a
+checkpoint file (`.jsonl`).  On restart the file is read and matching labels are
+skipped so only unfinished strategies run.
+"""
 
 import copy
 import json
+import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -11,11 +17,71 @@ from sim.engine import SimulationEngine
 from sim.config import valid_tp_sizes, valid_pp_sizes, total_vram_gb
 
 
+# ── checkpoint helpers ──────────────────────────────────────────────────────
+
+def _checkpoint_path(cfg: dict) -> str:
+    """Derive the checkpoint file path from the output xlsx path."""
+    out = str(cfg.get("output", "sim/output/results.xlsx"))
+    base, _ = os.path.splitext(out)
+    return base + ".checkpoint.jsonl"
+
+
+def _load_completed_labels(ckpt_path: str) -> set[str]:
+    """Return the set of already-completed strategy labels from a JSONL file."""
+    if not os.path.exists(ckpt_path):
+        return set()
+    labels = set()
+    with open(ckpt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+                labels.add(r["label"])
+            except json.JSONDecodeError:
+                continue
+    return labels
+
+
+def _append_checkpoint(ckpt_path: str, result: dict) -> None:
+    """Append one result dict as a JSON line to the checkpoint file."""
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    with open(ckpt_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(result, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _load_all_from_checkpoint(ckpt_path: str) -> list[dict]:
+    """Load all completed results from a JSONL checkpoint file."""
+    results = []
+    if not os.path.exists(ckpt_path):
+        return results
+    with open(ckpt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                results.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return results
+
+
+# ── main search entry point ─────────────────────────────────────────────────
+
 def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     """Run grid search over strategy configurations.
 
     Cartesian product: tp_sizes × max_batched_tokens × prefill_thresholds
                        × (colocated + each P:D ratio)
+
+    On-disk checkpoint: after each strategy finishes its result is appended as
+    one JSON line to ``<output>.checkpoint.jsonl``.  On restart, strategies
+    whose label already appears in that file are skipped so only unfinished
+    work runs.
 
     Returns list of {label, metrics_raw, score, elapsed, slo_score}
     sorted by score descending.
@@ -104,29 +170,52 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
                                         "d_tp": d_tp, "dp_d": dp_d, "d_pp": d_pp,
                                     })
 
+    # ── checkpoint: skip already-finished strategies ─────────────────────
+    ckpt_path = _checkpoint_path(cfg)
+    completed_labels = _load_completed_labels(ckpt_path)
+    pending = [t for t in tasks if t["label"] not in completed_labels]
+    skipped = len(tasks) - len(pending)
+
     total = len(tasks)
     print(f"\n  Model={model_spec['name']} ({model_spec['total_params_b']/1e9:.1f}B params)")
     print(f"  GPU={gpu_name} x{total_gpus} ({total_vram_gb(gpu_name)}GB each)")
     print(f"  Valid P-TP sizes: {p_tp_sizes}")
-    print(f"  Evaluating {total} strategies...\n")
+    if skipped:
+        print(f"  Checkpoint: {skipped}/{total} already done → {len(pending)} remaining")
+    else:
+        print(f"  Evaluating {total} strategies...\n")
 
     results = []
-    if max_workers > 1:
-        with tqdm(total=len(tasks), desc="  Searching", unit="strat",
-                  bar_format="{desc}: {percentage:3.0f}% |{bar}| "
-                             "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(_run_one, t, requests, model_spec, hw_params, slo): t
-                          for t in tasks}
-                for future in as_completed(futures):
-                    results.append(future.result())
-                    pbar.update(1)
-    else:
-        for t in tqdm(tasks, desc="  Searching", unit="strat",
+    if pending:
+        if max_workers > 1:
+            with tqdm(total=len(pending), desc="  Searching", unit="strat",
                       bar_format="{desc}: {percentage:3.0f}% |{bar}| "
-                                 "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]"):
-            r = _run_one(t, requests, model_spec, hw_params, slo)
-            results.append(r)
+                                 "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(_run_one, t, requests, model_spec, hw_params, slo): t
+                              for t in pending}
+                    for future in as_completed(futures):
+                        r = future.result()
+                        results.append(r)
+                        _append_checkpoint(ckpt_path, r)
+                        pbar.update(1)
+        else:
+            for t in tqdm(pending, desc="  Searching", unit="strat",
+                          bar_format="{desc}: {percentage:3.0f}% |{bar}| "
+                                     "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]"):
+                r = _run_one(t, requests, model_spec, hw_params, slo)
+                results.append(r)
+                _append_checkpoint(ckpt_path, r)
+
+    # Merge with previously-checkpointed results for the final sorted list
+    if skipped:
+        prev_results = _load_all_from_checkpoint(ckpt_path)
+        # Deduplicate by label (keep the freshly-computed copy when overlap exists)
+        seen = {r["label"] for r in results}
+        for pr in prev_results:
+            if pr["label"] not in seen:
+                results.append(pr)
+                seen.add(pr["label"])
 
     results.sort(key=lambda r: r["score"], reverse=True)
     return results
