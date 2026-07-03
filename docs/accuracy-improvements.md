@@ -81,13 +81,24 @@ attn_prefill_time = na * roofline_time(prefill_flops, prefill_bytes, F_p, B_p, p
 
 ---
 
-## ⬜ 4. FlashAttention 纯解析模型 → 实测校准
+## ✅ 4. FlashAttention 实测校准
 
-当前 `attention_fused()` 的 FLOPs/bytes 是纯公式推导。真实 FA kernel 的 tile 大小、warp 调度、causal mask 开销均未校准。
+**日期**: 2026-07-03　**分支**: main
 
-**建议**: 增加 FA kernel benchmark（`torch.nn.functional.scaled_dot_product_attention` 或 vLLM FA backend），用实测数据校准模型参数（或至少校准 B_eff）。
+**问题**: 旧代码中 attention 的 roofline 预测使用 matmul 拟合的 F_peak / B_peak / p 参数。但 FlashAttention 的硬件效率（tiling、SRAM 调度、causal mask 开销）与 GEMM 完全不同，直接用 matmul 参数存在系统偏差。
 
-**难度**: 中　**影响**: ⭐⭐⭐
+**改动**:
+
+| 文件 | 变更 |
+|---|---|
+| `bench/flashattn.py` | **新建** — 使用 `F.scaled_dot_product_attention` 在 (s_q, s_kv) 网格上 benchmark FlashAttention |
+| `config/bench.yaml` | 新增 `flashattn` 配置节：s_q [1..2048], s_kv [128..32768], GQA 参数 |
+| `fit/flashattn.py` | **新建** — 从 FA benchmark 数据拟合专用的 (F_peak, B_peak, p) 参数，按 s_q=1 (decode) vs s_q>1 (prefill) 分裂 |
+| `fit/__init__.py` | 集成 `fit_flashattn` 到 `fit_all()` 管线 |
+| `sim/executor.py` | `predict_step()` 和 `predict_step_pp()` 中的 attention 优先使用 `F_peak_fa_*` / `B_peak_fa_*` / `p_fa_*`，无 FA 数据时 fallback 到 matmul 参数（向后兼容） |
+| `main.py` | bench 管线增加 `bench_flashattn`；fit 管线加载 `flashattn.xlsx` |
+
+**需在 Linux 上重新运行 bench `flashattn` + fit 生效**。Windows 上 PyTorch SDPA 使用 cuDNN 后端（非 Dao-AILab FA2），数据可作参考但不完全等价。
 
 ---
 

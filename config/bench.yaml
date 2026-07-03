@@ -13,6 +13,17 @@ elementwise:
   N: [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728]
   operators: [residual_add, rmsnorm, softmax, swiglu, rope]
 
+# FlashAttention benchmark — (s_q, s_kv) grid covering decode (s_q=1)
+# through long-context prefill (s_q up to 2048, s_kv up to 32768).
+# Uses GQA defaults (nh=32, nh_kv=8, hd=128) — representative of 7B-class models.
+flashattn:
+  s_q: [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
+  s_kv: [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+  batch: 1
+  num_heads: 32
+  num_kv_heads: 8
+  head_dim: 128
+
 gpu: "3090"
 
 dtype: "float16"

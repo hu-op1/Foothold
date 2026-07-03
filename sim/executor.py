@@ -106,13 +106,14 @@ def predict_step(scheduled_requests, model_spec, hw_params):
     b_effs = hw_params["elem_b_effs"]
     overheads = hw_params["elem_overheads"]
 
-    # Prefill / decode params for per-request attention
-    F_d = hw_params["F_peak_decode"]
-    B_d = hw_params["B_peak_decode"]
-    p_d = hw_params["p_decode"]
-    F_p = hw_params["F_peak_prefill"]
-    B_p = hw_params["B_peak_prefill"]
-    p_p = hw_params["p_prefill"]
+    # Attention roofline params — prefer FlashAttention-specific if fitted,
+    # fall back to matmul-fitted params (backward compatible with old fit data).
+    F_d = hw_params.get("F_peak_fa_decode", hw_params["F_peak_decode"])
+    B_d = hw_params.get("B_peak_fa_decode", hw_params["B_peak_decode"])
+    p_d = hw_params.get("p_fa_decode", hw_params["p_decode"])
+    F_p = hw_params.get("F_peak_fa_prefill", hw_params["F_peak_prefill"])
+    B_p = hw_params.get("B_peak_fa_prefill", hw_params["B_peak_prefill"])
+    p_p = hw_params.get("p_fa_prefill", hw_params["p_prefill"])
 
     # Total new tokens this step — used for batched projections / LM head
     total_new_tokens = sum(nt for _, nt in scheduled_requests)
@@ -236,8 +237,12 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
     params = _select_roofline_params(total_new_tokens, hw_params)
     F, B, p = params["F"], params["B"], params["p"]
 
-    F_d, B_d, p_d = hw_params["F_peak_decode"], hw_params["B_peak_decode"], hw_params["p_decode"]
-    F_p, B_p, p_p = hw_params["F_peak_prefill"], hw_params["B_peak_prefill"], hw_params["p_prefill"]
+    F_d = hw_params.get("F_peak_fa_decode", hw_params["F_peak_decode"])
+    B_d = hw_params.get("B_peak_fa_decode", hw_params["B_peak_decode"])
+    p_d = hw_params.get("p_fa_decode", hw_params["p_decode"])
+    F_p = hw_params.get("F_peak_fa_prefill", hw_params["F_peak_prefill"])
+    B_p = hw_params.get("B_peak_fa_prefill", hw_params["B_peak_prefill"])
+    p_p = hw_params.get("p_fa_prefill", hw_params["p_prefill"])
 
     # ── Per-stage projections ──
     attn_proj_time = layers_per_stage * attn_projections(
