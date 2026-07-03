@@ -112,13 +112,34 @@ attn_prefill_time = na * roofline_time(prefill_flops, prefill_bytes, F_p, B_p, p
 
 ---
 
-## ⬜ 6. TP All-Reduce 带宽曲线
+## ✅ 6. TP All-Reduce 带宽曲线 — 加入延迟项
 
-当前 `all_reduce_time = 2 * total_tokens * h * 2 / bandwidth` 使用单一带宽常量。真实 all-reduce 带宽是 message-size-dependent —— 小消息（decode 时 M=1）受限于延迟，用带宽常量会严重低估。
+**日期**: 2026-07-03　**分支**: main
 
-**建议**: 使用 bus-bandwidth 曲线（或 latency + bandwidth 两参数模型）。
+**问题**: 旧代码中 all-reduce 和 inter-stage P2P 使用纯带宽模型 `time = bytes / bw`。对于 decode 场景（M=1，消息仅 ~16 KB），带宽项 ~1.7 µs，但实际 ring all-reduce 的延迟（N 跳 × ~2 µs/hop）是这个量的 10× 以上，导致 decode step time 被严重低估。
 
-**难度**: 低　**影响**: ⭐⭐⭐
+**改动**:
+
+| 文件 | 变更 |
+|---|---|
+| `config/search.yaml` | `communication` 增加 `intra_latency_us: 2.0` |
+| `config/sim.yaml` | 同上 |
+| `sim/engine.py` | 读取 `intra_latency_us`，传入 `predict_step_tp` |
+| `sim/executor.py` | `predict_step_pp()`: inter-stage 改为 `bytes/bw + latency`；`predict_step_tp()`: all-reduce 改为 `bytes/bw + N_gpus × latency` |
+
+**模型**:
+
+```
+# 旧 (纯带宽)
+inter_stage = (pp-1) × bytes / bw
+all_reduce  = bytes / bw
+
+# 新 (延迟+带宽)
+inter_stage = (pp-1) × (bytes / bw + latency)
+all_reduce  = bytes / bw + N_gpus × latency    # ring all-reduce N步
+```
+
+**精度影响**: decode (M=1) 的 TP 开销从被低估 ~10× → 正确量级。prefill (M 大) 几乎无影响（带宽项主导）。**使用现有 fit 数据即可生效**。
 
 ---
 

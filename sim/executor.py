@@ -185,7 +185,7 @@ def predict_step(scheduled_requests, model_spec, hw_params):
 
 
 def predict_step_pp(scheduled_requests, model_spec, hw_params,
-                    pp_size, intra_node_bw_gb_s):
+                    pp_size, intra_node_bw_gb_s, intra_latency_us=2.0):
     """Predict step time with pipeline parallelism.
 
     Splits model layers evenly across *pp_size* pipeline stages.
@@ -199,6 +199,7 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
     Args:
         pp_size: number of pipeline stages (GPUs in the PP dimension).
         intra_node_bw_gb_s: intra-node bandwidth for inter-stage P2P (GB/s).
+        intra_latency_us: intra-node latency per P2P transfer (µs).
 
     Returns:
         step_time_s with PP overhead.
@@ -287,9 +288,13 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
     lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p)
 
     # ── Inter-stage communication: (pp_size - 1) transfers ──
-    # Each transfer sends hidden states for all tokens: tokens × h × 2 bytes
+    # Each transfer sends hidden states for all tokens: tokens × h × 2 bytes.
+    # latency + bandwidth model: real P2P has fixed per-transfer overhead
+    # that dominates for small messages (e.g. decode with 1 token).
     inter_stage_bytes = total_new_tokens * h * DTYPE_BYTES
-    inter_stage_comm = (pp_size - 1) * inter_stage_bytes / (intra_node_bw_gb_s * 1e9)
+    inter_stage_comm = (pp_size - 1) * (
+        inter_stage_bytes / (intra_node_bw_gb_s * 1e9) + intra_latency_us * 1e-6
+    )
 
     total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + rmsnorm_time + swiglu_time + rope_time + residual_add_time + lm_head_time + inter_stage_comm
     return {
@@ -309,6 +314,7 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
 
 def predict_step_tp(scheduled_requests, model_spec, hw_params,
                     num_gpus, intra_node_bw_gb_s,
+                    intra_latency_us=2.0,
                     pp_size=1):
     """Predict step time with tensor parallelism (and optional pipeline parallelism).
 
@@ -318,6 +324,7 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     Args:
         num_gpus: number of GPUs in the TP group.
         intra_node_bw_gb_s: intra-node bandwidth for all-reduce (GB/s).
+        intra_latency_us: intra-node latency per all-reduce step (µs).
         pp_size: pipeline parallelism degree (1 = no PP).
 
     Returns:
@@ -326,7 +333,7 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     """
     if pp_size > 1:
         base = predict_step_pp(scheduled_requests, model_spec, hw_params,
-                               pp_size, intra_node_bw_gb_s)
+                               pp_size, intra_node_bw_gb_s, intra_latency_us)
     else:
         base = predict_step(scheduled_requests, model_spec, hw_params)
 
@@ -337,9 +344,15 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     total_new_tokens = sum(nt for _, nt in scheduled_requests)
     h = model_spec["hidden_dim"]
 
-    # All-reduce overhead: 2 * activations_size / bandwidth
+    # All-reduce overhead: bytes / bandwidth + num_gpus × latency.
+    # Ring all-reduce has N communication steps; latency dominates for
+    # small messages (decode with 1 token: ~16 KB → ~1.7 µs bw-only,
+    # but ~20 µs with 2 µs × 8-GPU ring).
     all_reduce_bytes = 2 * total_new_tokens * h * DTYPE_BYTES
-    all_reduce_time = all_reduce_bytes / (intra_node_bw_gb_s * 1e9)
+    all_reduce_time = (
+        all_reduce_bytes / (intra_node_bw_gb_s * 1e9)
+        + num_gpus * intra_latency_us * 1e-6
+    )
 
     # Scale compute components by 1/tp; inter_stage_comm (PP) is also divided
     result = {}

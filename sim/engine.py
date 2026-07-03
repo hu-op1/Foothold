@@ -55,6 +55,7 @@ class SimulationEngine:
         self.bw_gb_s = config["communication"]["inter_bw_gb_s"]
         self.latency_us = config["communication"]["inter_latency_us"]
         self.intra_bw_gb_s = config["communication"]["intra_bw_gb_s"]
+        self.intra_latency_us = config["communication"].get("intra_latency_us", 2.0)
         # GPU↔CPU swap bandwidth for D-side preemption (bytes/s)
         self.cpu_swap_bw = config["communication"].get("cpu_swap_bw_gb_s", 32) * 1e9
         # Prefix caching
@@ -536,6 +537,7 @@ class SimulationEngine:
         if tp > 1 or pp > 1:
             return predict_step_tp(scheduled_requests, self.model, self.hw,
                                    tp, self.intra_bw_gb_s,
+                                   self.intra_latency_us,
                                    pp_size=pp)
         return predict_step(scheduled_requests, self.model, self.hw)
 
