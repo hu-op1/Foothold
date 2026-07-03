@@ -6,14 +6,22 @@ and SRAM-aware scheduling.  This benchmark provides measured data so the
 roofline fit can produce FA-specific (F_peak, B_peak, p) parameters instead
 of reusing matmul-fitted values.
 
-Uses torch.nn.functional.scaled_dot_product_attention which dispatches to
-the best available backend (FlashAttention-2, Memory-Efficient, or Math).
+Prefers Dao-AILab's flash_attn package when available (Linux + CUDA).
+Falls back to torch.nn.functional.scaled_dot_product_attention on other
+platforms (Windows, CPU).
 """
 
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from bench.utils import warmup, benchmark, save_xlsx, check_memory
+
+# Try native flash_attn first (matches vLLM backend), fall back to PyTorch SDPA.
+try:
+    from flash_attn import flash_attn_func as _fa_native
+    _HAS_NATIVE_FA = True
+except ImportError:
+    _HAS_NATIVE_FA = False
 
 
 DTYPE_BYTES = 2  # fp16
@@ -45,6 +53,9 @@ def bench_flashattn(config, output_path="results/flashattn.xlsx"):
     nh_kv = fa_cfg.get("num_kv_heads", 8)
     hd = fa_cfg.get("head_dim", 128)
 
+    backend = "flash_attn (native)" if _HAS_NATIVE_FA else "torch SDPA"
+    print(f"FlashAttn backend: {backend}")
+
     results = []
 
     combos = [(sq, skv) for sq in fa_cfg["s_q"] for skv in fa_cfg["s_kv"]]
@@ -64,13 +75,17 @@ def bench_flashattn(config, output_path="results/flashattn.xlsx"):
             })
             continue
 
-        # Create tensors
+        # Create tensors and benchmark
         q = torch.randn(b, nh, s_q, hd, dtype=dtype, device=device)
         k = torch.randn(b, nh_kv, s_kv, hd, dtype=dtype, device=device)
         v = torch.randn(b, nh_kv, s_kv, hd, dtype=dtype, device=device)
 
-        def fa_fn(q=q, k=k, v=v):
-            F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        if _HAS_NATIVE_FA:
+            def fa_fn(q=q, k=k, v=v):
+                _fa_native(q, k, v, causal=True)
+        else:
+            def fa_fn(q=q, k=k, v=v):
+                F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
         warmup(fa_fn, warmup_iters)
         ms = benchmark(fa_fn, bench_iters)

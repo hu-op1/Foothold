@@ -16,6 +16,16 @@ dependencies = [
     "matplotlib",
 ]
 
+[project.optional-dependencies]
+# FlashAttention-2/3 — Linux-only, CUDA required.
+# Install with: uv sync --extra linux
+linux = [
+    "flash-attn>=2.7.0",
+]
+dev = [
+    "pytest>=8.0",
+]
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 
