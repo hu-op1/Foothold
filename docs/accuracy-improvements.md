@@ -143,13 +143,27 @@ all_reduce  = bytes / bw + N_gpus × latency    # ring all-reduce N步
 
 ---
 
-## ⬜ 7. Matmul 性能的 K/N 维度敏感性
+## ✅ 7. Matmul 性能的 K/N 维度敏感性 — Tensor Core tile 量化修正
 
-当前 roofline 只关心 M×K×N 的总 FLOPs/bytes。但相同 FLOPs 下，不同 K/N 形状在 tensor core 上的 tile 利用率不同。例如 `[M,4096]×[4096,4096]` vs `[M,11008]×[11008,4096]` 性能不同。
+**日期**: 2026-07-03　**分支**: main
 
-**建议**: benchmark 使用模型真实投影维度，或按 `K%16` / `N%16` 做 tile 利用率修正。
+**问题**: GPU tensor core 以 16×16 tile 为单位计算。当 K 或 N 不是 tile 的整数倍时，硬件自动 padding 到下一 tile 边界，padding 部分的计算被丢弃。纯 FLOPs 公式 `2*M*K*N` 忽略了这一浪费，对非对齐维度会低估实际耗时。
 
-**难度**: 中　**影响**: ⭐⭐
+**改动** (`sim/roofline.py`):
+
+新增 `_tile_waste(K, N)` 函数，返回时间膨胀系数 `≥ 1.0`:
+
+```
+eff_K = ceil(K/16) × 16
+eff_N = ceil(N/16) × 16
+waste = (eff_K / K) × (eff_N / N)
+```
+
+`matmul_time()` 改为 `t = roofline_time(...) * _tile_waste(K, N)`。
+
+**实际影响**: 标准 LLM 维度（h=4096/8192, inter=11008/14336/12288, vocab=151936/32000）均为 16 的整数倍 → waste=1.0，**无变化**。此修正主要提升对非标/自定义模型维度的精度。
+
+**使用现有 fit 数据即可生效**。
 
 ---
 
