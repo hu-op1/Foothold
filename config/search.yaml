@@ -3,6 +3,7 @@ model: "Qwen/Qwen3-4B"
 
 communication:
   intra_bw_gb_s: 9.7    # intra-node (NVLink ~900 GB/s, PCIe ~64 GB/s)
+  intra_latency_us: 2.0  # intra-node latency per hop (NVLink ~1-2 µs, PCIe ~5-10 µs)
   inter_bw_gb_s: 9.7     # inter-node (InfiniBand ~50 GB/s, Ethernet ~12.5 GB/s)
   inter_latency_us: 6.9
   cpu_swap_bw_gb_s: 9.7   # GPU↔CPU swap bandwidth (PCIe 3.0 x16 ~32 GB/s, PCIe 4.0 ~64 GB/s)

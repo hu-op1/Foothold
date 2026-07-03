@@ -21,6 +21,7 @@ from tqdm import tqdm
 
 from bench.matmul import bench_matmul
 from bench.elementwise import bench_elementwise
+from bench.flashattn import bench_flashattn
 
 BENCH_RESULTS = os.path.join("bench", "results")
 FIT_RESULTS = os.path.join("fit", "results")
@@ -53,7 +54,9 @@ def run_benchmarks(args):
           f"iters={cfg['bench_iters']}")
     matmul_combos = len(cfg["matmul"]["M"]) * len(cfg["matmul"]["K"]) * len(cfg["matmul"]["N"])
     elem_combos = len(cfg["elementwise"]["N"]) * len(cfg["elementwise"]["operators"])
-    print(f"Matmul combos: {matmul_combos}, Elementwise combos: {elem_combos}")
+    fa_cfg = cfg.get("flashattn", {})
+    fa_combos = len(fa_cfg.get("s_q", [])) * len(fa_cfg.get("s_kv", [])) if fa_cfg else 0
+    print(f"Matmul combos: {matmul_combos}, Elementwise combos: {elem_combos}, FlashAttn combos: {fa_combos}")
     print("=" * 70)
 
     out_dir = bench_results_dir(cfg)
@@ -61,6 +64,7 @@ def run_benchmarks(args):
 
     matmul_xlsx = os.path.join(out_dir, "matmul.xlsx")
     elem_xlsx = os.path.join(out_dir, "elementwise.xlsx")
+    fa_xlsx = os.path.join(out_dir, "flashattn.xlsx")
 
     t0 = time.perf_counter()
 
@@ -72,9 +76,15 @@ def run_benchmarks(args):
     bench_elementwise(cfg, output_path=elem_xlsx)
     torch.cuda.empty_cache()
 
+    if fa_cfg:
+        tqdm.write("\n[FlashAttn]")
+        bench_flashattn(cfg, output_path=fa_xlsx)
+        torch.cuda.empty_cache()
+
     elapsed = time.perf_counter() - t0
     print(f"\nDone in {elapsed:.1f}s")
-    print(f"Output files: {matmul_xlsx}, {elem_xlsx}")
+    print(f"Output files: {matmul_xlsx}, {elem_xlsx}"
+          + (f", {fa_xlsx}" if fa_cfg else ""))
 
 
 def run_fit(args):
@@ -85,9 +95,10 @@ def run_fit(args):
     bench_dir = args.fit_dir or bench_results_dir(cfg)
     matmul_xlsx = os.path.join(bench_dir, "matmul.xlsx")
     elem_xlsx = os.path.join(bench_dir, "elementwise.xlsx")
+    fa_xlsx = os.path.join(bench_dir, "flashattn.xlsx")
 
     results = []
-    for path in [matmul_xlsx, elem_xlsx]:
+    for path in [matmul_xlsx, elem_xlsx, fa_xlsx]:
         if os.path.exists(path):
             results.extend(load_results(path))
         else:

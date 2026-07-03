@@ -1,13 +1,15 @@
-"""Benchmark representative elementwise ops to validate memory bandwidth model.
+"""Benchmark elementwise ops to characterize per-op effective bandwidth.
 
-All elementwise ops are deep in the memory-bound regime (AI < 1 FLOP/byte).
-We measure 3 representatives with different arithmetic complexity:
-  - residual_add: pure add (lightest)
-  - rmsnorm: reduction + division + sqrt
-  - softmax: multi-pass with exp (heaviest)
+Each op has a distinct memory-access pattern and arithmetic intensity.  We
+benchmark every op individually so the roofline simulator can use measured
+per-op bandwidths instead of falling back to a single proxy.
 
-If their effective bandwidth agrees, we can reuse the same B_peak for all
-elementwise ops without per-operator bench/fit.
+Ops covered:
+  - residual_add: pure add  (2 reads + 1 write)
+  - rmsnorm:      reduction + rsqrt + normalize  (1 read + 1 write + reduction)
+  - softmax:      multi-pass with exp  (heaviest elemwise)
+  - swiglu:       SiLU gate × up  (2 reads + 1 write + sigmoid compute)
+  - rope:         pairwise rotation  (1 read + 1 write + trig compute)
 """
 
 import torch
@@ -18,11 +20,14 @@ from bench.utils import warmup, benchmark, save_xlsx, check_memory
 
 DTYPE_BYTES = 2
 
-# Bytes-per-element factors (reads + write, times per pass)
+# Bytes-per-element factors: must match sim/roofline.py ELEM_BYTES so the
+# fitted B_eff is interpreted with the same multiplier at prediction time.
 BYTES_FACTORS = {
     "residual_add": 3,   # read A + read B + write C
     "rmsnorm": 4,        # read + write, with rsqrt reduction
     "softmax": 6,        # multi-pass: max/exp + sum + normalize
+    "swiglu": 3,         # read gate + read up + write result
+    "rope": 4,           # read Q/K + read cos/sin tables + write
 }
 
 
@@ -102,7 +107,46 @@ def bench_elementwise(config, output_path="results/elementwise.xlsx"):
             "bytes": 6 * N * DTYPE_BYTES,
         })
 
-        del x, y, w
+        # --- swiglu ---
+        gate = torch.randn(N, dtype=dtype, device=device)
+        up = torch.randn(N, dtype=dtype, device=device)
+
+        def swiglu_fn(gate=gate, up=up):
+            F.silu(gate) * up
+
+        warmup(swiglu_fn, warmup_iters)
+        ms = benchmark(swiglu_fn, bench_iters)
+        results.append({
+            "op_name": "swiglu",
+            "N": N,
+            "time_ms": f"{ms:.6f}",
+            "flops": 5 * N,   # silu(~4) + multiply(1)
+            "bytes": 3 * N * DTYPE_BYTES,
+        })
+
+        # --- rope ---
+        # RoPE applies a 2D rotation to each pair of elements.
+        # q is [N] → view as [N/2, 2] → apply 2×2 rotation → flatten back.
+        rope_q = torch.randn(N, dtype=dtype, device=device)
+
+        def rope_fn(q=rope_q):
+            q2 = q.view(-1, 2)
+            out = torch.empty_like(q2)
+            out[:, 0] = q2[:, 0] * 0.5 - q2[:, 1] * 0.866
+            out[:, 1] = q2[:, 1] * 0.5 + q2[:, 0] * 0.866
+            return out.view(-1)
+
+        warmup(rope_fn, warmup_iters)
+        ms = benchmark(rope_fn, bench_iters)
+        results.append({
+            "op_name": "rope",
+            "N": N,
+            "time_ms": f"{ms:.6f}",
+            "flops": 6 * N,   # 2 mul + 2 add per pair → 4 per pair → 2 per element
+            "bytes": 4 * N * DTYPE_BYTES,
+        })
+
+        del x, y, w, gate, up, rope_q
 
     if output_path:
         save_xlsx(results, output_path)

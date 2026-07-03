@@ -7,6 +7,28 @@ roofline helpers live here; ``predict()`` / ``print_one()`` / ``print_all()``
 
 DTYPE_BYTES = 2  # fp16
 
+# Tensor core tile size for fp16 (m16n8k16 on Ampere, m16n8k8 on Turing).
+# The K and N dimensions are quantized to tile boundaries; non-aligned
+# dimensions cause the GPU to pad internally, inflating effective FLOPs.
+_TILE_K = 16
+_TILE_N = 16
+
+
+def _tile_waste(K, N):
+    """Return time multiplier ≥ 1.0 for tensor-core tile quantization waste.
+
+    GPU tensor cores operate on fixed-size tiles (16×16 for fp16).
+    When the inner dimension K or output dimension N is not a multiple
+    of the tile size, the hardware pads to the next tile boundary and
+    discards unused results, wasting compute.
+
+    For well-aligned dimensions (multiples of 16) — which includes
+    all standard LLM hidden/intermediate sizes — returns 1.0.
+    """
+    K_pad = ((K + _TILE_K - 1) // _TILE_K) * _TILE_K
+    N_pad = ((N + _TILE_N - 1) // _TILE_N) * _TILE_N
+    return (K_pad / K) * (N_pad / N)
+
 # Bytes-per-element factors for elementwise ops
 ELEM_BYTES = {
     "residual_add": 3,
@@ -16,6 +38,7 @@ ELEM_BYTES = {
     "layernorm": 5,
     "rmsnorm": 4,
     "causal_mask": 3,
+    "fused_residual_norm": 4,  # read residual + read hidden + write normed + write new residual
 }
 
 
@@ -26,9 +49,16 @@ def roofline_time(flops, bytes_moved, F_peak, B_peak, p):
 
 
 def matmul_time(M, K, N, F, B, p):
+    """Predicted time for [M,K] × [K,N] matmul.
+
+    Accounts for tensor-core tile quantization: when K or N are not
+    multiples of the tile size (16), the GPU pads internally and wastes
+    compute.  The tile-waste factor inflates the predicted time accordingly.
+    """
     flops = 2 * M * K * N
     bytes_moved = (M * K + K * N + M * N) * DTYPE_BYTES
-    return roofline_time(flops, bytes_moved, F, B, p)
+    t = roofline_time(flops, bytes_moved, F, B, p)
+    return t * _tile_waste(K, N)
 
 
 def elem_time(op_name, N, b_effs, overheads):
@@ -43,17 +73,23 @@ def elem_time(op_name, N, b_effs, overheads):
 def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None):
     """Q/K/V/O projections for attention layers.
 
-    nh, hd: if nh*hd != h, Q proj outputs nh*hd, K/V output nh_kv*hd, O inputs nh*hd.
+    Q/K/V are fused into one matmul (matching vLLM's QKVParallelLinear),
+    so the input activations are read from HBM once instead of three times.
+    O projection is a separate matmul.
+
+    nh, hd: if nh*hd != h, Q proj outputs nh*hd, K/V output nh_kv*hd.
     nh_kv defaults to nh (MHA), set for GQA.
     """
     if nh is None or (nh * hd == h and (nh_kv or nh) == nh):
-        return 4 * matmul_time(M, h, h, F, B, p)
+        # MHA: QKV fused [M,h]×[h,3h] + O [M,h]×[h,h]
+        return matmul_time(M, h, 3 * h, F, B, p) + matmul_time(M, h, h, F, B, p)
+    # GQA: Q dim ≠ KV dim
     dim_q = nh * hd
     dim_kv = (nh_kv or nh) * hd
-    t = matmul_time(M, h, dim_q, F, B, p)       # Q proj
-    t += matmul_time(M, h, dim_kv, F, B, p)      # K proj
-    t += matmul_time(M, h, dim_kv, F, B, p)      # V proj
-    t += matmul_time(M, dim_q, h, F, B, p)       # O proj
+    # QKV fused: [M, h] × [h, dim_q + 2·dim_kv]
+    t = matmul_time(M, h, dim_q + 2 * dim_kv, F, B, p)
+    # O projection: [M, dim_q] × [dim_q, h]
+    t += matmul_time(M, dim_q, h, F, B, p)
     return t
 
 
@@ -119,3 +155,19 @@ def residual_add_ops(b, s, h, b_effs, overheads):
     """2 × residual addition per layer (post-attention + post-FFN)."""
     N = b * s * h
     return 2 * elem_time("residual_add", N, b_effs, overheads)
+
+
+def fused_residual_norm_ops(b, s, h, b_effs, overheads):
+    """2 × fused residual+norm per layer (post-attn + post-FFN).
+
+    Matches vLLM's fused_add_rms_norm: reads residual + hidden_states,
+    computes norm in a single kernel, writes normed output + new residual.
+    Eliminates the intermediate HBM traffic of separate residual_add + rmsnorm.
+
+    When fused_residual_norm is not in b_effs, falls back to separate ops.
+    """
+    if "fused_residual_norm" in b_effs:
+        N = b * s * h
+        return 2 * elem_time("fused_residual_norm", N, b_effs, overheads)
+    # Fallback: separate residual_add + rmsnorm (backward compatible)
+    return residual_add_ops(b, s, h, b_effs, overheads) + norm_ops(b, s, h, "rmsnorm", b_effs, overheads)

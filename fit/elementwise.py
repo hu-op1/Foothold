@@ -3,19 +3,22 @@
 Model: time = bytes / B_eff + overhead
 
 Each measured op gets independent B_eff from its large-N data.
-Unmeasured ops inherit from a proxy.
+Ops without direct benchmarks (layernorm, causal_mask) inherit from a
+semantically similar proxy.
 """
 
 import numpy as np
 
 
+# Only proxy ops that have no direct benchmark.
+# swiglu, rope, rmsnorm are now measured directly in bench/elementwise.py.
 PROXY = {
-    "swiglu": "residual_add",
-    "rope": "residual_add",
-    "layernorm": "residual_add",
-    "rmsnorm": "residual_add",
-    "causal_mask": "residual_add",
+    "layernorm": "rmsnorm",       # both are reduction + normalize
+    "causal_mask": "residual_add",  # both are simple add patterns
 }
+
+# Ops that have direct benchmarks — fit independently.
+MEASURED_OPS = ["residual_add", "rmsnorm", "softmax", "swiglu", "rope"]
 
 
 def _fit_op(bytes_moved, times_s, op_name):
@@ -53,9 +56,10 @@ def fit_elementwise(results):
     b_effs = {}
     overheads = {}
 
-    for op_name in ["residual_add", "softmax"]:
+    for op_name in MEASURED_OPS:
         op_results = [r for r in results if r["op_name"] == op_name]
         if not op_results:
+            print(f"  {op_name:<16} (no benchmark data — skipped)")
             continue
 
         bytes_moved = np.array([r["bytes"] for r in op_results])
@@ -72,6 +76,7 @@ def fit_elementwise(results):
         if proxy in b_effs:
             b_effs[op] = b_effs[proxy]
             overheads[op] = overheads[proxy]
+            print(f"  {op:<16} → proxied to {proxy}")
 
     return {
         "elem_b_effs": {k: float(v) for k, v in b_effs.items()},
