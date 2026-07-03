@@ -1,5 +1,6 @@
 gpu: "3090"
 model: "Qwen/Qwen3-4B"
+dtype: "float16"  # must match a dtype in the benchmark config
 
 communication:
   intra_bw_gb_s: 9.7    # intra-node (NVLink ~900 GB/s, PCIe ~64 GB/s)

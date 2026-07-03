@@ -43,28 +43,46 @@ def _fit_subset(matmul_results, label, F_fixed=None):
     return {"F_peak": float(F_peak), "B_peak": float(B_peak), "p": float(p), "r2": float(r2)}
 
 
+def _fit_matmul_dtype(matmul_results, dtypes, label_suffix=""):
+    """Fit matmul roofline for a single dtype (or all mixed)."""
+    small = [r for r in matmul_results if r["M"] <= M_SPLIT]
+    large = [r for r in matmul_results if r["M"] >= M_SPLIT]
+
+    p_large = _fit_subset(large, f"prefill (M>={M_SPLIT}){label_suffix}")
+    F_shared = p_large.get("F_peak", 1e13)
+    p_small = _fit_subset(small, f"decode (M<={M_SPLIT}){label_suffix}", F_fixed=F_shared)
+
+    params = {}
+    params.update({f"{k}_decode{label_suffix}": v for k, v in p_small.items()})
+    params.update({f"{k}_prefill{label_suffix}": v for k, v in p_large.items()})
+    return params
+
+
 def fit_matmul(results):
     matmul_results = [r for r in results if r["op_name"] == "matmul"]
     if not matmul_results:
         return {}
 
+    # Detect dtypes present in results
+    dtypes = sorted(set(r.get("dtype", "float16") for r in matmul_results))
+
     print("=" * 60)
     print("Roofline Fit (Matmul)")
     print(f"  split at M = {M_SPLIT}")
+    print(f"  dtypes: {dtypes}")
     print("=" * 60)
 
-    small = [r for r in matmul_results if r["M"] <= M_SPLIT]
-    large = [r for r in matmul_results if r["M"] >= M_SPLIT]
-
-    # Step 1: fit prefill (large M) — F_peak well-constrained here
-    p_large = _fit_subset(large, f"prefill (M>={M_SPLIT})")
-
-    # Step 2: fit decode (small M) with F_peak fixed from prefill
-    F_shared = p_large.get("F_peak", 1e13)
-    p_small = _fit_subset(small, f"decode (M<={M_SPLIT})", F_fixed=F_shared)
-
     params = {}
-    params.update({f"{k}_decode": v for k, v in p_small.items()})
-    params.update({f"{k}_prefill": v for k, v in p_large.items()})
+
+    if len(dtypes) <= 1:
+        # Single dtype — fit directly (no suffix, backward compat)
+        params.update(_fit_matmul_dtype(matmul_results, dtypes))
+    else:
+        # Per-dtype fitting
+        for dt in dtypes:
+            subset = [r for r in matmul_results if r.get("dtype", "float16") == dt]
+            params.update(_fit_matmul_dtype(subset, [dt], label_suffix=f"_{dt}"))
+        # Unified (all dtypes) for backward compat
+        params.update(_fit_matmul_dtype(matmul_results, dtypes))
 
     return params

@@ -8,6 +8,7 @@ from sim.request import Request, RequestStatus, FinishReason
 from sim.memory import BlockPool, compute_block_hashes
 from sim.scheduler import ColocatedScheduler
 from sim.executor import predict_step, predict_step_tp
+from sim.roofline import dtype_bytes
 from sim.communication import (
     effective_xfer_overhead,
     transfer_blocks,
@@ -36,6 +37,9 @@ class SimulationEngine:
         self.clock: float = 0.0
         self.pp_size = 1
 
+        # Precision (for per-dtype roofline params + bytes-per-element)
+        self.dtype = config.get("dtype", "float16")
+
         # Model dimensions
         self.nh_kv = model_spec.get("num_kv_heads", model_spec["num_heads"])
         self.hd = model_spec["head_dim"]
@@ -43,9 +47,10 @@ class SimulationEngine:
         self.block_size = config["simulation"]["block_size"]
 
         # Bytes per KV cache block (all layers — used for KV transfer).
+        dt_b = dtype_bytes(self.dtype)
         self.bytes_per_block = (
             2 * self.nl * self.nh_kv * self.hd
-            * self.block_size * 2  # 2 bytes dtype
+            * self.block_size * dt_b
         )
         # Base num_blocks (pp=1).  Callers should scale by pp_size when
         # creating pools because each GPU stores KV for only nl/pp layers.
@@ -538,8 +543,8 @@ class SimulationEngine:
             return predict_step_tp(scheduled_requests, self.model, self.hw,
                                    tp, self.intra_bw_gb_s,
                                    self.intra_latency_us,
-                                   pp_size=pp)
-        return predict_step(scheduled_requests, self.model, self.hw)
+                                   pp_size=pp, dtype=self.dtype)
+        return predict_step(scheduled_requests, self.model, self.hw, self.dtype)
 
     def _compute_xfer(self, request: Request, prefill_time: float) -> float:
         """Compute KV transfer time for a completed prefill, accounting for overlap."""

@@ -5,7 +5,20 @@ roofline helpers live here; ``predict()`` / ``print_one()`` / ``print_all()``
 (the static single-batch predictor) have been removed.
 """
 
-DTYPE_BYTES = 2  # fp16
+# Bytes per element for each dtype.
+DTYPE_BYTES_MAP = {
+    "float16": 2, "bfloat16": 2,
+    "float8_e4m3fn": 1, "float8_e5m2": 1,
+}
+# Legacy default (fp16, 2 bytes) — used when dtype is not specified.
+_DTYPE_BYTES_DEFAULT = 2
+
+
+def dtype_bytes(dtype_name=None):
+    """Bytes per element for a named dtype.  Falls back to fp16 (2 bytes)."""
+    if dtype_name is None:
+        return _DTYPE_BYTES_DEFAULT
+    return DTYPE_BYTES_MAP.get(dtype_name, _DTYPE_BYTES_DEFAULT)
 
 # Tensor core tile size for fp16 (m16n8k16 on Ampere, m16n8k8 on Turing).
 # The K and N dimensions are quantized to tile boundaries; non-aligned
@@ -48,29 +61,33 @@ def roofline_time(flops, bytes_moved, F_peak, B_peak, p):
     return (c ** p + m ** p) ** (1 / p)
 
 
-def matmul_time(M, K, N, F, B, p):
+def matmul_time(M, K, N, F, B, p, dt_bytes=None):
     """Predicted time for [M,K] × [K,N] matmul.
 
     Accounts for tensor-core tile quantization: when K or N are not
     multiples of the tile size (16), the GPU pads internally and wastes
     compute.  The tile-waste factor inflates the predicted time accordingly.
     """
+    if dt_bytes is None:
+        dt_bytes = _DTYPE_BYTES_DEFAULT
     flops = 2 * M * K * N
-    bytes_moved = (M * K + K * N + M * N) * DTYPE_BYTES
+    bytes_moved = (M * K + K * N + M * N) * dt_bytes
     t = roofline_time(flops, bytes_moved, F, B, p)
     return t * _tile_waste(K, N)
 
 
-def elem_time(op_name, N, b_effs, overheads):
+def elem_time(op_name, N, b_effs, overheads, dt_bytes=None):
+    if dt_bytes is None:
+        dt_bytes = _DTYPE_BYTES_DEFAULT
     factor = ELEM_BYTES.get(op_name, 3)
     B_eff = b_effs.get(op_name, 1e12)
     overhead = overheads.get(op_name, 0.0)
-    return (N * factor * DTYPE_BYTES) / B_eff + overhead
+    return (N * factor * dt_bytes) / B_eff + overhead
 
 
 # ── layer ops ───────────────────────────────────────────────────────────
 
-def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None):
+def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None, dt_bytes=None):
     """Q/K/V/O projections for attention layers.
 
     Q/K/V are fused into one matmul (matching vLLM's QKVParallelLinear),
@@ -82,30 +99,31 @@ def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None):
     """
     if nh is None or (nh * hd == h and (nh_kv or nh) == nh):
         # MHA: QKV fused [M,h]×[h,3h] + O [M,h]×[h,h]
-        return matmul_time(M, h, 3 * h, F, B, p) + matmul_time(M, h, h, F, B, p)
+        return matmul_time(M, h, 3 * h, F, B, p, dt_bytes) + matmul_time(M, h, h, F, B, p, dt_bytes)
     # GQA: Q dim ≠ KV dim
     dim_q = nh * hd
     dim_kv = (nh_kv or nh) * hd
     # QKV fused: [M, h] × [h, dim_q + 2·dim_kv]
-    t = matmul_time(M, h, dim_q + 2 * dim_kv, F, B, p)
+    t = matmul_time(M, h, dim_q + 2 * dim_kv, F, B, p, dt_bytes)
     # O projection: [M, dim_q] × [dim_q, h]
-    t += matmul_time(M, dim_q, h, F, B, p)
+    t += matmul_time(M, dim_q, h, F, B, p, dt_bytes)
     return t
 
 
-def ffn_projections(M, h, inter, F, B, p):
+def ffn_projections(M, h, inter, F, B, p, dt_bytes=None):
     """FFN projections: gate/up (2×) + down."""
-    t = 2 * matmul_time(M, h, inter, F, B, p)
-    t += matmul_time(M, inter, h, F, B, p)
+    t = 2 * matmul_time(M, h, inter, F, B, p, dt_bytes)
+    t += matmul_time(M, inter, h, F, B, p, dt_bytes)
     return t
 
 
-def projections(M, h, inter, F, B, p, nh=None, nh_kv=None, hd=None):
+def projections(M, h, inter, F, B, p, nh=None, nh_kv=None, hd=None, dt_bytes=None):
     """Q/K/V/O (4×) + FFN up/gate (2×) + FFN down — convenience wrapper."""
-    return attn_projections(M, h, F, B, p, nh, nh_kv, hd) + ffn_projections(M, h, inter, F, B, p)
+    return (attn_projections(M, h, F, B, p, nh, nh_kv, hd, dt_bytes)
+            + ffn_projections(M, h, inter, F, B, p, dt_bytes))
 
 
-def attention_fused(b, nh, s_q, s_kv, hd, F, B, p, nh_kv=None):
+def attention_fused(b, nh, s_q, s_kv, hd, F, B, p, nh_kv=None, dt_bytes=None):
     """FlashAttention: QKᵀ + softmax + score×V fused in SRAM.
 
     FLOPs unchanged, but intermediate S×S matrix never touches HBM.
@@ -115,49 +133,51 @@ def attention_fused(b, nh, s_q, s_kv, hd, F, B, p, nh_kv=None):
     """
     if nh_kv is None:
         nh_kv = nh
+    if dt_bytes is None:
+        dt_bytes = _DTYPE_BYTES_DEFAULT
     M_q = b * nh * s_q
     M_kv = b * nh_kv * s_kv
     flops = 4 * M_q * s_kv * hd
-    bytes_moved = b * hd * DTYPE_BYTES * (nh * s_q + nh_kv * s_kv + nh_kv * s_kv + nh * s_q)
+    bytes_moved = b * hd * dt_bytes * (nh * s_q + nh_kv * s_kv + nh_kv * s_kv + nh * s_q)
     return roofline_time(flops, bytes_moved, F, B, p)
 
 
-def elementwise_ops(b, s, h, inter, nh, hd, norm_type, b_effs, overheads, nh_kv=None):
+def elementwise_ops(b, s, h, inter, nh, hd, norm_type, b_effs, overheads, nh_kv=None, dt_bytes=None):
     """All elementwise ops per layer — convenience wrapper."""
     if nh_kv is None:
         nh_kv = nh
-    t = norm_ops(b, s, h, norm_type, b_effs, overheads)
-    t += swiglu_op(b, s, inter, b_effs, overheads)
-    t += rope_op(b, s, nh, nh_kv, hd, b_effs, overheads)
-    t += residual_add_ops(b, s, h, b_effs, overheads)
+    t = norm_ops(b, s, h, norm_type, b_effs, overheads, dt_bytes)
+    t += swiglu_op(b, s, inter, b_effs, overheads, dt_bytes)
+    t += rope_op(b, s, nh, nh_kv, hd, b_effs, overheads, dt_bytes)
+    t += residual_add_ops(b, s, h, b_effs, overheads, dt_bytes)
     return t
 
 
-def norm_ops(b, s, h, norm_type, b_effs, overheads):
+def norm_ops(b, s, h, norm_type, b_effs, overheads, dt_bytes=None):
     """2 × norm per layer (pre-attention + pre-FFN)."""
     N = b * s * h
-    return 2 * elem_time(norm_type, N, b_effs, overheads)
+    return 2 * elem_time(norm_type, N, b_effs, overheads, dt_bytes)
 
 
-def swiglu_op(b, s, inter, b_effs, overheads):
+def swiglu_op(b, s, inter, b_effs, overheads, dt_bytes=None):
     """SiLU gating in FFN (1× per layer)."""
-    return elem_time("swiglu", b * s * inter, b_effs, overheads)
+    return elem_time("swiglu", b * s * inter, b_effs, overheads, dt_bytes)
 
 
-def rope_op(b, s, nh, nh_kv, hd, b_effs, overheads):
+def rope_op(b, s, nh, nh_kv, hd, b_effs, overheads, dt_bytes=None):
     """RoPE for Q and K (2× per layer)."""
-    t = elem_time("rope", b * nh * s * hd, b_effs, overheads)
-    t += elem_time("rope", b * nh_kv * s * hd, b_effs, overheads)
+    t = elem_time("rope", b * nh * s * hd, b_effs, overheads, dt_bytes)
+    t += elem_time("rope", b * nh_kv * s * hd, b_effs, overheads, dt_bytes)
     return t
 
 
-def residual_add_ops(b, s, h, b_effs, overheads):
+def residual_add_ops(b, s, h, b_effs, overheads, dt_bytes=None):
     """2 × residual addition per layer (post-attention + post-FFN)."""
     N = b * s * h
-    return 2 * elem_time("residual_add", N, b_effs, overheads)
+    return 2 * elem_time("residual_add", N, b_effs, overheads, dt_bytes)
 
 
-def fused_residual_norm_ops(b, s, h, b_effs, overheads):
+def fused_residual_norm_ops(b, s, h, b_effs, overheads, dt_bytes=None):
     """2 × fused residual+norm per layer (post-attn + post-FFN).
 
     Matches vLLM's fused_add_rms_norm: reads residual + hidden_states,
@@ -168,6 +188,7 @@ def fused_residual_norm_ops(b, s, h, b_effs, overheads):
     """
     if "fused_residual_norm" in b_effs:
         N = b * s * h
-        return 2 * elem_time("fused_residual_norm", N, b_effs, overheads)
+        return 2 * elem_time("fused_residual_norm", N, b_effs, overheads, dt_bytes)
     # Fallback: separate residual_add + rmsnorm (backward compatible)
-    return residual_add_ops(b, s, h, b_effs, overheads) + norm_ops(b, s, h, "rmsnorm", b_effs, overheads)
+    return (residual_add_ops(b, s, h, b_effs, overheads, dt_bytes)
+            + norm_ops(b, s, h, "rmsnorm", b_effs, overheads, dt_bytes))

@@ -47,12 +47,8 @@ def _fit_op(bytes_moved, times_s, op_name):
     return B_eff, overhead, r2
 
 
-def fit_elementwise(results):
-    print("\n" + "=" * 60)
-    print("Elementwise Fit (per-op B_eff + overhead)")
-    print("  model: time = bytes / B_eff + overhead")
-    print("=" * 60)
-
+def _fit_elementwise_dtype(results, label_suffix=""):
+    """Fit elementwise B_eff + overhead for a single dtype subset."""
     b_effs = {}
     overheads = {}
 
@@ -78,8 +74,35 @@ def fit_elementwise(results):
             overheads[op] = overheads[proxy]
             print(f"  {op:<16} → proxied to {proxy}")
 
+    suffix = label_suffix
     return {
-        "elem_b_effs": {k: float(v) for k, v in b_effs.items()},
-        "elem_overheads": {k: float(v) for k, v in overheads.items()},
-        "type": "elementwise",
+        f"elem_b_effs{suffix}": {k: float(v) for k, v in b_effs.items()},
+        f"elem_overheads{suffix}": {k: float(v) for k, v in overheads.items()},
     }
+
+
+def fit_elementwise(results):
+    # Detect dtypes
+    dtypes = sorted(set(r.get("dtype", "float16") for r in results if r.get("dtype")))
+
+    print("\n" + "=" * 60)
+    print("Elementwise Fit (per-op B_eff + overhead)")
+    print("  model: time = bytes / B_eff + overhead")
+    print(f"  dtypes: {dtypes}")
+    print("=" * 60)
+
+    params = {}
+
+    if len(dtypes) <= 1:
+        params.update(_fit_elementwise_dtype(results))
+    else:
+        for dt in dtypes:
+            subset = [r for r in results if r.get("dtype", "float16") == dt]
+            print(f"\n  ── {dt} ──")
+            params.update(_fit_elementwise_dtype(subset, label_suffix=f"_{dt}"))
+        # Unified (all dtypes) for backward compat
+        print(f"\n  ── unified (all dtypes) ──")
+        params.update(_fit_elementwise_dtype(results))
+
+    params["type"] = "elementwise"
+    return params

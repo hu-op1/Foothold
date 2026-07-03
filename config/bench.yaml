@@ -28,7 +28,10 @@ flashattn:
 
 gpu: "3090"
 
-dtype: "float16"
+# Precision sweep.  fp8 requires Hopper+ (H100/H200/B200); silently OOM/skip on
+# older GPUs.  int8/int4 weight-only quant uses dedicated dequant+compute codepaths
+# (torch._int_mm, custom CUDA) — not covered by standard torch.mm / SDPA bench.
+dtype: ["float16", "bfloat16", "float8_e4m3fn"]
 warmup_iters: 200
 bench_iters: 2000
 max_memory_gb: 24
