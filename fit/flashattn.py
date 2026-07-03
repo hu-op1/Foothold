@@ -7,6 +7,13 @@ and B_peak for attention prediction introduces systematic error.
 This module fits dedicated (F_peak, B_peak, p) for FlashAttention by
 splitting at s_q = 1 (decode) vs s_q > 1 (prefill), matching the two-
 regime approach in fit/matmul.py.
+
+When the benchmark includes multiple batch sizes, per-batch B_peak and p
+are fitted (with a single shared F_peak from the largest-batch prefill).
+This captures the GPU utilisation curve: small batches under-utilise the
+GPU, achieving lower effective bandwidth.  At prediction time the sim
+interpolates between batch sizes based on the number of concurrent
+requests of each type (prefill / decode).
 """
 
 import numpy as np
@@ -51,34 +58,102 @@ def _fit_subset(fa_results, label, F_fixed=None):
             "p": float(p), "r2": float(r2)}
 
 
-def fit_flashattn(results):
-    """Fit FlashAttention roofline params from benchmark data.
-
-    Returns dict with keys: F_peak_fa_prefill, B_peak_fa_prefill, p_fa_prefill,
-    F_peak_fa_decode, B_peak_fa_decode, p_fa_decode.
-    """
-    fa_results = [r for r in results if r["op_name"] == "flashattn"]
-    if not fa_results:
-        print("\n[FlashAttn Fit] No flashattn benchmark data — skipping")
-        return {}
-
-    print("\n" + "=" * 60)
-    print("Roofline Fit (FlashAttention)")
-    print(f"  split at s_q = {S_Q_SPLIT + 1} (decode: s_q=1, prefill: s_q>1)")
-    print("=" * 60)
-
+def _fit_single_batch(fa_results):
+    """Original fitting path: single batch, split by s_q only."""
     decode = [r for r in fa_results if r["s_q"] <= S_Q_SPLIT]
     prefill = [r for r in fa_results if r["s_q"] > S_Q_SPLIT]
 
-    # Step 1: fit prefill (large s_q) — F_peak well-constrained here
     p_prefill = _fit_subset(prefill, f"prefill (s_q > {S_Q_SPLIT})")
-
-    # Step 2: fit decode (s_q = 1) with F_peak fixed from prefill
     F_shared = p_prefill.get("F_peak", 1e13)
     p_decode = _fit_subset(decode, f"decode (s_q = {S_Q_SPLIT})", F_fixed=F_shared)
 
     params = {}
     params.update({f"{k}_fa_decode": v for k, v in p_decode.items()})
     params.update({f"{k}_fa_prefill": v for k, v in p_prefill.items()})
+    return params
+
+
+def fit_flashattn(results):
+    """Fit FlashAttention roofline params from benchmark data.
+
+    When multiple batch sizes are present in the benchmark data, fits
+    per-batch B_peak and p (with shared F_peak) to capture the GPU
+    utilisation curve.  Also emits unified (all-batch) params for
+    backward compatibility.
+
+    Returns dict with keys:
+      - Unified (backward compat): F_peak_fa_prefill, B_peak_fa_prefill,
+        p_fa_prefill, F_peak_fa_decode, B_peak_fa_decode, p_fa_decode.
+      - Per-batch arrays: fa_batch_sizes, fa_decode_B, fa_decode_p,
+        fa_prefill_B, fa_prefill_p.
+    """
+    fa_results = [r for r in results if r["op_name"] == "flashattn"]
+    if not fa_results:
+        print("\n[FlashAttn Fit] No flashattn benchmark data — skipping")
+        return {}
+
+    batch_sizes = sorted(set(r["b"] for r in fa_results))
+
+    print("\n" + "=" * 60)
+    print("Roofline Fit (FlashAttention)")
+    print(f"  split at s_q = {S_Q_SPLIT + 1} (decode: s_q=1, prefill: s_q>1)")
+    print(f"  batch sizes: {batch_sizes}")
+    print("=" * 60)
+
+    if len(batch_sizes) <= 1:
+        return _fit_single_batch(fa_results)
+
+    # ── Step 1: fit F_peak from largest-batch prefill (best GPU utilisation) ──
+    largest_b = batch_sizes[-1]
+    prefill_largest = [r for r in fa_results
+                       if r["b"] == largest_b and r["s_q"] > S_Q_SPLIT]
+    p_largest = _fit_subset(prefill_largest,
+                            f"prefill b={largest_b} (F_peak anchor)")
+    F_shared = p_largest.get("F_peak", 1e13)
+    print(f"  → shared F_peak = {F_shared / 1e12:.1f} TF (from b={largest_b} prefill)")
+
+    # ── Step 2: per-batch B_peak and p (F_peak fixed) ──
+    decode_B = []
+    decode_p = []
+    prefill_B = []
+    prefill_p = []
+
+    for b_val in batch_sizes:
+        batch_results = [r for r in fa_results if r["b"] == b_val]
+        decode = [r for r in batch_results if r["s_q"] <= S_Q_SPLIT]
+        prefill_b = [r for r in batch_results if r["s_q"] > S_Q_SPLIT]
+
+        p_p = _fit_subset(prefill_b, f"prefill b={b_val}", F_fixed=F_shared)
+        p_d = _fit_subset(decode, f"decode  b={b_val}", F_fixed=F_shared)
+
+        prefill_B.append(p_p.get("B_peak", 0.0))
+        prefill_p.append(p_p.get("p", 1.0))
+        decode_B.append(p_d.get("B_peak", 0.0))
+        decode_p.append(p_d.get("p", 1.0))
+
+    # ── Step 3: unified fit (all batches) for backward compat ──
+    prefill_all = [r for r in fa_results if r["s_q"] > S_Q_SPLIT]
+    decode_all = [r for r in fa_results if r["s_q"] <= S_Q_SPLIT]
+    p_prefill_u = _fit_subset(prefill_all, "prefill (all batches)", F_fixed=F_shared)
+    p_decode_u = _fit_subset(decode_all, "decode  (all batches)", F_fixed=F_shared)
+
+    params = {}
+    # Unified backward-compat keys
+    params.update({f"{k}_fa_decode": v for k, v in p_decode_u.items()})
+    params.update({f"{k}_fa_prefill": v for k, v in p_prefill_u.items()})
+    # Per-batch arrays
+    params["fa_batch_sizes"] = batch_sizes
+    params["fa_decode_B"] = decode_B
+    params["fa_decode_p"] = decode_p
+    params["fa_prefill_B"] = prefill_B
+    params["fa_prefill_p"] = prefill_p
+
+    # Record benchmark nh so the sim can normalise by total query heads
+    # (n_requests × nh_model / fa_bench_nh → effective batch for interpolation)
+    params["fa_bench_nh"] = fa_results[0].get("nh", 32)
+
+    # Print utilisation curve summary
+    print(f"  decode  B(TB/s): {[f'{v/1e12:.2f}' for v in decode_B]}")
+    print(f"  prefill B(TB/s): {[f'{v/1e12:.2f}' for v in prefill_B]}")
 
     return params

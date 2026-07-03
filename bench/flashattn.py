@@ -48,26 +48,28 @@ def bench_flashattn(config, output_path="results/flashattn.xlsx"):
     device = torch.device("cuda")
 
     fa_cfg = config["flashattn"]
-    b = fa_cfg.get("batch", 1)
+    batch_raw = fa_cfg.get("batch", 1)
+    batch_list = batch_raw if isinstance(batch_raw, list) else [batch_raw]
     nh = fa_cfg.get("num_heads", 32)
     nh_kv = fa_cfg.get("num_kv_heads", 8)
     hd = fa_cfg.get("head_dim", 128)
 
     backend = "flash_attn (native)" if _HAS_NATIVE_FA else "torch SDPA"
     print(f"FlashAttn backend: {backend}")
+    print(f"FlashAttn batch sizes: {batch_list}")
 
     results = []
 
-    combos = [(sq, skv) for sq in fa_cfg["s_q"] for skv in fa_cfg["s_kv"]]
-    for s_q, s_kv in tqdm(combos, desc="FlashAttn"):
+    combos = [(b_val, sq, skv) for b_val in batch_list for sq in fa_cfg["s_q"] for skv in fa_cfg["s_kv"]]
+    for b_val, s_q, s_kv in tqdm(combos, desc="FlashAttn"):
         # Memory check: Q[b,nh,s_q,hd] + K[b,nh_kv,s_kv,hd] + V[b,nh_kv,s_kv,hd] + O[b,nh,s_q,hd]
-        act_bytes = b * (nh * s_q + 2 * nh_kv * s_kv + nh * s_q) * hd * DTYPE_BYTES
+        act_bytes = b_val * (nh * s_q + 2 * nh_kv * s_kv + nh * s_q) * hd * DTYPE_BYTES
         act_gb = act_bytes / (1024 ** 3)
         oom = not check_memory(act_gb, max_mem)
         if oom:
             results.append({
                 "op_name": "flashattn",
-                "b": b, "nh": nh, "nh_kv": nh_kv, "hd": hd,
+                "b": b_val, "nh": nh, "nh_kv": nh_kv, "hd": hd,
                 "s_q": s_q, "s_kv": s_kv,
                 "time_ms": "OOM",
                 "flops": 0,
@@ -76,9 +78,9 @@ def bench_flashattn(config, output_path="results/flashattn.xlsx"):
             continue
 
         # Create tensors and benchmark
-        q = torch.randn(b, nh, s_q, hd, dtype=dtype, device=device)
-        k = torch.randn(b, nh_kv, s_kv, hd, dtype=dtype, device=device)
-        v = torch.randn(b, nh_kv, s_kv, hd, dtype=dtype, device=device)
+        q = torch.randn(b_val, nh, s_q, hd, dtype=dtype, device=device)
+        k = torch.randn(b_val, nh_kv, s_kv, hd, dtype=dtype, device=device)
+        v = torch.randn(b_val, nh_kv, s_kv, hd, dtype=dtype, device=device)
 
         if _HAS_NATIVE_FA:
             def fa_fn(q=q, k=k, v=v):
@@ -92,11 +94,11 @@ def bench_flashattn(config, output_path="results/flashattn.xlsx"):
 
         results.append({
             "op_name": "flashattn",
-            "b": b, "nh": nh, "nh_kv": nh_kv, "hd": hd,
+            "b": b_val, "nh": nh, "nh_kv": nh_kv, "hd": hd,
             "s_q": s_q, "s_kv": s_kv,
             "time_ms": f"{ms:.6f}",
-            "flops": _fa_flops(b, nh, s_q, s_kv, hd),
-            "bytes": _fa_bytes(b, nh, s_q, nh_kv, s_kv, hd),
+            "flops": _fa_flops(b_val, nh, s_q, s_kv, hd),
+            "bytes": _fa_bytes(b_val, nh, s_q, nh_kv, s_kv, hd),
         })
 
         del q, k, v

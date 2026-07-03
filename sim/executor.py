@@ -65,6 +65,76 @@ def _select_roofline_params(M_total, hw):
     return {"F": hw["F_peak_prefill"], "B": B, "p": p}
 
 
+def _select_fa_params(n_requests, regime, hw_params, nh_model=None):
+    """Select FlashAttention roofline params based on concurrent request count.
+
+    When per-batch FA params are available (fa_batch_sizes), interpolates
+    B_peak and p in log-space across batch sizes — mirroring the M-based
+    interpolation in _select_roofline_params.  Falls back to unified FA
+    params, then to matmul-fitted params.
+
+    The interpolation is done on **total query heads** (n_requests × nh_model),
+    normalised by the benchmark's nh (fa_bench_nh).  This makes the sweep
+    valid for models with different num_heads than the benchmark config.
+
+    Args:
+        n_requests: number of concurrent requests of this type (prefill or decode).
+        regime: "decode" or "prefill".
+        hw_params: fitted hardware params dict.
+        nh_model: model's num_heads (for query-head normalisation).  If None,
+            uses n_requests directly (backward compat).
+
+    Returns:
+        dict with keys F, B, p.
+    """
+    batch_sizes = hw_params.get("fa_batch_sizes")
+    B_key = f"fa_{regime}_B"
+    p_key = f"fa_{regime}_p"
+    F_key = f"F_peak_fa_{regime}"
+
+    # Normalise to benchmark batch: effective_batch = total_query_heads / bench_nh
+    if nh_model is not None:
+        bench_nh = hw_params.get("fa_bench_nh", nh_model)
+        effective = n_requests * nh_model / bench_nh if bench_nh > 0 else n_requests
+    else:
+        effective = n_requests
+
+    if batch_sizes and len(batch_sizes) > 1 and B_key in hw_params:
+        B_arr = hw_params[B_key]
+        p_arr = hw_params[p_key]
+
+        if effective <= batch_sizes[0]:
+            B, p = B_arr[0], p_arr[0]
+        elif effective >= batch_sizes[-1]:
+            B, p = B_arr[-1], p_arr[-1]
+        else:
+            # Log-space interpolation between bracketing batch sizes
+            for i in range(len(batch_sizes) - 1):
+                if batch_sizes[i] <= effective <= batch_sizes[i + 1]:
+                    lo, hi = batch_sizes[i], batch_sizes[i + 1]
+                    w = (log2(effective) - log2(lo)) / (log2(hi) - log2(lo))
+                    log_B = log(B_arr[i]) + w * (log(B_arr[i + 1]) - log(B_arr[i]))
+                    B = exp(log_B)
+                    p = p_arr[i] + w * (p_arr[i + 1] - p_arr[i])
+                    break
+
+        F = hw_params.get(F_key, hw_params.get(f"F_peak_{regime}", 1e13))
+        return {"F": F, "B": B, "p": p}
+
+    # Fallback: unified FA params → matmul params
+    F_fb = hw_params.get(F_key)
+    B_fb = hw_params.get(f"B_peak_fa_{regime}")
+    p_fb = hw_params.get(f"p_fa_{regime}")
+    if F_fb is not None and B_fb is not None and p_fb is not None:
+        return {"F": F_fb, "B": B_fb, "p": p_fb}
+
+    return {
+        "F": hw_params[f"F_peak_{regime}"],
+        "B": hw_params[f"B_peak_{regime}"],
+        "p": hw_params[f"p_{regime}"],
+    }
+
+
 def predict_step(scheduled_requests, model_spec, hw_params):
     """Predict GPU execution time for one scheduler step.
 
@@ -107,15 +177,6 @@ def predict_step(scheduled_requests, model_spec, hw_params):
     b_effs = hw_params["elem_b_effs"]
     overheads = hw_params["elem_overheads"]
 
-    # Attention roofline params — prefer FlashAttention-specific if fitted,
-    # fall back to matmul-fitted params (backward compatible with old fit data).
-    F_d = hw_params.get("F_peak_fa_decode", hw_params["F_peak_decode"])
-    B_d = hw_params.get("B_peak_fa_decode", hw_params["B_peak_decode"])
-    p_d = hw_params.get("p_fa_decode", hw_params["p_decode"])
-    F_p = hw_params.get("F_peak_fa_prefill", hw_params["F_peak_prefill"])
-    B_p = hw_params.get("B_peak_fa_prefill", hw_params["B_peak_prefill"])
-    p_p = hw_params.get("p_fa_prefill", hw_params["p_prefill"])
-
     # Total new tokens this step — used for batched projections / LM head
     total_new_tokens = sum(nt for _, nt in scheduled_requests)
     params = _select_roofline_params(total_new_tokens, hw_params)
@@ -133,12 +194,21 @@ def predict_step(scheduled_requests, model_spec, hw_params):
     # so we accumulate FLOPs + bytes for prefill and decode separately,
     # then apply roofline_time once per type.  This avoids the systematic
     # over-estimate of the old per-request loop.
+
+    # Count concurrent requests by type (maps to FA benchmark batch dimension)
+    n_prefill = sum(1 for req, _ in scheduled_requests if req.is_prefill_chunk)
+    n_decode = sum(1 for req, _ in scheduled_requests if not req.is_prefill_chunk)
+
+    # Per-batch FA params selected from actual concurrency counts
+    fa_d = _select_fa_params(n_decode, "decode", hw_params, nh)
+    fa_p = _select_fa_params(n_prefill, "prefill", hw_params, nh)
+    F_d, B_d, p_d = fa_d["F"], fa_d["B"], fa_d["p"]
+    F_p, B_p, p_p = fa_p["F"], fa_p["B"], fa_p["p"]
+
     prefill_flops = 0.0
     prefill_bytes = 0.0
     decode_flops = 0.0
     decode_bytes = 0.0
-    n_prefill = 0
-    n_decode = 0
 
     for req, num_new in scheduled_requests:
         kv_len_after = req.num_computed_tokens
@@ -149,11 +219,9 @@ def predict_step(scheduled_requests, model_spec, hw_params):
         f = 4 * nh * num_new * kv_len_after * hd
         b = hd * DTYPE_BYTES * (2 * nh * num_new + 2 * nh_kv * kv_len_after)
         if req.is_prefill_chunk:
-            n_prefill += 1
             prefill_flops += f
             prefill_bytes += b
         else:
-            n_decode += 1
             decode_flops += f
             decode_bytes += b
 
@@ -240,13 +308,6 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
     params = _select_roofline_params(total_new_tokens, hw_params)
     F, B, p = params["F"], params["B"], params["p"]
 
-    F_d = hw_params.get("F_peak_fa_decode", hw_params["F_peak_decode"])
-    B_d = hw_params.get("B_peak_fa_decode", hw_params["B_peak_decode"])
-    p_d = hw_params.get("p_fa_decode", hw_params["p_decode"])
-    F_p = hw_params.get("F_peak_fa_prefill", hw_params["F_peak_prefill"])
-    B_p = hw_params.get("B_peak_fa_prefill", hw_params["B_peak_prefill"])
-    p_p = hw_params.get("p_fa_prefill", hw_params["p_prefill"])
-
     # ── Per-stage projections ──
     attn_proj_time = layers_per_stage * attn_projections(
         total_new_tokens, h, F, B, p, nh, nh_kv, hd)
@@ -254,12 +315,19 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
         total_new_tokens, h, inter, F, B, p)
 
     # ── Per-stage attention: group by type → roofline once per type ──
+    # Count concurrent requests by type first (maps to FA batch dimension)
+    n_prefill = sum(1 for req, _ in scheduled_requests if req.is_prefill_chunk)
+    n_decode = sum(1 for req, _ in scheduled_requests if not req.is_prefill_chunk)
+
+    fa_d = _select_fa_params(n_decode, "decode", hw_params, nh)
+    fa_p = _select_fa_params(n_prefill, "prefill", hw_params, nh)
+    F_d, B_d, p_d = fa_d["F"], fa_d["B"], fa_d["p"]
+    F_p, B_p, p_p = fa_p["F"], fa_p["B"], fa_p["p"]
+
     prefill_flops = 0.0
     prefill_bytes = 0.0
     decode_flops = 0.0
     decode_bytes = 0.0
-    n_prefill = 0
-    n_decode = 0
 
     for req, num_new in scheduled_requests:
         kv_len_after = req.num_computed_tokens
@@ -268,11 +336,9 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
         f = 4 * nh * num_new * kv_len_after * hd
         b = hd * DTYPE_BYTES * (2 * nh * num_new + 2 * nh_kv * kv_len_after)
         if req.is_prefill_chunk:
-            n_prefill += 1
             prefill_flops += f
             prefill_bytes += b
         else:
-            n_decode += 1
             decode_flops += f
             decode_bytes += b
 
