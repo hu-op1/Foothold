@@ -10,6 +10,7 @@ from sim.roofline import (
     swiglu_op,
     rope_op,
     residual_add_ops,
+    fused_residual_norm_ops,
     roofline_time,
     DTYPE_BYTES,
 )
@@ -89,8 +90,8 @@ def predict_step(scheduled_requests, model_spec, hw_params):
     if not scheduled_requests:
         return {"total": 0.0, "attn_proj": 0.0, "ffn_proj": 0.0,
                 "attn_prefill": 0.0, "attn_decode": 0.0,
-                "rmsnorm": 0.0, "swiglu": 0.0, "rope": 0.0,
-                "residual_add": 0.0, "lm_head": 0.0}
+                "fused_add_norm": 0.0, "swiglu": 0.0, "rope": 0.0,
+                "lm_head": 0.0}
 
     h = model_spec["hidden_dim"]
     inter = model_spec.get("intermediate_dim", h * 4)
@@ -160,26 +161,27 @@ def predict_step(scheduled_requests, model_spec, hw_params):
     attn_decode_time = na * roofline_time(decode_flops, decode_bytes, F_d, B_d, p_d) if n_decode > 0 else 0.0
 
     # ── Elementwise ops (per-layer, multiplied by num_layers) ──
-    # b_effs / overheads are independent of the prefill/decode split.
-    rmsnorm_time = nl * norm_ops(1, total_new_tokens, h, norm_type, b_effs, overheads)
+    # RMSNorm + residual_add are fused per vLLM's fused_add_rms_norm:
+    # each layer has 2 fused residual+norm kernels (post-attn + post-FFN)
+    # instead of 2 standalone norms + 2 standalone residual adds.
+    # Falls back to separate ops when fused_residual_norm is not in fit data.
+    fused_add_norm_time = nl * fused_residual_norm_ops(1, total_new_tokens, h, b_effs, overheads)
     swiglu_time = nl * swiglu_op(1, total_new_tokens, inter, b_effs, overheads)
     rope_time = nl * rope_op(1, total_new_tokens, nh, nh_kv, hd, b_effs, overheads)
-    residual_add_time = nl * residual_add_ops(1, total_new_tokens, h, b_effs, overheads)
 
     # ── Output projection (single lm_head, batched) ──
     lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p)
 
-    total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + rmsnorm_time + swiglu_time + rope_time + residual_add_time + lm_head_time
+    total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + fused_add_norm_time + swiglu_time + rope_time + lm_head_time
     return {
         "total": total,
         "attn_proj": attn_proj_time,
         "ffn_proj": ffn_proj_time,
         "attn_prefill": attn_prefill_time,
         "attn_decode": attn_decode_time,
-        "rmsnorm": rmsnorm_time,
+        "fused_add_norm": fused_add_norm_time,
         "swiglu": swiglu_time,
         "rope": rope_time,
-        "residual_add": residual_add_time,
         "lm_head": lm_head_time,
     }
 
@@ -210,8 +212,8 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
     if not scheduled_requests:
         return {"total": 0.0, "attn_proj": 0.0, "ffn_proj": 0.0,
                 "attn_prefill": 0.0, "attn_decode": 0.0,
-                "rmsnorm": 0.0, "swiglu": 0.0, "rope": 0.0,
-                "residual_add": 0.0, "lm_head": 0.0,
+                "fused_add_norm": 0.0, "swiglu": 0.0, "rope": 0.0,
+                "lm_head": 0.0,
                 "inter_stage_comm": 0.0}
 
     h = model_spec["hidden_dim"]
@@ -278,10 +280,9 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
     attn_decode_time = attn_per_stage * roofline_time(decode_flops, decode_bytes, F_d, B_d, p_d) if n_decode > 0 else 0.0
 
     # ── Per-stage elementwise ops ──
-    rmsnorm_time = layers_per_stage * norm_ops(1, total_new_tokens, h, norm_type, b_effs, overheads)
+    fused_add_norm_time = layers_per_stage * fused_residual_norm_ops(1, total_new_tokens, h, b_effs, overheads)
     swiglu_time = layers_per_stage * swiglu_op(1, total_new_tokens, inter, b_effs, overheads)
     rope_time = layers_per_stage * rope_op(1, total_new_tokens, nh, nh_kv, hd, b_effs, overheads)
-    residual_add_time = layers_per_stage * residual_add_ops(1, total_new_tokens, h, b_effs, overheads)
 
     # ── LM head (only on last stage, but sequential pipeline model
     #      means it's still on the critical path) ──
@@ -296,17 +297,16 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
         inter_stage_bytes / (intra_node_bw_gb_s * 1e9) + intra_latency_us * 1e-6
     )
 
-    total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + rmsnorm_time + swiglu_time + rope_time + residual_add_time + lm_head_time + inter_stage_comm
+    total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + fused_add_norm_time + swiglu_time + rope_time + lm_head_time + inter_stage_comm
     return {
         "total": total,
         "attn_proj": attn_proj_time,
         "ffn_proj": ffn_proj_time,
         "attn_prefill": attn_prefill_time,
         "attn_decode": attn_decode_time,
-        "rmsnorm": rmsnorm_time,
+        "fused_add_norm": fused_add_norm_time,
         "swiglu": swiglu_time,
         "rope": rope_time,
-        "residual_add": residual_add_time,
         "lm_head": lm_head_time,
         "inter_stage_comm": inter_stage_comm,
     }
@@ -358,7 +358,7 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     result = {}
     compute_total = 0.0
     for k in ("attn_proj", "ffn_proj", "attn_prefill", "attn_decode",
-              "rmsnorm", "swiglu", "rope", "residual_add",
+              "fused_add_norm", "swiglu", "rope",
               "lm_head", "inter_stage_comm"):
         v = base.get(k, 0.0)
         scaled = v / num_gpus

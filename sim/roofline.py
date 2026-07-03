@@ -38,6 +38,7 @@ ELEM_BYTES = {
     "layernorm": 5,
     "rmsnorm": 4,
     "causal_mask": 3,
+    "fused_residual_norm": 4,  # read residual + read hidden + write normed + write new residual
 }
 
 
@@ -72,17 +73,23 @@ def elem_time(op_name, N, b_effs, overheads):
 def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None):
     """Q/K/V/O projections for attention layers.
 
-    nh, hd: if nh*hd != h, Q proj outputs nh*hd, K/V output nh_kv*hd, O inputs nh*hd.
+    Q/K/V are fused into one matmul (matching vLLM's QKVParallelLinear),
+    so the input activations are read from HBM once instead of three times.
+    O projection is a separate matmul.
+
+    nh, hd: if nh*hd != h, Q proj outputs nh*hd, K/V output nh_kv*hd.
     nh_kv defaults to nh (MHA), set for GQA.
     """
     if nh is None or (nh * hd == h and (nh_kv or nh) == nh):
-        return 4 * matmul_time(M, h, h, F, B, p)
+        # MHA: QKV fused [M,h]×[h,3h] + O [M,h]×[h,h]
+        return matmul_time(M, h, 3 * h, F, B, p) + matmul_time(M, h, h, F, B, p)
+    # GQA: Q dim ≠ KV dim
     dim_q = nh * hd
     dim_kv = (nh_kv or nh) * hd
-    t = matmul_time(M, h, dim_q, F, B, p)       # Q proj
-    t += matmul_time(M, h, dim_kv, F, B, p)      # K proj
-    t += matmul_time(M, h, dim_kv, F, B, p)      # V proj
-    t += matmul_time(M, dim_q, h, F, B, p)       # O proj
+    # QKV fused: [M, h] × [h, dim_q + 2·dim_kv]
+    t = matmul_time(M, h, dim_q + 2 * dim_kv, F, B, p)
+    # O projection: [M, dim_q] × [dim_q, h]
+    t += matmul_time(M, dim_q, h, F, B, p)
     return t
 
 
@@ -148,3 +155,19 @@ def residual_add_ops(b, s, h, b_effs, overheads):
     """2 × residual addition per layer (post-attention + post-FFN)."""
     N = b * s * h
     return 2 * elem_time("residual_add", N, b_effs, overheads)
+
+
+def fused_residual_norm_ops(b, s, h, b_effs, overheads):
+    """2 × fused residual+norm per layer (post-attn + post-FFN).
+
+    Matches vLLM's fused_add_rms_norm: reads residual + hidden_states,
+    computes norm in a single kernel, writes normed output + new residual.
+    Eliminates the intermediate HBM traffic of separate residual_add + rmsnorm.
+
+    When fused_residual_norm is not in b_effs, falls back to separate ops.
+    """
+    if "fused_residual_norm" in b_effs:
+        N = b * s * h
+        return 2 * elem_time("fused_residual_norm", N, b_effs, overheads)
+    # Fallback: separate residual_add + rmsnorm (backward compatible)
+    return residual_add_ops(b, s, h, b_effs, overheads) + norm_ops(b, s, h, "rmsnorm", b_effs, overheads)

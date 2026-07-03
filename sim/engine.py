@@ -68,8 +68,8 @@ class SimulationEngine:
     def _zero_step_dict() -> dict[str, float]:
         return {"total": 0.0, "attn_proj": 0.0, "ffn_proj": 0.0,
                 "attn_prefill": 0.0, "attn_decode": 0.0,
-                "rmsnorm": 0.0, "swiglu": 0.0, "rope": 0.0,
-                "residual_add": 0.0, "lm_head": 0.0,
+                "fused_add_norm": 0.0, "swiglu": 0.0, "rope": 0.0,
+                "lm_head": 0.0,
                 "all_reduce": 0.0, "inter_stage_comm": 0.0}
 
     def _compute_num_blocks(self):
@@ -119,8 +119,8 @@ class SimulationEngine:
         # Reset time breakdown accumulator
         self.time_acc = {"attn_proj": 0.0, "ffn_proj": 0.0,
                          "attn_prefill": 0.0, "attn_decode": 0.0,
-                         "rmsnorm": 0.0, "swiglu": 0.0, "rope": 0.0,
-                         "residual_add": 0.0, "lm_head": 0.0,
+                         "fused_add_norm": 0.0, "swiglu": 0.0, "rope": 0.0,
+                         "lm_head": 0.0,
                          "all_reduce": 0.0, "inter_stage_comm": 0.0,
                          "kv_transfer": 0.0, "swap": 0.0}
 

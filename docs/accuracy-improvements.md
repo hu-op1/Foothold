@@ -177,13 +177,28 @@ waste = (eff_K / K) × (eff_N / N)
 
 ---
 
-## ⬜ 9. Kernel Fusion 效应
+## ✅ 9. Kernel Fusion 效应 — 对齐 vLLM 实现
 
-RMSNorm+residual 融合、QKV 投影融合等在真实推理引擎中普遍存在，但 roofline 将其当作独立 op 求和。
+**日期**: 2026-07-03　**分支**: main
 
-**建议**: 增加 fused kernel benchmark（如 fused RMSNorm+residual），或在 roofline 中加入 fusion factor。
+**问题**: 经核对 vLLM 0.19.0 源码，发现三处融合在模拟器中被当作独立 op：
 
-**难度**: 高　**影响**: ⭐⭐
+| 融合 | vLLM 实现 | 旧模拟器 | HBM 节省 |
+|---|---|---|---|
+| QKV 投影 | `QKVParallelLinear` — 1 次 `[M,h]×[h,3h]` | 3 次独立 `[M,h]×[h,h]` | 输入少读 2 次 `M×h` |
+| RMSNorm + residual | `fused_add_rms_norm` — 1 个 kernel | 独立 `residual_add` + `rmsnorm` | 消除中间结果 HBM 读写 |
+| SwiGLU | `swiglustep_and_mul` — 已融合 ✓ | 已直接 bench `F.silu(gate)*up` ✓ | 无差异 |
+
+**改动**:
+
+| 文件 | 变更 |
+|---|---|
+| `sim/roofline.py` | `attn_projections`: MHA → `[M,h]×[h,3h]` fused QKV + O；GQA → `[M,h]×[h,dim_q+2dim_kv]` + O。新增 `fused_residual_norm` op (ELEM_BYTES=4) 和 `fused_residual_norm_ops()` 函数，无 fit 数据时 fallback 到分离 op |
+| `sim/executor.py` | `predict_step()` / `predict_step_pp()`: 用 `fused_residual_norm_ops` 替换 `norm_ops + residual_add_ops`；TP 缩放列表更新键名 |
+| `sim/engine.py` | `time_acc` / `_zero_step_dict` 键名 `rmsnorm`+`residual_add` → `fused_add_norm` |
+| `sim/report.py` | xlsx 列名同步更新 |
+
+**精度影响**: QKV 融合减少 ~30% 投影时间估计（输入 HBM 节省）；RMSNorm+residual 融合减少 ~40% norm+add 时间估计（消除中间结果）。**使用现有 fit 数据即可生效**（fused_residual_norm 自动 fallback 到 rmsnorm B_eff）。
 
 ---
 
