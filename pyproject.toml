@@ -26,6 +26,10 @@ dev = [
     "pytest>=8.0",
 ]
 
+[tool.uv.extra-build-dependencies]
+# flash-attn needs torch at build time to compile CUDA kernels
+flash-attn = ["torch"]
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 
