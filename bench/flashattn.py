@@ -14,7 +14,7 @@ platforms (Windows, CPU).
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from bench.utils import warmup, benchmark, save_xlsx, check_memory
+from bench.utils import warmup, benchmark, save_csv, check_memory
 
 # Try native flash_attn first (matches vLLM backend), fall back to PyTorch SDPA.
 try:
@@ -50,7 +50,7 @@ def _fa_flops(b, nh, s_q, s_kv, hd):
     return 4 * b * nh * s_q * s_kv * hd
 
 
-def bench_flashattn(config, output_path="results/flashattn.xlsx"):
+def bench_flashattn(config, output_path="results/flashattn.csv"):
     dtypes = _dtype_list(config)
     warmup_iters = config["warmup_iters"]
     bench_iters = config["bench_iters"]
@@ -74,6 +74,16 @@ def bench_flashattn(config, output_path="results/flashattn.xlsx"):
     for dt_name in dtypes:
         dtype = getattr(torch, dt_name)
         dt_bytes = DTYPE_BYTES_MAP.get(dt_name, 2)
+
+        # float8 FlashAttention: neither flash_attn_func nor torch SDPA
+        # accept float8 inputs.  Skip for now; float8 attention via
+        # dedicated Hopper kernels (cuDNN/cuBLAS) is a different codepath.
+        is_float8 = dt_name in ("float8_e4m3fn", "float8_e5m2")
+        if is_float8:
+            print(f"\n  [skip] float8 FlashAttn: flash_attn / SDPA do not "
+                  f"accept float8 inputs")
+            continue
+
         combos = [(b_val, sq, skv) for b_val in batch_list for sq in fa_cfg["s_q"] for skv in fa_cfg["s_kv"]]
         for b_val, s_q, s_kv in tqdm(combos, desc=f"FlashAttn {dt_name}"):
             # Memory check
@@ -120,5 +130,5 @@ def bench_flashattn(config, output_path="results/flashattn.xlsx"):
             del q, k, v
 
     if output_path:
-        save_xlsx(results, output_path)
+        save_csv(results, output_path)
     return results

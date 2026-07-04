@@ -32,7 +32,7 @@ strategy:
     # pd_ratios, tp_sizes, pp_sizes are auto-generated from total_gpus + model constraints
     gpu_sweep: [1, 2, 4, 8, 16]  # sweep GPU counts for scalability curve (null = single run)
 
-output: "sim/output/search.xlsx"
+output: "sim/output/search.csv"
 
 trace:
   path: "traces/agent_trace_test.jsonl"

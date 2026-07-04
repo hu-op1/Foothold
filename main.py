@@ -62,29 +62,29 @@ def run_benchmarks(args):
     out_dir = bench_results_dir(cfg)
     os.makedirs(out_dir, exist_ok=True)
 
-    matmul_xlsx = os.path.join(out_dir, "matmul.xlsx")
-    elem_xlsx = os.path.join(out_dir, "elementwise.xlsx")
-    fa_xlsx = os.path.join(out_dir, "flashattn.xlsx")
+    matmul_csv = os.path.join(out_dir, "matmul.csv")
+    elem_csv = os.path.join(out_dir, "elementwise.csv")
+    fa_csv = os.path.join(out_dir, "flashattn.csv")
 
     t0 = time.perf_counter()
 
     tqdm.write("\n[Matmul]")
-    bench_matmul(cfg, output_path=matmul_xlsx)
+    bench_matmul(cfg, output_path=matmul_csv)
     torch.cuda.empty_cache()
 
     tqdm.write("\n[Elementwise]")
-    bench_elementwise(cfg, output_path=elem_xlsx)
+    bench_elementwise(cfg, output_path=elem_csv)
     torch.cuda.empty_cache()
 
     if fa_cfg:
         tqdm.write("\n[FlashAttn]")
-        bench_flashattn(cfg, output_path=fa_xlsx)
+        bench_flashattn(cfg, output_path=fa_csv)
         torch.cuda.empty_cache()
 
     elapsed = time.perf_counter() - t0
     print(f"\nDone in {elapsed:.1f}s")
-    print(f"Output files: {matmul_xlsx}, {elem_xlsx}"
-          + (f", {fa_xlsx}" if fa_cfg else ""))
+    print(f"Output files: {matmul_csv}, {elem_csv}"
+          + (f", {fa_csv}" if fa_cfg else ""))
 
 
 def run_fit(args):
@@ -93,12 +93,12 @@ def run_fit(args):
     cfg = load_config(args.config)
 
     bench_dir = args.fit_dir or bench_results_dir(cfg)
-    matmul_xlsx = os.path.join(bench_dir, "matmul.xlsx")
-    elem_xlsx = os.path.join(bench_dir, "elementwise.xlsx")
-    fa_xlsx = os.path.join(bench_dir, "flashattn.xlsx")
+    matmul_csv = os.path.join(bench_dir, "matmul.csv")
+    elem_csv = os.path.join(bench_dir, "elementwise.csv")
+    fa_csv = os.path.join(bench_dir, "flashattn.csv")
 
     results = []
-    for path in [matmul_xlsx, elem_xlsx, fa_xlsx]:
+    for path in [matmul_csv, elem_csv, fa_csv]:
         if os.path.exists(path):
             results.extend(load_results(path))
         else:
@@ -122,7 +122,7 @@ def run_search(args):
     from sim.trace import load_trace
     from sim.engine import SimulationEngine
     from sim.strategy import search
-    from sim.report import export_xlsx
+    from sim.report import export_csv
     from sim.config import load_model_spec
 
     cfg = load_pd_config(args.config)
@@ -160,10 +160,10 @@ def run_search(args):
     engine = SimulationEngine(cfg, model, hw)
     results = search(engine, requests, cfg)
 
-    # Export results to xlsx
-    out_path = str(cfg.get("output", "sim/output/results.xlsx"))
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    export_xlsx(results, out_path)
+    # Export results to csv
+    out_path = str(cfg.get("output", "sim/output/results.csv"))
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    export_csv(results, out_path)
 
 
 def run_sim(args):

@@ -20,8 +20,8 @@ from sim.config import valid_tp_sizes, valid_pp_sizes, total_vram_gb
 # ── checkpoint helpers ──────────────────────────────────────────────────────
 
 def _checkpoint_path(cfg: dict) -> str:
-    """Derive the checkpoint file path from the output xlsx path."""
-    out = str(cfg.get("output", "sim/output/results.xlsx"))
+    """Derive the checkpoint file path from the output csv path."""
+    out = str(cfg.get("output", "sim/output/results.csv"))
     base, _ = os.path.splitext(out)
     return base + ".checkpoint.jsonl"
 

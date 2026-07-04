@@ -1,7 +1,7 @@
+import csv
 import json
 import os
 import numpy as np
-from openpyxl import load_workbook
 
 
 def _get(d, *keys):
@@ -13,17 +13,15 @@ def _get(d, *keys):
 
 
 def load_results(path):
-    wb = load_workbook(path)
-    ws = wb.active
-    headers = [c.value for c in ws[1]]
     rows = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        d = dict(zip(headers, row))
-        val = d.get("time_ms")
-        if val is None or val == "OOM":
-            continue
-        d["time_ms"] = float(val)
-        rows.append(d)
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for d in reader:
+            val = d.get("time_ms")
+            if val is None or val == "OOM":
+                continue
+            d["time_ms"] = float(val)
+            rows.append(d)
     return rows
 
 

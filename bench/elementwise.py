@@ -15,7 +15,8 @@ Ops covered:
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from bench.utils import warmup, benchmark, save_xlsx, check_memory
+from bench.utils import (warmup, benchmark, save_csv, check_memory,
+                         supports_float8_matmul, make_float8_tensor)
 
 
 # Bytes per element for each dtype.
@@ -41,7 +42,7 @@ BYTES_FACTORS = {
 }
 
 
-def bench_elementwise(config, output_path="results/elementwise.xlsx"):
+def bench_elementwise(config, output_path="results/elementwise.csv"):
     dtypes = _dtype_list(config)
     warmup_iters = config["warmup_iters"]
     bench_iters = config["bench_iters"]
@@ -54,6 +55,17 @@ def bench_elementwise(config, output_path="results/elementwise.xlsx"):
     for dt_name in dtypes:
         dtype = getattr(torch, dt_name)
         dt_bytes = DTYPE_BYTES_MAP.get(dt_name, 2)
+
+        # float8 elementwise: most elementwise ops (rmsnorm, softmax, silu,
+        # residual_add) do not have native float8 kernels — they upcast
+        # internally.  Skip float8 for elementwise; the matmul + flashattn
+        # benches cover the relevant float8 data paths.
+        is_float8 = dt_name in ("float8_e4m3fn", "float8_e5m2")
+        if is_float8:
+            print(f"\n  [skip] float8 elementwise: no native float8 kernels "
+                  f"for rmsnorm/softmax/silu/residual_add/rope")
+            continue
+
         for N in tqdm(grid["N"], desc=f"Elementwise {dt_name}"):
             act_gb = (3 * N * dt_bytes) / (1024 ** 3)
             oom = not check_memory(act_gb, max_mem)
@@ -163,5 +175,5 @@ def bench_elementwise(config, output_path="results/elementwise.xlsx"):
             del x, y, w, gate, up, rope_q
 
     if output_path:
-        save_xlsx(results, output_path)
+        save_csv(results, output_path)
     return results

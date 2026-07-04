@@ -1,8 +1,8 @@
-"""Benchmark utilities: CUDA timer, warmup, xlsx output."""
+"""Benchmark utilities: CUDA timer, warmup, csv output."""
 
 import os
+import csv
 import torch
-from openpyxl import Workbook
 
 
 class CudaTimer:
@@ -42,19 +42,17 @@ def benchmark(fn, iters=100):
     return total / iters
 
 
-def save_xlsx(results, path):
-    """Save list of dicts to xlsx. Creates parent directories if needed."""
+def save_csv(results, path):
+    """Save list of dicts to csv. Creates parent directories if needed."""
     if not results:
         print(f"  [skip] No results to save for {path}")
         return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fieldnames = list(dict.fromkeys(k for r in results for k in r))
-    wb = Workbook()
-    ws = wb.active
-    ws.append(fieldnames)
-    for r in results:
-        ws.append([r.get(k, "") for k in fieldnames])
-    wb.save(path)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
     print(f"  Saved {len(results)} rows → {path}")
 
 
@@ -68,3 +66,27 @@ def check_memory(required_gb, max_gb=7.5):
     free_gb, total_gb = torch.cuda.mem_get_info()
     free_gb = free_gb / (1024**3)
     return required_gb < free_gb and required_gb <= max_gb
+
+
+def get_compute_capability():
+    """Return (major, minor) CUDA compute capability for the current GPU."""
+    major, minor = torch.cuda.get_device_capability()
+    return major, minor
+
+
+def supports_float8_matmul():
+    """Check if GPU supports float8 matmul via torch._scaled_mm.
+
+    Requires sm ≥ 8.9 (Ada Lovelace RTX 4090 / Hopper H100+).
+    RTX 3090 (sm 8.6) and older do NOT support float8 matmul in hardware.
+    """
+    major, minor = get_compute_capability()
+    return major * 10 + minor >= 89  # sm_89 = Ada, sm_90 = Hopper
+
+
+def make_float8_tensor(*size, device="cuda"):
+    """Create a float8_e4m3fn tensor by converting from float16.
+
+    torch.randn does not support float8 dtypes directly.
+    """
+    return torch.randn(*size, dtype=torch.float16, device=device).to(torch.float8_e4m3fn)

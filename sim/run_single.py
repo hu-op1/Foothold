@@ -7,7 +7,7 @@ expects for side-by-side comparison::
     <output_dir>/requests.jsonl
     <output_dir>/timeseries.csv
 
-Also writes ``results.xlsx`` alongside for convenience.
+Also writes ``results.csv`` alongside for convenience.
 
 Reads from ``config/sim.yaml`` — scalar strategy values, no search grid.
 """
@@ -20,7 +20,7 @@ import time
 
 from sim.engine import SimulationEngine
 from sim.recorder import SimRecorder
-from sim.report import export_xlsx
+from sim.report import export_csv
 
 
 def run_single(
@@ -125,9 +125,9 @@ def run_single(
                    trace_path=trace_path,
                    extra_meta=meta_extra)
 
-    # Also write the standard XLSX for convenience
+    # Also write the standard CSV for convenience
     total_t = metrics.total_time
-    xlsx_result = [{
+    csv_result = [{
         "label": f"{mode} (batch={max_tokens}, thr={threshold})",
         "metrics_raw": {
             "throughput": metrics.throughput(),
@@ -158,8 +158,8 @@ def run_single(
     }]
     # Add time breakdown percentages
     breakdown = metrics.time_breakdown_pct()
-    xlsx_result[0]["metrics_raw"].update(breakdown)
-    export_xlsx(xlsx_result, os.path.join(output_dir, "results.xlsx"))
+    csv_result[0]["metrics_raw"].update(breakdown)
+    export_csv(csv_result, os.path.join(output_dir, "results.csv"))
 
     print(f"\nSimulation complete ({elapsed:.1f}s)")
     print(f"  Throughput: {metrics.throughput():.1f} tok/s")
@@ -167,6 +167,6 @@ def run_single(
     print(f"  TPOT mean:  {metrics.mean_tpot() * 1000:.1f} ms")
     print(f"  Requests:   {metrics.num_requests}")
     print(f"  Output:     {output_dir}")
-    print(f"  meta.json  requests.jsonl  timeseries.csv  results.xlsx")
+    print(f"  meta.json  requests.jsonl  timeseries.csv  results.csv")
 
     return output_dir

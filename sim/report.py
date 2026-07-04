@@ -1,5 +1,6 @@
-"""Terminal table and XLSX output for simulation results."""
+"""Terminal table and CSV output for simulation results."""
 
+import csv
 import os
 import re
 
@@ -8,9 +9,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, numbers
-from openpyxl.utils import get_column_letter
 
 
 _LABEL_RE = re.compile(r"^(.*?) \(batch=(\d+), thr=(\d+)\)$")
@@ -30,8 +28,8 @@ def _parse_label(label: str) -> tuple[str, int, int]:
     return label, 0, 0
 
 
-def _maybe_add_scalability_sheet(wb, results: list[dict]) -> None:
-    """Add a 'Scalability' sheet if results contain GPU sweep data."""
+def _write_scalability_csv(results: list[dict], base_path: str) -> None:
+    """Write scalability summary as a separate CSV alongside main results."""
     scalability = None
     for r in results:
         if "_scalability" in r:
@@ -41,13 +39,7 @@ def _maybe_add_scalability_sheet(wb, results: list[dict]) -> None:
     if not scalability:
         return
 
-    ws = wb.create_sheet("Scalability")
-
-    header_font = Font(bold=True, size=11, color="FFFFFF")
-    header_fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
-    center_align = Alignment(horizontal="center")
-    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-
+    path = os.path.splitext(base_path)[0] + "_scalability.csv"
     headers = [
         "total_gpus",
         "colo_label",
@@ -65,66 +57,42 @@ def _maybe_add_scalability_sheet(wb, results: list[dict]) -> None:
         "winner",
     ]
 
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = center_align
+    def _m(r, key):
+        return r["metrics_raw"].get(key, 0) if r else 0
 
-    for row, s in enumerate(scalability, 2):
+    rows = []
+    for s in scalability:
         colo = s["best_colo"]
         disagg = s["best_disagg"]
-
-        def _m(r, key):
-            return r["metrics_raw"].get(key, 0) if r else 0
-
         ct = _m(colo, "throughput")
         dt = _m(disagg, "throughput")
         winner = "Colocated" if ct >= dt else "Disaggregated"
+        rows.append({
+            "total_gpus": s["total_gpus"],
+            "colo_label": colo["label"] if colo else "—",
+            "colo_throughput_tok_s": ct,
+            "colo_ttft_p99_ms": _m(colo, "p99_ttft_ms"),
+            "colo_tpot_p99_ms": _m(colo, "p99_tpot_ms"),
+            "colo_p99_latency_ms": _m(colo, "p99_ms"),
+            "colo_slo_score": colo["slo_score"] if colo else 0,
+            "disagg_label": disagg["label"] if disagg else "—",
+            "disagg_throughput_tok_s": dt,
+            "disagg_ttft_p99_ms": _m(disagg, "p99_ttft_ms"),
+            "disagg_tpot_p99_ms": _m(disagg, "p99_tpot_ms"),
+            "disagg_p99_latency_ms": _m(disagg, "p99_ms"),
+            "disagg_slo_score": disagg["slo_score"] if disagg else 0,
+            "winner": winner,
+        })
 
-        values = [
-            s["total_gpus"],
-            colo["label"] if colo else "—",
-            ct,
-            _m(colo, "p99_ttft_ms"),
-            _m(colo, "p99_tpot_ms"),
-            _m(colo, "p99_ms"),
-            colo["slo_score"] if colo else 0,
-            disagg["label"] if disagg else "—",
-            dt,
-            _m(disagg, "p99_ttft_ms"),
-            _m(disagg, "p99_tpot_ms"),
-            _m(disagg, "p99_ms"),
-            disagg["slo_score"] if disagg else 0,
-            winner,
-        ]
-
-        for col, val in enumerate(values, 1):
-            cell = ws.cell(row=row, column=col, value=val)
-            if isinstance(val, float):
-                cell.number_format = '0.000'
-
-        # Highlight winner cell
-        winner_cell = ws.cell(row=row, column=len(headers))
-        if winner == "Colocated":
-            winner_cell.fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE",
-                                           fill_type="solid")
-        else:
-            winner_cell.fill = green_fill
-
-    # Auto-width
-    for col in range(1, len(headers) + 1):
-        max_width = len(str(headers[col - 1]))
-        for row in range(2, len(scalability) + 2):
-            cell_val = str(ws.cell(row=row, column=col).value or "")
-            max_width = max(max_width, min(len(cell_val), 60))
-        ws.column_dimensions[get_column_letter(col)].width = max_width + 2
-
-    ws.freeze_panes = "A2"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Scalability summary saved to: {path}")
 
 
-def _plot_scalability(results: list[dict], xlsx_path: str) -> None:
-    """Generate a scalability plot PNG alongside the xlsx."""
+def _plot_scalability(results: list[dict], csv_path: str) -> None:
+    """Generate a scalability plot PNG alongside the csv."""
     scalability = None
     for r in results:
         if "_scalability" in r:
@@ -216,27 +184,17 @@ def _plot_scalability(results: list[dict], xlsx_path: str) -> None:
 
     plt.tight_layout()
 
-    png_path = os.path.splitext(xlsx_path)[0] + "_scalability.png"
+    png_path = os.path.splitext(csv_path)[0] + "_scalability.png"
     fig.savefig(png_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"Scalability plot saved to: {png_path}")
 
 
-def export_xlsx(results: list[dict], path: str) -> None:
-    """Export results to XLSX with strategy_type, batch, and thr as separate columns."""
+def export_csv(results: list[dict], path: str) -> None:
+    """Export results to CSV with strategy_type, batch, and thr as separate columns."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "PD Sim Results"
-
-    # Header styling
-    header_font = Font(bold=True, size=11)
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_font_white = Font(bold=True, size=11, color="FFFFFF")
-    center_align = Alignment(horizontal="center")
-
-    headers = [
+    fieldnames = [
         "strategy_type",
         "batch",
         "thr",
@@ -262,64 +220,53 @@ def export_xlsx(results: list[dict], path: str) -> None:
         "elapsed_s",
     ]
 
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font = header_font_white
-        cell.fill = header_fill
-        cell.alignment = center_align
-
-    # Data rows
-    for row, entry in enumerate(results, 2):
+    rows = []
+    for entry in results:
         m = entry["metrics_raw"]
         strategy_type, batch, thr = _parse_label(entry["label"])
-        values = [
-            strategy_type,
-            batch,
-            thr,
-            m["throughput"],
-            m["input_throughput"],
-            m["output_throughput"],
-            m["total_throughput"],
-            m["mean_ttft_ms"], m["p50_ttft_ms"], m["p90_ttft_ms"], m["p99_ttft_ms"],
-            m["mean_tpot_ms"], m["p50_tpot_ms"], m["p90_tpot_ms"], m["p99_tpot_ms"],
-            m["p50_ms"], m["p90_ms"], m["p95_ms"], m["p99_ms"],
-            m["num_requests"],
-            m["total_input_tokens"],
-            m["total_output_tokens"],
-            m["total_time_s"],
-            m.get("cache_hit_rate", 0.0),
-            m.get("attn_proj_pct", 0.0), m.get("ffn_proj_pct", 0.0),
-            m.get("attn_prefill_pct", 0.0), m.get("attn_decode_pct", 0.0),
-            m.get("fused_add_norm_pct", 0.0), m.get("swiglu_pct", 0.0),
-            m.get("rope_pct", 0.0),
-            m.get("lm_head_pct", 0.0),
-            m.get("all_reduce_pct", 0.0), m.get("inter_stage_comm_pct", 0.0),
-            m.get("kv_transfer_pct", 0.0), m.get("swap_pct", 0.0),
-            entry["score"],
-            entry["elapsed"],
-        ]
-        for col, val in enumerate(values, 1):
-            cell = ws.cell(row=row, column=col, value=val)
-            # Apply 3-decimal format to float columns (skip strategy_type, batch, thr)
-            if isinstance(val, float):
-                cell.number_format = '0.000'
+        rows.append({
+            "strategy_type": strategy_type,
+            "batch": batch,
+            "thr": thr,
+            "throughput_tok_s": m["throughput"],
+            "input_throughput_tok_s": m["input_throughput"],
+            "output_throughput_tok_s": m["output_throughput"],
+            "total_throughput_tok_s": m["total_throughput"],
+            "ttft_mean_ms": m["mean_ttft_ms"], "ttft_p50_ms": m["p50_ttft_ms"],
+            "ttft_p90_ms": m["p90_ttft_ms"], "ttft_p99_ms": m["p99_ttft_ms"],
+            "tpot_mean_ms": m["mean_tpot_ms"], "tpot_p50_ms": m["p50_tpot_ms"],
+            "tpot_p90_ms": m["p90_tpot_ms"], "tpot_p99_ms": m["p99_tpot_ms"],
+            "latency_p50_ms": m["p50_ms"], "latency_p90_ms": m["p90_ms"],
+            "latency_p95_ms": m["p95_ms"], "latency_p99_ms": m["p99_ms"],
+            "num_requests": m["num_requests"],
+            "total_input_tokens": m["total_input_tokens"],
+            "total_output_tokens": m["total_output_tokens"],
+            "total_time_s": m["total_time_s"],
+            "cache_hit_rate": m.get("cache_hit_rate", 0.0),
+            "attn_proj_pct": m.get("attn_proj_pct", 0.0),
+            "ffn_proj_pct": m.get("ffn_proj_pct", 0.0),
+            "attn_prefill_pct": m.get("attn_prefill_pct", 0.0),
+            "attn_decode_pct": m.get("attn_decode_pct", 0.0),
+            "fused_add_norm_pct": m.get("fused_add_norm_pct", 0.0),
+            "swiglu_pct": m.get("swiglu_pct", 0.0),
+            "rope_pct": m.get("rope_pct", 0.0),
+            "lm_head_pct": m.get("lm_head_pct", 0.0),
+            "all_reduce_pct": m.get("all_reduce_pct", 0.0),
+            "inter_stage_comm_pct": m.get("inter_stage_comm_pct", 0.0),
+            "kv_transfer_pct": m.get("kv_transfer_pct", 0.0),
+            "swap_pct": m.get("swap_pct", 0.0),
+            "score": entry["score"],
+            "elapsed_s": entry["elapsed"],
+        })
 
-    # Auto-width columns
-    for col in range(1, len(headers) + 1):
-        max_width = len(str(headers[col - 1]))
-        for row in range(2, len(results) + 2):
-            cell_val = str(ws.cell(row=row, column=col).value or "")
-            max_width = max(max_width, min(len(cell_val), 40))
-        ws.column_dimensions[get_column_letter(col)].width = max_width + 2
-
-    # Freeze header row
-    ws.freeze_panes = "A2"
-
-    # ── Scalability summary sheet (if GPU sweep was run) ──
-    _maybe_add_scalability_sheet(wb, results)
-
-    wb.save(path)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
     print(f"Results exported to: {path}")
+
+    # ── Scalability summary (separate CSV, if GPU sweep was run) ──
+    _write_scalability_csv(results, path)
 
     # ── Scalability plot ──
     _plot_scalability(results, path)
