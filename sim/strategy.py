@@ -139,6 +139,11 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     max_num_seqs = cfg["simulation"].get("max_num_seqs", 256)
     hw_params = engine.hw
 
+    # ── overwrite: delete existing CSV once before any search ──
+    out_path = str(cfg.get("output", "sim/output/results.csv"))
+    if cfg.get("overwrite") and os.path.exists(out_path):
+        os.remove(out_path)
+
     gpu_sweep = search_cfg.get("gpu_sweep")
     if isinstance(gpu_sweep, list) and len(gpu_sweep) > 0:
         return _search_with_sweep(
@@ -306,12 +311,8 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
                                         "mode_label": "disaggregated",
                                     })
 
-    # ── overwrite: delete existing CSV so all strategies re-run ──
-    out_path = str(cfg.get("output", "sim/output/results.csv"))
-    if cfg.get("overwrite") and os.path.exists(out_path):
-        os.remove(out_path)
-
     # ── checkpoint: skip already-finished strategies (read from output CSV) ──
+    out_path = str(cfg.get("output", "sim/output/results.csv"))
     completed_labels = _load_completed_labels(out_path)
     pending = [t for t in tasks if t["label"] not in completed_labels]
     skipped = len(tasks) - len(pending)

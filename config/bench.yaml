@@ -31,7 +31,7 @@ gpu: "3090"
 # Precision sweep.  fp8 requires Hopper+ (H100/H200/B200); silently OOM/skip on
 # older GPUs.  int8/int4 weight-only quant uses dedicated dequant+compute codepaths
 # (torch._int_mm, custom CUDA) — not covered by standard torch.mm / SDPA bench.
-dtype: ["float16", "bfloat16", "float8_e4m3fn"]
+dtype: ["float16", "bfloat16"]
 warmup: auto            # "auto" = 1/10 of estimated benchmark iters, or an int for fixed
 warmup_ratio: 0.1        # fraction of estimated iters used when warmup=auto
 # Time-budgeted measurement: run enough iterations to accumulate ≥500ms
@@ -40,5 +40,5 @@ warmup_ratio: 0.1        # fraction of estimated iters used when warmup=auto
 min_time_ms: 500
 max_iters: 100000
 calib_iters: 20  # initial calibration batch — higher = more accurate per-iter estimate
-overwrite: false  # true = delete existing CSV and re-benchmark everything
+overwrite: true  # true = delete existing CSV and re-benchmark everything
 max_memory_gb: 24

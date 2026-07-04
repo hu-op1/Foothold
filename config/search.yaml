@@ -1,6 +1,6 @@
 gpu: "3090"
 model: "Qwen/Qwen3-4B"
-dtype: "float16"  # must match a dtype in the benchmark config
+dtype: "bfloat16"  # must match a dtype in the benchmark config
 
 communication:
   intra_bw_gb_s: 9.7    # intra-node (NVLink ~900 GB/s, PCIe ~64 GB/s)
@@ -21,16 +21,16 @@ simulation:
 
 strategy:
   mode: both  # both / colocated / disaggregated
-  total_gpus: 64
+  total_gpus: 128
   search:
     max_batched_tokens: [8192]
     prefill_thresholds: [8192]
-    max_workers: 8  # parallel processes for strategy evaluation (1 = sequential)
+    max_workers: 42  # parallel processes for strategy evaluation (1 = sequential)
     tp: true   # enable TP dimension in search
     pp: true   # enable PP dimension in search
     dp: true   # enable DP dimension in search
     # pd_ratios, tp_sizes, pp_sizes are auto-generated from total_gpus + model constraints
-    gpu_sweep: [1, 2, 4, 8, 16]  # sweep GPU counts for scalability curve (null = single run)
+    gpu_sweep: [1, 2, 4, 8, 16, 32, 64, 128]  # sweep GPU counts for scalability curve (null = single run)
 
 output: "sim/output/search.csv"
 overwrite: false  # true = delete existing CSV and re-search everything

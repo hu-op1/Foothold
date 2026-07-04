@@ -12,6 +12,21 @@ def _get(d, *keys):
     return None
 
 
+def _coerce_value(v):
+    """Convert a CSV string to int/float if possible, else keep as-is."""
+    if not isinstance(v, str):
+        return v
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        pass
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        pass
+    return v
+
+
 def load_results(path):
     rows = []
     with open(path, "r", encoding="utf-8") as f:
@@ -20,7 +35,8 @@ def load_results(path):
             val = d.get("time_ms")
             if val is None or val == "OOM":
                 continue
-            d["time_ms"] = float(val)
+            # Coerce all fields so int/floats compare correctly
+            d = {k: _coerce_value(v) for k, v in d.items()}
             rows.append(d)
     return rows
 
