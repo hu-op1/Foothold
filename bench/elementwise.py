@@ -15,7 +15,7 @@ Ops covered:
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from bench.utils import (warmup, benchmark, check_memory,
+from bench.utils import (warmup, benchmark, auto_warmup_iters, check_memory,
                          supports_float8_matmul, make_float8_tensor,
                          load_completed_keys, append_csv_row)
 
@@ -49,8 +49,11 @@ ELEM_KEY_FIELDS = ["op_name", "dtype", "N"]
 
 def bench_elementwise(config, output_path="results/elementwise.csv"):
     dtypes = _dtype_list(config)
-    warmup_iters = config["warmup_iters"]
-    bench_iters = config["bench_iters"]
+    warmup_cfg = config.get("warmup", config.get("warmup_iters", 10))
+    warmup_ratio = config.get("warmup_ratio", 0.1)
+    bench_min_time = config.get("min_time_ms", 200)
+    bench_max_iters = config.get("max_iters", 10000)
+    bench_calib = config.get("calib_iters", 20)
     max_mem = config["max_memory_gb"]
     device = torch.device("cuda")
 
@@ -63,6 +66,15 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
     results = []
     new_count = 0
     skip_count = 0
+
+    def _wu(fn):
+        """Warmup — auto-scaled or fixed iterations."""
+        if warmup_cfg == "auto":
+            w = auto_warmup_iters(fn, bench_min_time, bench_max_iters,
+                                  bench_calib, warmup_ratio)
+        else:
+            w = int(warmup_cfg)
+        warmup(fn, w)
 
     for dt_name in dtypes:
         dtype = getattr(torch, dt_name)
@@ -128,8 +140,8 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
             if "residual_add" in pending_ops:
                 def add_fn(x=x, y=y):
                     x + y
-                warmup(add_fn, warmup_iters)
-                ms = benchmark(add_fn, bench_iters)
+                _wu(add_fn)
+                ms = benchmark(add_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
                 _append("residual_add", N, 3 * N * dt_bytes, ms)
 
             # --- rmsnorm ---
@@ -137,16 +149,16 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
                 w = torch.ones(N, dtype=dtype, device=device)
                 def rms_fn(x=x, w=w):
                     F.rms_norm(x, (N,), w, 1e-5)
-                warmup(rms_fn, warmup_iters)
-                ms = benchmark(rms_fn, bench_iters)
+                _wu(rms_fn)
+                ms = benchmark(rms_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
                 _append("rmsnorm", 4 * N, 4 * N * dt_bytes, ms)
 
             # --- softmax ---
             if "softmax" in pending_ops:
                 def soft_fn(x=x):
                     F.softmax(x, dim=0)
-                warmup(soft_fn, warmup_iters)
-                ms = benchmark(soft_fn, bench_iters)
+                _wu(soft_fn)
+                ms = benchmark(soft_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
                 _append("softmax", 5 * N, 6 * N * dt_bytes, ms)
 
             # --- swiglu ---
@@ -155,8 +167,8 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
                 up = torch.randn(N, dtype=dtype, device=device)
                 def swiglu_fn(gate=gate, up=up):
                     F.silu(gate) * up
-                warmup(swiglu_fn, warmup_iters)
-                ms = benchmark(swiglu_fn, bench_iters)
+                _wu(swiglu_fn)
+                ms = benchmark(swiglu_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
                 _append("swiglu", 5 * N, 3 * N * dt_bytes, ms)
 
             # --- rope ---
@@ -168,8 +180,8 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
                     out[:, 0] = q2[:, 0] * 0.5 - q2[:, 1] * 0.866
                     out[:, 1] = q2[:, 1] * 0.5 + q2[:, 0] * 0.866
                     return out.view(-1)
-                warmup(rope_fn, warmup_iters)
-                ms = benchmark(rope_fn, bench_iters)
+                _wu(rope_fn)
+                ms = benchmark(rope_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
                 _append("rope", 6 * N, 4 * N * dt_bytes, ms)
 
             del x, y

@@ -14,7 +14,7 @@ platforms (Windows, CPU).
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from bench.utils import (warmup, benchmark, check_memory,
+from bench.utils import (warmup, benchmark, auto_warmup_iters, check_memory,
                          load_completed_keys, append_csv_row)
 
 # Try native flash_attn first (matches vLLM backend), fall back to PyTorch SDPA.
@@ -58,8 +58,11 @@ def _fa_flops(b, nh, s_q, s_kv, hd):
 
 def bench_flashattn(config, output_path="results/flashattn.csv"):
     dtypes = _dtype_list(config)
-    warmup_iters = config["warmup_iters"]
-    bench_iters = config["bench_iters"]
+    warmup_cfg = config.get("warmup", config.get("warmup_iters", 10))
+    warmup_ratio = config.get("warmup_ratio", 0.1)
+    bench_min_time = config.get("min_time_ms", 200)
+    bench_max_iters = config.get("max_iters", 10000)
+    bench_calib = config.get("calib_iters", 20)
     max_mem = config["max_memory_gb"]
     device = torch.device("cuda")
 
@@ -131,8 +134,14 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
                 def fa_fn(q=q, k=k, v=v):
                     F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
-            warmup(fa_fn, warmup_iters)
-            ms = benchmark(fa_fn, bench_iters)
+            if warmup_cfg == "auto":
+                wu = auto_warmup_iters(fa_fn, bench_min_time, bench_max_iters,
+                                       bench_calib, warmup_ratio)
+            else:
+                wu = int(warmup_cfg)
+            warmup(fa_fn, wu)
+            ms = benchmark(fa_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters,
+                            calib_iters=bench_calib)
 
             row = {
                 "op_name": "flashattn", "dtype": dt_name,

@@ -31,15 +31,67 @@ def warmup(fn, iters=5):
         fn()
 
 
-def benchmark(fn, iters=100):
-    """Return average execution time of fn in milliseconds."""
+def benchmark(fn, min_time_ms=200, max_iters=10000, calib_iters=20):
+    """Return average execution time of fn in milliseconds.
+
+    Runs enough iterations to accumulate at least *min_time_ms* of GPU time
+    (capped at *max_iters*).  Adapts iteration count to kernel size so that
+    both a 5 µs rmsnorm and a 50 ms matmul get statistically stable averages
+    without wasting wall-clock.
+
+    *calib_iters* controls the initial calibration batch size — higher values
+    give better per-iteration time estimates at the cost of more warm-up work.
+    """
     timer = CudaTimer()
     total = 0.0
-    for _ in range(iters):
+    iters = 0
+
+    # ── calibration batch ──
+    calib = min(calib_iters, max_iters)
+    for _ in range(calib):
         with timer:
             fn()
         total += timer.elapsed_ms
+    iters = calib
+
+    if total >= min_time_ms or iters >= max_iters:
+        return total / iters
+
+    # ── scale up to fill the time budget ──
+    per_iter = total / iters if iters > 0 else 0.001
+    remaining = min_time_ms - total
+    extra = min(int(remaining / per_iter) + 1, max_iters - iters)
+
+    for _ in range(extra):
+        with timer:
+            fn()
+        total += timer.elapsed_ms
+    iters += extra
+
     return total / iters
+
+
+def auto_warmup_iters(fn, min_time_ms, max_iters, calib_iters, ratio=0.1):
+    """Return warmup iters as a fraction of estimated benchmark iters.
+
+    Runs a quick calibration to estimate how many iterations *benchmark()*
+    would execute, then returns ``max(1, int(total_est * ratio))``.
+    """
+    timer = CudaTimer()
+    total = 0.0
+    calib = min(calib_iters, max_iters)
+    for _ in range(calib):
+        with timer:
+            fn()
+        total += timer.elapsed_ms
+
+    if total >= min_time_ms or calib >= max_iters:
+        total_est = calib
+    else:
+        per_iter = total / calib if calib > 0 else 0.001
+        total_est = min(max_iters, int(min_time_ms / per_iter) + 1)
+
+    return max(1, int(total_est * ratio))
 
 
 def save_csv(results, path):

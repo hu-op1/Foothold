@@ -50,8 +50,9 @@ def run_benchmarks(args):
     gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
     print(f"GPU: {gpu_name} ({gpu_mem:.1f} GiB)")
     print(f"Config: {args.config}")
-    print(f"dtype: {cfg['dtype']}, warmup={cfg['warmup_iters']}, "
-          f"iters={cfg['bench_iters']}")
+    warmup_val = cfg.get("warmup", cfg.get("warmup_iters", "?"))
+    print(f"dtype: {cfg['dtype']}, warmup={warmup_val}, "
+          f"min_time={cfg.get('min_time_ms', '?')}ms, max_iters={cfg.get('max_iters', '?')}")
     matmul_combos = len(cfg["matmul"]["M"]) * len(cfg["matmul"]["K"]) * len(cfg["matmul"]["N"])
     elem_combos = len(cfg["elementwise"]["N"]) * len(cfg["elementwise"]["operators"])
     fa_cfg = cfg.get("flashattn", {})

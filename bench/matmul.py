@@ -5,7 +5,7 @@ Covers both memory-bound (small M) and compute-bound (large M) regimes.
 
 import torch
 from tqdm import tqdm
-from bench.utils import (warmup, benchmark, check_memory,
+from bench.utils import (warmup, benchmark, auto_warmup_iters, check_memory,
                          supports_float8_matmul, make_float8_tensor,
                          load_completed_keys, append_csv_row)
 
@@ -32,8 +32,11 @@ def _dtype_list(config):
 
 def bench_matmul(config, output_path="results/matmul.csv"):
     dtypes = _dtype_list(config)
-    warmup_iters = config["warmup_iters"]
-    bench_iters = config["bench_iters"]
+    warmup_cfg = config.get("warmup", config.get("warmup_iters", 10))
+    warmup_ratio = config.get("warmup_ratio", 0.1)
+    bench_min_time = config.get("min_time_ms", 200)
+    bench_max_iters = config.get("max_iters", 10000)
+    bench_calib = config.get("calib_iters", 20)
     max_mem = config["max_memory_gb"]
     device = torch.device("cuda")
 
@@ -97,8 +100,14 @@ def bench_matmul(config, output_path="results/matmul.csv"):
                 def mm(a=a, w=w):
                     torch.mm(a, w)
 
-            warmup(mm, warmup_iters)
-            avg_ms = benchmark(mm, bench_iters)
+            if warmup_cfg == "auto":
+                wu = auto_warmup_iters(mm, bench_min_time, bench_max_iters,
+                                       bench_calib, warmup_ratio)
+            else:
+                wu = int(warmup_cfg)
+            warmup(mm, wu)
+            avg_ms = benchmark(mm, min_time_ms=bench_min_time, max_iters=bench_max_iters,
+                                calib_iters=bench_calib)
 
             row = {
                 "op_name": "matmul", "dtype": dt_name,
