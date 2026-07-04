@@ -47,13 +47,13 @@ def _write_scalability_csv(results: list[dict], base_path: str) -> None:
         "colo_ttft_p99_ms",
         "colo_tpot_p99_ms",
         "colo_p99_latency_ms",
-        "colo_slo_score",
+        "colo_slo_pass",
         "disagg_label",
         "disagg_throughput_tok_s",
         "disagg_ttft_p99_ms",
         "disagg_tpot_p99_ms",
         "disagg_p99_latency_ms",
-        "disagg_slo_score",
+        "disagg_slo_pass",
         "winner",
     ]
 
@@ -74,13 +74,13 @@ def _write_scalability_csv(results: list[dict], base_path: str) -> None:
             "colo_ttft_p99_ms": _m(colo, "p99_ttft_ms"),
             "colo_tpot_p99_ms": _m(colo, "p99_tpot_ms"),
             "colo_p99_latency_ms": _m(colo, "p99_ms"),
-            "colo_slo_score": colo["slo_score"] if colo else 0,
+            "colo_slo_pass": colo.get("slo_pass", False) if colo else False,
             "disagg_label": disagg["label"] if disagg else "—",
             "disagg_throughput_tok_s": dt,
             "disagg_ttft_p99_ms": _m(disagg, "p99_ttft_ms"),
             "disagg_tpot_p99_ms": _m(disagg, "p99_tpot_ms"),
             "disagg_p99_latency_ms": _m(disagg, "p99_ms"),
-            "disagg_slo_score": disagg["slo_score"] if disagg else 0,
+            "disagg_slo_pass": disagg.get("slo_pass", False) if disagg else False,
             "winner": winner,
         })
 
@@ -213,7 +213,7 @@ SEARCH_FIELDNAMES = [
     "lm_head_pct",
     "all_reduce_pct", "inter_stage_comm_pct",
     "kv_transfer_pct", "swap_pct",
-    "score",
+    "slo_pass",
     "elapsed_s",
 ]
 
@@ -253,7 +253,7 @@ def flatten_result(entry: dict) -> dict:
         "inter_stage_comm_pct": m.get("inter_stage_comm_pct", 0.0),
         "kv_transfer_pct": m.get("kv_transfer_pct", 0.0),
         "swap_pct": m.get("swap_pct", 0.0),
-        "score": entry["score"],
+        "slo_pass": entry.get("slo_pass", False),
         "elapsed_s": entry["elapsed"],
     }
 

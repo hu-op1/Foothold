@@ -55,7 +55,7 @@ def load_config(path=None, model_spec=None):
         sim["long_prefill_token_threshold"] = thrs[0] if thrs else 1024
 
     slo = cfg.setdefault("slo", {})
-    for k, v in [("ttft_ms", 500), ("tpot_ms", 50), ("p99_latency_ms", 2000)]:
+    for k, v in [("p90_ttft_ms", 500), ("p90_tpot_ms", 50)]:
         if slo.get(k) is None:
             slo[k] = v
 

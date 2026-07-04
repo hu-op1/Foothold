@@ -100,7 +100,8 @@ def _load_results_from_csv(csv_path: str) -> list[dict]:
                 results.append({
                     "label": f"{st} (batch={batch}, thr={thr})",
                     "metrics_raw": m,
-                    "score": float(row.get("score", 0)),
+                    "throughput": float(row.get("throughput_tok_s", 0)),
+                    "slo_pass": row.get("slo_pass", "False") == "True",
                     "elapsed": float(row.get("elapsed_s", 0)),
                 })
     except Exception:
@@ -124,8 +125,8 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     If cfg["strategy"]["search"]["gpu_sweep"] is set, sweeps over GPU counts
     and attaches a scalability_summary to the first result.
 
-    Returns list of {label, metrics_raw, score, elapsed, slo_score}
-    sorted by score descending.
+    Returns list of {label, metrics_raw, throughput, slo_pass, elapsed}
+    sorted: SLO-passing first (by throughput), then SLO-failing.
     """
     mode = cfg["strategy"]["mode"]
     search_cfg = cfg["strategy"]["search"]
@@ -185,8 +186,8 @@ def _search_with_sweep(gpu_sweep: list[int], mode, search_cfg, slo,
         disagg_all = sorted(
             [r for r in batch if r.get("mode_label") == "disaggregated"],
             key=lambda r: r["metrics_raw"]["throughput"], reverse=True)
-        colo_slo = [r for r in colo_all if r["slo_score"] > 0]
-        disagg_slo = [r for r in disagg_all if r["slo_score"] > 0]
+        colo_slo = [r for r in colo_all if r.get("slo_pass")]
+        disagg_slo = [r for r in disagg_all if r.get("slo_pass")]
 
         best_colo = colo_slo[0] if colo_slo else (colo_all[0] if colo_all else None)
         best_disagg = disagg_slo[0] if disagg_slo else (disagg_all[0] if disagg_all else None)
@@ -219,8 +220,8 @@ def _search_with_sweep(gpu_sweep: list[int], mode, search_cfg, slo,
         winner = "Colocated" if ct >= dt else "Disaggregated"
         print(f"  {s['total_gpus']:<6} {ct:<20.1f} {dt:<22.1f} {winner}")
 
-    # Sort all results by score
-    all_results.sort(key=lambda r: r["score"], reverse=True)
+    # Sort: SLO-passing first (by throughput), then SLO-failing (by throughput)
+    all_results.sort(key=lambda r: (r.get("slo_pass", False), r.get("throughput", 0)), reverse=True)
 
     # Attach scalability summary to first result for report export
     if all_results:
@@ -358,7 +359,7 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
                 results.append(pr)
                 seen.add(pr["label"])
 
-    results.sort(key=lambda r: r["score"], reverse=True)
+    results.sort(key=lambda r: (r.get("slo_pass", False), r.get("throughput", 0)), reverse=True)
     return results
 
 
@@ -388,18 +389,20 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
                              pp_size=pp, d_pp_size=d_pp)
 
     elapsed = time.perf_counter() - t0
-    score = metrics.score(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
-    slo_info = metrics.slo_compliance(slo["ttft_ms"], slo["tpot_ms"], slo["p99_latency_ms"])
+    slo_info = metrics.slo_compliance(slo["p90_ttft_ms"], slo["p90_tpot_ms"])
+    throughput = metrics.throughput()
 
     total_t = metrics.total_time
     result = {
         "label": task["label"],
         "mode_label": task.get("mode_label", task.get("mode", "")),
         "total_gpus": task.get("total_gpus", 0),
+        "throughput": throughput,
+        "slo_pass": slo_info["slo_pass"],
         "metrics_raw": {
-            "throughput": metrics.throughput(),
+            "throughput": throughput,
             "input_throughput": metrics.input_throughput(),
-            "output_throughput": metrics.throughput(),
+            "output_throughput": throughput,
             "total_throughput": metrics.total_throughput(),
             "mean_ttft_ms": metrics.mean_ttft() * 1000,
             "p50_ttft_ms": metrics.p50_ttft() * 1000,
@@ -420,9 +423,7 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
             "cache_hit_rate": metrics.cache_hit_rate
             if metrics.cache_hit_rate is not None else 0.0,
         },
-        "score": score,
         "elapsed": elapsed,
-        "slo_score": slo_info["score"],
     }
     # Add time breakdown percentages
     breakdown = metrics.time_breakdown_pct()

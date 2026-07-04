@@ -25,7 +25,7 @@ strategy:
   search:
     max_batched_tokens: [8192]
     prefill_thresholds: [8192]
-    max_workers: 42  # parallel processes for strategy evaluation (1 = sequential)
+    max_workers: 36  # parallel processes for strategy evaluation (1 = sequential)
     tp: true   # enable TP dimension in search
     pp: true   # enable PP dimension in search
     dp: true   # enable DP dimension in search
@@ -33,14 +33,18 @@ strategy:
     gpu_sweep: [1, 2, 4, 8, 16, 32, 64, 128]  # sweep GPU counts for scalability curve (null = single run)
 
 output: "sim/output/search.csv"
-overwrite: false  # true = delete existing CSV and re-search everything
+overwrite: true  # true = delete existing CSV and re-search everything
 
 trace:
   path: "traces/agent_trace_test.jsonl"
   max_requests: 5
   format: "agentic"  # "sharegpt" or "agentic"
 
+# ── Service Level Objectives (SLO) ──────────────────────────────────────
+# SLO is a binary gate checked at p90 (not per-request, not p99).
+# Both must pass — if either fails the strategy scores 0.
+# Once SLO is met, strategies are ranked purely by throughput.
+# Total latency is intentionally excluded — it scales with output length.
 slo:
-  ttft_ms: 500
-  tpot_ms: 50
-  p99_latency_ms: 10000
+  p90_ttft_ms: 500   # p90 Time-To-First-Token threshold (ms)
+  p90_tpot_ms: 50    # p90 Time-Per-Output-Token threshold (ms)

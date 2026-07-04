@@ -118,29 +118,30 @@ class MetricsCollector:
         idx = int(len(vals) * pct / 100)
         return vals[min(idx, len(vals) - 1)]
 
-    def slo_compliance(self, ttft_ms, tpot_ms, p99_ms) -> dict:
-        """Return SLO compliance fraction and per-metric pass rates."""
+    def slo_compliance(self, ttft_ms, tpot_ms) -> dict:
+        """Check if p90 TTFT and p90 TPOT meet SLO thresholds.
+
+        SLO is a binary gate: both p90 TTFT and p90 TPOT must be ≤ their
+        respective thresholds.  Per-request pass rates are not used — p90
+        is the right aggregate because a few tail requests exceeding the
+        threshold are acceptable; what matters is that 90% of users have
+        a good experience.
+
+        Total latency is intentionally NOT an SLO metric — it scales
+        linearly with output token count.
+        """
         if not self.records:
-            return {"score": 0.0, "ttft_pass": 0.0, "tpot_pass": 0.0, "p99_pass": False}
+            return {"p90_ttft_ms": 0.0, "p90_tpot_ms": 0.0, "slo_pass": False}
 
-        ttft_pass = sum(1 for r in self.records if r["ttft"] * 1000 <= ttft_ms)
-        tpot_pass = sum(1 for r in self.records if r["tpot"] * 1000 <= tpot_ms)
-        p99_pass = self.p99_latency() * 1000 <= p99_ms
-
-        n = len(self.records)
-        compliance = (ttft_pass / n) * (tpot_pass / n) * (1.0 if p99_pass else 0.0)
+        p90_ttft = self.p90_ttft() * 1000
+        p90_tpot = self.p90_tpot() * 1000
+        slo_pass = p90_ttft <= ttft_ms and p90_tpot <= tpot_ms
 
         return {
-            "score": compliance,
-            "ttft_pass": ttft_pass / n,
-            "tpot_pass": tpot_pass / n,
-            "p99_pass": p99_pass,
+            "p90_ttft_ms": p90_ttft,
+            "p90_tpot_ms": p90_tpot,
+            "slo_pass": slo_pass,
         }
-
-    def score(self, ttft_ms, tpot_ms, p99_ms) -> float:
-        """Combined throughput × SLO compliance score."""
-        slo = self.slo_compliance(ttft_ms, tpot_ms, p99_ms)
-        return self.throughput() * slo["score"]
 
     def time_breakdown_pct(self) -> dict[str, float]:
         """Return each time component as % of total accumulated time."""

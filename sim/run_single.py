@@ -92,11 +92,8 @@ def run_single(
     recorder.finish()
 
     # ── Write artifacts ──────────────────────────────────────────────
-    score = metrics.score(slo.get("ttft_ms", 400), slo.get("tpot_ms", 100),
-                          slo.get("p99_latency_ms", 4000))
-    slo_info = metrics.slo_compliance(slo.get("ttft_ms", 400),
-                                      slo.get("tpot_ms", 100),
-                                      slo.get("p99_latency_ms", 4000))
+    slo_info = metrics.slo_compliance(slo.get("p90_ttft_ms", 400),
+                                      slo.get("p90_tpot_ms", 100))
 
     meta_extra = extra_meta or {}
     meta_extra.update({
@@ -110,7 +107,7 @@ def run_single(
         "throughput_tok_s": metrics.throughput(),
         "ttft_mean_ms": metrics.mean_ttft() * 1000,
         "tpot_mean_ms": metrics.mean_tpot() * 1000,
-        "slo_score": slo_info["score"],
+        "slo_pass": slo_info["slo_pass"],
         "elapsed_s": round(elapsed, 3),
     })
     if mode == "disaggregated":
@@ -153,7 +150,7 @@ def run_single(
             "cache_hit_rate": metrics.cache_hit_rate
             if metrics.cache_hit_rate is not None else 0.0,
         },
-        "score": score,
+        "slo_pass": slo_info["slo_pass"],
         "elapsed": elapsed,
     }]
     # Add time breakdown percentages
