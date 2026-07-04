@@ -12,6 +12,7 @@ Ops covered:
   - rope:         pairwise rotation  (1 read + 1 write + trig compute)
 """
 
+import os
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -59,6 +60,10 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
 
     grid = config["elementwise"]
     ops_to_run = grid["operators"]
+
+    # ── overwrite: delete existing CSV so all combos re-run ──
+    if config.get("overwrite") and output_path and os.path.exists(output_path):
+        os.remove(output_path)
 
     # ── resume: load already-completed combos ──
     done_keys = load_completed_keys(output_path, ELEM_KEY_FIELDS)

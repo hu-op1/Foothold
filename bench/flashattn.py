@@ -11,6 +11,7 @@ Falls back to torch.nn.functional.scaled_dot_product_attention on other
 platforms (Windows, CPU).
 """
 
+import os
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -77,6 +78,10 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
     print(f"FlashAttn backend: {backend}")
     print(f"FlashAttn dtypes: {dtypes}")
     print(f"FlashAttn batch sizes: {batch_list}")
+
+    # ── overwrite: delete existing CSV so all combos re-run ──
+    if config.get("overwrite") and output_path and os.path.exists(output_path):
+        os.remove(output_path)
 
     # ── resume: load already-completed combos ──
     done_keys = load_completed_keys(output_path, FA_KEY_FIELDS)

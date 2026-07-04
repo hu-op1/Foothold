@@ -33,6 +33,7 @@ strategy:
     gpu_sweep: [1, 2, 4, 8, 16]  # sweep GPU counts for scalability curve (null = single run)
 
 output: "sim/output/search.csv"
+overwrite: false  # true = delete existing CSV and re-search everything
 
 trace:
   path: "traces/agent_trace_test.jsonl"

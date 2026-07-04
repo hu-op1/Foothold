@@ -3,6 +3,7 @@
 Covers both memory-bound (small M) and compute-bound (large M) regimes.
 """
 
+import os
 import torch
 from tqdm import tqdm
 from bench.utils import (warmup, benchmark, auto_warmup_iters, check_memory,
@@ -43,6 +44,10 @@ def bench_matmul(config, output_path="results/matmul.csv"):
     from itertools import product
 
     grid = config["matmul"]
+
+    # ── overwrite: delete existing CSV so all combos re-run ──
+    if config.get("overwrite") and output_path and os.path.exists(output_path):
+        os.remove(output_path)
 
     # ── resume: load already-completed combos ──
     done_keys = load_completed_keys(output_path, MATMUL_KEY_FIELDS)

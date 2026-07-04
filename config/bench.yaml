@@ -34,10 +34,11 @@ gpu: "3090"
 dtype: ["float16", "bfloat16", "float8_e4m3fn"]
 warmup: auto            # "auto" = 1/10 of estimated benchmark iters, or an int for fixed
 warmup_ratio: 0.1        # fraction of estimated iters used when warmup=auto
-# Time-budgeted measurement: run enough iterations to accumulate ≥200ms
+# Time-budgeted measurement: run enough iterations to accumulate ≥500ms
 # of GPU time, capped at max_iters.  Adapts per-kernel so a 5µs rmsnorm
 # gets ~10k samples while a 50ms matmul stops after ~4 samples.
-min_time_ms: 200
-max_iters: 10000
+min_time_ms: 500
+max_iters: 100000
 calib_iters: 20  # initial calibration batch — higher = more accurate per-iter estimate
+overwrite: false  # true = delete existing CSV and re-benchmark everything
 max_memory_gb: 24

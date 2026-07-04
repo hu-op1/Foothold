@@ -306,8 +306,12 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
                                         "mode_label": "disaggregated",
                                     })
 
-    # ── checkpoint: skip already-finished strategies (read from output CSV) ──
+    # ── overwrite: delete existing CSV so all strategies re-run ──
     out_path = str(cfg.get("output", "sim/output/results.csv"))
+    if cfg.get("overwrite") and os.path.exists(out_path):
+        os.remove(out_path)
+
+    # ── checkpoint: skip already-finished strategies (read from output CSV) ──
     completed_labels = _load_completed_labels(out_path)
     pending = [t for t in tasks if t["label"] not in completed_labels]
     skipped = len(tasks) - len(pending)
