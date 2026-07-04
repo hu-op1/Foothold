@@ -61,19 +61,22 @@ def roofline_time(flops, bytes_moved, F_peak, B_peak, p):
     return (c ** p + m ** p) ** (1 / p)
 
 
-def matmul_time(M, K, N, F, B, p, dt_bytes=None):
+def matmul_time(M, K, N, F, B, p, dt_bytes=None, overhead=0.0):
     """Predicted time for [M,K] × [K,N] matmul.
 
     Accounts for tensor-core tile quantization: when K or N are not
     multiples of the tile size (16), the GPU pads internally and wastes
     compute.  The tile-waste factor inflates the predicted time accordingly.
+
+    *overhead* is the per-kernel launch overhead (seconds).  For small M
+    (decode, M=1) this can be comparable to the roofline time itself.
     """
     if dt_bytes is None:
         dt_bytes = _DTYPE_BYTES_DEFAULT
     flops = 2 * M * K * N
     bytes_moved = (M * K + K * N + M * N) * dt_bytes
     t = roofline_time(flops, bytes_moved, F, B, p)
-    return t * _tile_waste(K, N)
+    return t * _tile_waste(K, N) + overhead
 
 
 def elem_time(op_name, N, b_effs, overheads, dt_bytes=None):
@@ -87,7 +90,8 @@ def elem_time(op_name, N, b_effs, overheads, dt_bytes=None):
 
 # ── layer ops ───────────────────────────────────────────────────────────
 
-def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None, dt_bytes=None):
+def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None, dt_bytes=None,
+                     overhead=0.0):
     """Q/K/V/O projections for attention layers.
 
     Q/K/V are fused into one matmul (matching vLLM's QKVParallelLinear),
@@ -99,21 +103,22 @@ def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None, dt_bytes=None)
     """
     if nh is None or (nh * hd == h and (nh_kv or nh) == nh):
         # MHA: QKV fused [M,h]×[h,3h] + O [M,h]×[h,h]
-        return matmul_time(M, h, 3 * h, F, B, p, dt_bytes) + matmul_time(M, h, h, F, B, p, dt_bytes)
+        return (matmul_time(M, h, 3 * h, F, B, p, dt_bytes, overhead)
+                + matmul_time(M, h, h, F, B, p, dt_bytes, overhead))
     # GQA: Q dim ≠ KV dim
     dim_q = nh * hd
     dim_kv = (nh_kv or nh) * hd
     # QKV fused: [M, h] × [h, dim_q + 2·dim_kv]
-    t = matmul_time(M, h, dim_q + 2 * dim_kv, F, B, p, dt_bytes)
+    t = matmul_time(M, h, dim_q + 2 * dim_kv, F, B, p, dt_bytes, overhead)
     # O projection: [M, dim_q] × [dim_q, h]
-    t += matmul_time(M, dim_q, h, F, B, p, dt_bytes)
+    t += matmul_time(M, dim_q, h, F, B, p, dt_bytes, overhead)
     return t
 
 
-def ffn_projections(M, h, inter, F, B, p, dt_bytes=None):
+def ffn_projections(M, h, inter, F, B, p, dt_bytes=None, overhead=0.0):
     """FFN projections: gate/up (2×) + down."""
-    t = 2 * matmul_time(M, h, inter, F, B, p, dt_bytes)
-    t += matmul_time(M, inter, h, F, B, p, dt_bytes)
+    t = 2 * matmul_time(M, h, inter, F, B, p, dt_bytes, overhead)
+    t += matmul_time(M, inter, h, F, B, p, dt_bytes, overhead)
     return t
 
 

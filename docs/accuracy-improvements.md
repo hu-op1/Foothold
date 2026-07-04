@@ -4,17 +4,11 @@
 
 ---
 
-## ✅ 1. Elementwise 算子独立 benchmark + 独立拟合
+## ⚠️ 1. Elementwise 算子独立 benchmark + 独立拟合（部分回滚）
 
-**日期**: 2026-07-03　**分支**: main
+**日期**: 2026-07-03　**修订**: 2026-07-04　**分支**: main
 
-**问题**: `fit/elementwise.py` 只实测了 `residual_add` 和 `softmax`，其余全部 proxy 到 `residual_add`：
-
-| 算子 | 旧 proxy | 真实访存/计算模式 |
-|---|---|---|
-| swiglu | residual_add | 读gate+读up+SiLU+乘+写（少算 50% 访存量） |
-| rope | residual_add | 读Q/K+三角函数+写（计算量不可忽略） |
-| rmsnorm | residual_add | 读+归约+rsqrt+写（reduction 型，已 benchmark 但未拟合） |
+**原始问题**: `fit/elementwise.py` 只实测了 `residual_add` 和 `softmax`，其余全部 proxy 到 `residual_add`。
 
 **改动**:
 
@@ -22,9 +16,44 @@
 |---|---|
 | `bench/elementwise.py` | 新增 swiglu（`F.silu(gate) * up`）和 rope（2D 旋转变换）的 GPU benchmark |
 | `config/bench.yaml` | `operators` 扩展为 `[residual_add, rmsnorm, softmax, swiglu, rope]` |
-| `fit/elementwise.py` | 移除全局 PROXY → `MEASURED_OPS` 独立拟合 5 个算子；仅保留语义合理的 proxy（`layernorm→rmsnorm`，`causal_mask→residual_add`） |
 
-**需重新运行 bench + fit 生效**。
+**✅ swiglu 独立拟合有效** — `F.silu(gate)*up` 是真实的 PyTorch 融合 kernel，测得的 B_eff (~500 GB/s) 和 overhead (~57μs) 合理。
+
+**❌ rope 独立拟合已回滚** — 见下文。
+
+---
+
+### ⚠️ 1b. RoPE benchmark 不可靠 → 回退到 proxy
+
+**日期**: 2026-07-04　**分支**: main
+
+**发现**: `bench/elementwise.py` 中的 RoPE synthetic kernel 使用 PyTorch 切片索引：
+
+```python
+out[:, 0] = q2[:, 0] * 0.5 - q2[:, 1] * 0.866
+out[:, 1] = q2[:, 1] * 0.5 + q2[:, 0] * 0.866
+```
+
+`[:, 0]` / `[:, 1]` 破坏了 PyTorch 的 kernel fusion，导致单次调用实际触发 **8+ 个独立 kernel launch**。拟合结果：
+
+| 指标 | rope（broken benchmark） | residual_add（正常） | 高估 |
+|---|---|---|---|
+| overhead | **261 μs** | 37 μs | **7×** |
+| B_eff | 274 GB/s | 839 GB/s | **3× slower** |
+
+**vLLM 0.19.0 真实实现** (`csrc/pos_encoding_kernels.cu`): RoPE 是单个 in-place CUDA kernel — 每个 thread block 处理一个 token，block 内线程协作处理所有 head。overhead 和带宽特征与 `residual_add` 在同一量级。
+
+**修复** (`fit/elementwise.py`): `rope` 已从 `MEASURED_OPS` 移除，加入 `PROXY` 映射到 `residual_add`：
+
+```python
+PROXY = {
+    ...
+    "rope": "residual_add",  # single fused in-place kernel, not ~8 launches
+}
+MEASURED_OPS = ["residual_add", "rmsnorm", "softmax", "swiglu"]  # rope 移除
+```
+
+**影响**: RoPE 时间占比从 ~41% → ~5-8%（合理范围）。直接用现有 fit 数据重新拟合即可生效（`uv run python main.py fit`）。
 
 ---
 

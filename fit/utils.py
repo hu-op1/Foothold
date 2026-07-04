@@ -69,13 +69,15 @@ def roofline_time(flops, bytes_moved, F_peak, B_peak, p):
     return (c ** p + m ** p) ** (1 / p)
 
 
-def roofline_fit(flops_list, bytes_list, time_s_list):
+def roofline_fit(flops_list, bytes_list, time_s_list, F_max=None):
     """Fit {F_peak, B_peak, p} from benchmark measurements.
 
     Args:
         flops_list: array-like, FLOP counts per data point
         bytes_list: array-like, bytes moved per data point
         time_s_list: array-like, measured times in seconds
+        F_max: optional upper bound for F_peak (FLOP/s).  When provided,
+               prevents F from drifting above the GPU's physical peak.
 
     Returns:
         (F_peak, B_peak, p, r2)
@@ -94,12 +96,15 @@ def roofline_fit(flops_list, bytes_list, time_s_list):
     F0 = float(np.median(flops / times))
     B0 = float(np.median(bytes_moved / times))
 
+    # Upper bound for F: either caller-supplied or 1000 TFLOPS (unconstrained)
+    F_upper = F_max if F_max is not None else 1e15
+
     popt, _ = curve_fit(
         model,
         (flops, bytes_moved),
         times,
         p0=[F0 * 0.5, B0 * 0.5, 2.0],
-        bounds=([1e9, 1e8, 1.0], [1e15, 1e13, 10.0]),
+        bounds=([1e9, 1e8, 1.0], [F_upper, 1e13, 10.0]),
         maxfev=20000,
     )
 

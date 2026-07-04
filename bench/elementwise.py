@@ -177,6 +177,15 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
                 _append("swiglu", 5 * N, 3 * N * dt_bytes, ms)
 
             # --- rope ---
+            # WARNING: This synthetic kernel uses PyTorch slice indexing
+            # ([:, 0] / [:, 1]) which breaks kernel fusion — a single call
+            # triggers ~8 separate GPU kernel launches instead of 1.
+            # vLLM's real RoPE is a single fused in-place CUDA kernel
+            # (csrc/pos_encoding_kernels.cu).  The fitted overhead (261 µs)
+            # is ~7× the real value (~37 µs), and B_eff (274 GB/s) is
+            # ~3× below peak.  Do NOT use this data directly — fit/elementwise.py
+            # proxies rope → residual_add instead.
+            # See docs/accuracy-improvements.md §1b for details.
             if "rope" in pending_ops:
                 rope_q = torch.randn(N, dtype=dtype, device=device)
                 def rope_fn(q=rope_q):

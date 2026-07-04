@@ -69,12 +69,14 @@ def _select_roofline_params(M_total, hw):
             "F": hw["F_peak_decode"],
             "B": hw["B_peak_decode"],
             "p": hw["p_decode"],
+            "overhead": hw.get("matmul_overhead_decode", 0.0),
         }
     if M_total >= _M_HI:
         return {
             "F": hw["F_peak_prefill"],
             "B": hw["B_peak_prefill"],
             "p": hw["p_prefill"],
+            "overhead": hw.get("matmul_overhead_prefill", hw.get("matmul_overhead_decode", 0.0)),
         }
 
     w = (log2(M_total) - log2(_M_LO)) / _LOG_RANGE  # 0 → 1
@@ -85,7 +87,8 @@ def _select_roofline_params(M_total, hw):
     p = hw["p_decode"] + w * (hw["p_prefill"] - hw["p_decode"])
 
     # F_peak is the same in both regimes (fit/matmul.py fixes F for decode)
-    return {"F": hw["F_peak_prefill"], "B": B, "p": p}
+    return {"F": hw["F_peak_prefill"], "B": B, "p": p,
+            "overhead": hw.get("matmul_overhead_decode", 0.0)}
 
 
 def _select_fa_params(n_requests, regime, hw_params, nh_model=None):
@@ -126,20 +129,30 @@ def _select_fa_params(n_requests, regime, hw_params, nh_model=None):
         B_arr = hw_params[B_key]
         p_arr = hw_params[p_key]
 
-        if effective <= batch_sizes[0]:
-            B, p = B_arr[0], p_arr[0]
-        elif effective >= batch_sizes[-1]:
-            B, p = B_arr[-1], p_arr[-1]
+        # Filter out entries where fit failed (B=0) — can happen when
+        # a batch size has too few benchmark points for fitting.
+        valid = [(bs, b, p) for bs, b, p in zip(batch_sizes, B_arr, p_arr) if b > 0]
+        if not valid:
+            # All entries invalid — fall through to unified/matmul fallback
+            pass
+        elif len(valid) == 1:
+            B, p = valid[0][1], valid[0][2]
         else:
-            # Log-space interpolation between bracketing batch sizes
-            for i in range(len(batch_sizes) - 1):
-                if batch_sizes[i] <= effective <= batch_sizes[i + 1]:
-                    lo, hi = batch_sizes[i], batch_sizes[i + 1]
-                    w = (log2(effective) - log2(lo)) / (log2(hi) - log2(lo))
-                    log_B = log(B_arr[i]) + w * (log(B_arr[i + 1]) - log(B_arr[i]))
-                    B = exp(log_B)
-                    p = p_arr[i] + w * (p_arr[i + 1] - p_arr[i])
-                    break
+            batch_vals, B_vals, p_vals = zip(*valid)
+
+            if effective <= batch_vals[0]:
+                B, p = B_vals[0], p_vals[0]
+            elif effective >= batch_vals[-1]:
+                B, p = B_vals[-1], p_vals[-1]
+            else:
+                for i in range(len(batch_vals) - 1):
+                    if batch_vals[i] <= effective <= batch_vals[i + 1]:
+                        lo, hi = batch_vals[i], batch_vals[i + 1]
+                        w = (log2(effective) - log2(lo)) / (log2(hi) - log2(lo))
+                        log_B = log(B_vals[i]) + w * (log(B_vals[i + 1]) - log(B_vals[i]))
+                        B = exp(log_B)
+                        p = p_vals[i] + w * (p_vals[i + 1] - p_vals[i])
+                        break
 
         F = hw_params.get(F_key, hw_params.get(f"F_peak_{regime}", 1e13))
         return {"F": F, "B": B, "p": p}
@@ -209,10 +222,11 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16"):
     total_new_tokens = sum(nt for _, nt in scheduled_requests)
     params = _select_roofline_params(total_new_tokens, hw)
     F, B, p = params["F"], params["B"], params["p"]
+    matmul_ov = params.get("overhead", 0.0)
 
     # ── Projections (batched over all tokens → single F,B,p per step) ──
-    attn_proj_time = nl * attn_projections(total_new_tokens, h, F, B, p, nh, nh_kv, hd, dt_bytes)
-    ffn_proj_time = nl * ffn_projections(total_new_tokens, h, inter, F, B, p, dt_bytes)
+    attn_proj_time = nl * attn_projections(total_new_tokens, h, F, B, p, nh, nh_kv, hd, dt_bytes, matmul_ov)
+    ffn_proj_time = nl * ffn_projections(total_new_tokens, h, inter, F, B, p, dt_bytes, matmul_ov)
 
     # ── Attention: group by type, then apply roofline ONCE per type ──
     # The L^p norm roofline_time(f,b) does NOT distribute over addition:
@@ -266,7 +280,7 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16"):
     rope_time = nl * rope_op(1, total_new_tokens, nh, nh_kv, hd, b_effs, overheads, dt_bytes)
 
     # ── Output projection (single lm_head, batched) ──
-    lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p, dt_bytes)
+    lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p, dt_bytes, matmul_ov)
 
     total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + fused_add_norm_time + swiglu_time + rope_time + lm_head_time
     return {
@@ -340,12 +354,13 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
     # Projections / LM head use total M to pick prefill vs decode params
     params = _select_roofline_params(total_new_tokens, hw)
     F, B, p = params["F"], params["B"], params["p"]
+    matmul_ov = params.get("overhead", 0.0)
 
     # ── Per-stage projections ──
     attn_proj_time = layers_per_stage * attn_projections(
-        total_new_tokens, h, F, B, p, nh, nh_kv, hd, dt_bytes)
+        total_new_tokens, h, F, B, p, nh, nh_kv, hd, dt_bytes, matmul_ov)
     ffn_proj_time = layers_per_stage * ffn_projections(
-        total_new_tokens, h, inter, F, B, p, dt_bytes)
+        total_new_tokens, h, inter, F, B, p, dt_bytes, matmul_ov)
 
     # ── Per-stage attention: group by type → roofline once per type ──
     # Count concurrent requests by type first (maps to FA batch dimension)
@@ -385,7 +400,7 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
 
     # ── LM head (only on last stage, but sequential pipeline model
     #      means it's still on the critical path) ──
-    lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p, dt_bytes)
+    lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p, dt_bytes, matmul_ov)
 
     # ── Inter-stage communication: (pp_size - 1) transfers ──
     # Each transfer sends hidden states for all tokens: tokens × h × dt_bytes.
@@ -420,6 +435,11 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     When pp_size > 1, pipeline parallelism is applied first (splitting layers
     across stages), then TP divides the per-stage compute and adds all-reduce.
 
+    All-reduce is per-layer (matching vLLM's column-parallel linear pattern):
+      - QKV projection output → 1 all-reduce per attention layer
+      - FFN gate+up output    → 1 all-reduce per layer
+    O-projection and FFN-down are row-parallel (no all-reduce needed).
+
     Args:
         num_gpus: number of GPUs in the TP group.
         intra_node_bw_gb_s: intra-node bandwidth for all-reduce (GB/s).
@@ -444,16 +464,36 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     dt_bytes = dtype_bytes(dtype)
     total_new_tokens = sum(nt for _, nt in scheduled_requests)
     h = model_spec["hidden_dim"]
+    inter = model_spec.get("intermediate_dim", h * 4)
+    nh = model_spec.get("num_heads", h // 128)
+    nh_kv = model_spec.get("num_kv_heads", nh)
+    hd = model_spec.get("head_dim", h // nh)
+    nl = model_spec["num_layers"]
+    na = model_spec.get("attn_layers", nl)
 
-    # All-reduce overhead: bytes / bandwidth + num_gpus × latency.
-    # Ring all-reduce has N communication steps; latency dominates for
-    # small messages (decode with 1 token: ~16 KB → ~1.7 µs bw-only,
-    # but ~20 µs with 2 µs × 8-GPU ring).
-    all_reduce_bytes = 2 * total_new_tokens * h * dt_bytes
-    all_reduce_time = (
-        all_reduce_bytes / (intra_node_bw_gb_s * 1e9)
-        + num_gpus * intra_latency_us * 1e-6
-    )
+    # ── Per-layer all-reduce data volumes ──
+    # Column-parallel QKV output: [tokens, dim_q + 2·dim_kv]
+    dim_qkv_out = nh * hd + 2 * nh_kv * hd
+    qkv_ar_bytes = total_new_tokens * dim_qkv_out * dt_bytes
+
+    # Column-parallel FFN gate+up output: [tokens, 2·inter]
+    ffn_ar_bytes = total_new_tokens * 2 * inter * dt_bytes
+
+    # Ring all-reduce: reduce-scatter (N−1 steps) + all-gather (N−1 steps).
+    # Each step sends data/N bytes over one hop.
+    # Total data: 2·(N−1)/N · data  →  ≈ 2·data for large N
+    # Total latency: 2·(N−1) · hop_latency
+    def _ar_time(ar_bytes):
+        steps = 2 * (num_gpus - 1)
+        factor = steps / num_gpus          # = 2·(N−1)/N
+        return (ar_bytes * factor / (intra_node_bw_gb_s * 1e9)
+                + steps * intra_latency_us * 1e-6)
+
+    # Total all-reduce: attention layers have QKV+FFN AR, delta layers FFN only
+    all_reduce_time = na * (_ar_time(qkv_ar_bytes) + _ar_time(ffn_ar_bytes))
+    if na < nl:
+        # DeltaNet / non-attention layers: FFN AR only
+        all_reduce_time += (nl - na) * _ar_time(ffn_ar_bytes)
 
     # Scale compute components by 1/tp; inter_stage_comm (PP) is also divided
     result = {}

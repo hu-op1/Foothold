@@ -10,15 +10,28 @@ semantically similar proxy.
 import numpy as np
 
 
-# Only proxy ops that have no direct benchmark.
-# swiglu, rope, rmsnorm are now measured directly in bench/elementwise.py.
+# Proxy ops that lack direct benchmarks OR whose benchmarks are unreliable.
+#
+# rope is PROXIED because the PyTorch synthetic kernel uses slice indexing
+# ([:, 0] / [:, 1]) which breaks kernel fusion — see §1b in accuracy doc.
+#
+# rmsnorm is PROXIED because the benchmark applies F.rms_norm(x, (N,), w)
+# where x has shape (N,) — this is a GLOBAL reduction over all N elements.
+# Real LLM rmsnorm is per-token: normalized_shape = (hidden_dim,) not (N,).
+# The global reduction achieves B_eff ≈ 4.2 GB/s vs ~800 GB/s for per-token.
+# See docs/accuracy-improvements.md §1c.
+#
+# vLLM's real RoPE and per-token rmsnorm are both memory-bandwidth-bound
+# in-place kernels with similar overhead to residual_add.
 PROXY = {
-    "layernorm": "rmsnorm",       # both are reduction + normalize
-    "causal_mask": "residual_add",  # both are simple add patterns
+    "layernorm": "residual_add",          # per-token reduction, similar BW
+    "causal_mask": "residual_add",        # simple add pattern
+    "rope": "residual_add",               # single fused in-place kernel
+    "rmsnorm": "residual_add",            # per-token norm, not global reduction
 }
 
-# Ops that have direct benchmarks — fit independently.
-MEASURED_OPS = ["residual_add", "rmsnorm", "softmax", "swiglu", "rope"]
+# Ops that have reliable direct benchmarks — fit independently.
+MEASURED_OPS = ["residual_add", "softmax", "swiglu"]
 
 
 def _fit_op(bytes_moved, times_s, op_name):

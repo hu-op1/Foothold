@@ -29,7 +29,7 @@ def _fit_subset(fa_results, label, F_fixed=None):
     bytes_moved = np.array([r["bytes"] for r in fa_results])
     times = np.array([r["time_ms"] for r in fa_results]) / 1000.0
 
-    if len(fa_results) < 10:
+    if len(fa_results) < 5:
         print(f"  {label}: too few points ({len(fa_results)}), skipping")
         return {}
 
