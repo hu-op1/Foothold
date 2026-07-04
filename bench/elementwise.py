@@ -15,8 +15,9 @@ Ops covered:
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from bench.utils import (warmup, benchmark, save_csv, check_memory,
-                         supports_float8_matmul, make_float8_tensor)
+from bench.utils import (warmup, benchmark, check_memory,
+                         supports_float8_matmul, make_float8_tensor,
+                         load_completed_keys, append_csv_row)
 
 
 # Bytes per element for each dtype.
@@ -41,6 +42,10 @@ BYTES_FACTORS = {
     "rope": 4,           # read Q/K + read cos/sin tables + write
 }
 
+# Fixed CSV column order (for incremental append).
+ELEM_FIELDS = ["op_name", "dtype", "N", "time_ms", "flops", "bytes"]
+ELEM_KEY_FIELDS = ["op_name", "dtype", "N"]
+
 
 def bench_elementwise(config, output_path="results/elementwise.csv"):
     dtypes = _dtype_list(config)
@@ -50,7 +55,14 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
     device = torch.device("cuda")
 
     grid = config["elementwise"]
+    ops_to_run = grid["operators"]
+
+    # ── resume: load already-completed combos ──
+    done_keys = load_completed_keys(output_path, ELEM_KEY_FIELDS)
+
     results = []
+    new_count = 0
+    skip_count = 0
 
     for dt_name in dtypes:
         dtype = getattr(torch, dt_name)
@@ -67,113 +79,104 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
             continue
 
         for N in tqdm(grid["N"], desc=f"Elementwise {dt_name}"):
+            # Check which ops are already done for this (dtype, N)
+            pending_ops = [
+                op for op in ops_to_run
+                if (op, dt_name, N) not in done_keys
+            ]
+            if not pending_ops:
+                skip_count += len(ops_to_run)
+                continue
+
             act_gb = (3 * N * dt_bytes) / (1024 ** 3)
             oom = not check_memory(act_gb, max_mem)
             if oom:
-                for op in grid["operators"]:
-                    results.append({
-                        "op_name": op,
-                        "dtype": dt_name,
-                        "N": N,
-                        "time_ms": "OOM",
-                        "flops": 0,
+                for op in ops_to_run:
+                    key = (op, dt_name, N)
+                    if key in done_keys:
+                        skip_count += 1
+                        continue
+                    row = {
+                        "op_name": op, "dtype": dt_name, "N": N,
+                        "time_ms": "OOM", "flops": 0,
                         "bytes": BYTES_FACTORS[op] * N * dt_bytes,
-                    })
+                    }
+                    results.append(row)
+                    append_csv_row(output_path, ELEM_FIELDS, row)
+                    done_keys.add(key)
                 continue
 
+            # Create tensors
             x = torch.randn(N, dtype=dtype, device=device)
             y = torch.randn(N, dtype=dtype, device=device)
 
-            # --- residual_add ---
-            def add_fn(x=x, y=y):
-                x + y
+            def _append(op_name, flops, byt, ms):
+                key = (op_name, dt_name, N)
+                if key in done_keys:
+                    return
+                row = {
+                    "op_name": op_name, "dtype": dt_name, "N": N,
+                    "time_ms": f"{ms:.6f}", "flops": flops, "bytes": byt,
+                }
+                results.append(row)
+                append_csv_row(output_path, ELEM_FIELDS, row)
+                done_keys.add(key)
+                nonlocal new_count
+                new_count += 1
 
-            warmup(add_fn, warmup_iters)
-            ms = benchmark(add_fn, bench_iters)
-            results.append({
-                "op_name": "residual_add",
-                "dtype": dt_name,
-                "N": N,
-                "time_ms": f"{ms:.6f}",
-                "flops": N,
-                "bytes": 3 * N * dt_bytes,
-            })
+            # --- residual_add ---
+            if "residual_add" in pending_ops:
+                def add_fn(x=x, y=y):
+                    x + y
+                warmup(add_fn, warmup_iters)
+                ms = benchmark(add_fn, bench_iters)
+                _append("residual_add", N, 3 * N * dt_bytes, ms)
 
             # --- rmsnorm ---
-            w = torch.ones(N, dtype=dtype, device=device)
-
-            def rms_fn(x=x, w=w):
-                F.rms_norm(x, (N,), w, 1e-5)
-
-            warmup(rms_fn, warmup_iters)
-            ms = benchmark(rms_fn, bench_iters)
-            results.append({
-                "op_name": "rmsnorm",
-                "dtype": dt_name,
-                "N": N,
-                "time_ms": f"{ms:.6f}",
-                "flops": 4 * N,
-                "bytes": 4 * N * dt_bytes,
-            })
+            if "rmsnorm" in pending_ops:
+                w = torch.ones(N, dtype=dtype, device=device)
+                def rms_fn(x=x, w=w):
+                    F.rms_norm(x, (N,), w, 1e-5)
+                warmup(rms_fn, warmup_iters)
+                ms = benchmark(rms_fn, bench_iters)
+                _append("rmsnorm", 4 * N, 4 * N * dt_bytes, ms)
 
             # --- softmax ---
-            def soft_fn(x=x):
-                F.softmax(x, dim=0)
-
-            warmup(soft_fn, warmup_iters)
-            ms = benchmark(soft_fn, bench_iters)
-            results.append({
-                "op_name": "softmax",
-                "dtype": dt_name,
-                "N": N,
-                "time_ms": f"{ms:.6f}",
-                "flops": 5 * N,
-                "bytes": 6 * N * dt_bytes,
-            })
+            if "softmax" in pending_ops:
+                def soft_fn(x=x):
+                    F.softmax(x, dim=0)
+                warmup(soft_fn, warmup_iters)
+                ms = benchmark(soft_fn, bench_iters)
+                _append("softmax", 5 * N, 6 * N * dt_bytes, ms)
 
             # --- swiglu ---
-            gate = torch.randn(N, dtype=dtype, device=device)
-            up = torch.randn(N, dtype=dtype, device=device)
-
-            def swiglu_fn(gate=gate, up=up):
-                F.silu(gate) * up
-
-            warmup(swiglu_fn, warmup_iters)
-            ms = benchmark(swiglu_fn, bench_iters)
-            results.append({
-                "op_name": "swiglu",
-                "dtype": dt_name,
-                "N": N,
-                "time_ms": f"{ms:.6f}",
-                "flops": 5 * N,   # silu(~4) + multiply(1)
-                "bytes": 3 * N * dt_bytes,
-            })
+            if "swiglu" in pending_ops:
+                gate = torch.randn(N, dtype=dtype, device=device)
+                up = torch.randn(N, dtype=dtype, device=device)
+                def swiglu_fn(gate=gate, up=up):
+                    F.silu(gate) * up
+                warmup(swiglu_fn, warmup_iters)
+                ms = benchmark(swiglu_fn, bench_iters)
+                _append("swiglu", 5 * N, 3 * N * dt_bytes, ms)
 
             # --- rope ---
-            # RoPE applies a 2D rotation to each pair of elements.
-            # q is [N] → view as [N/2, 2] → apply 2×2 rotation → flatten back.
-            rope_q = torch.randn(N, dtype=dtype, device=device)
+            if "rope" in pending_ops:
+                rope_q = torch.randn(N, dtype=dtype, device=device)
+                def rope_fn(q=rope_q):
+                    q2 = q.view(-1, 2)
+                    out = torch.empty_like(q2)
+                    out[:, 0] = q2[:, 0] * 0.5 - q2[:, 1] * 0.866
+                    out[:, 1] = q2[:, 1] * 0.5 + q2[:, 0] * 0.866
+                    return out.view(-1)
+                warmup(rope_fn, warmup_iters)
+                ms = benchmark(rope_fn, bench_iters)
+                _append("rope", 6 * N, 4 * N * dt_bytes, ms)
 
-            def rope_fn(q=rope_q):
-                q2 = q.view(-1, 2)
-                out = torch.empty_like(q2)
-                out[:, 0] = q2[:, 0] * 0.5 - q2[:, 1] * 0.866
-                out[:, 1] = q2[:, 1] * 0.5 + q2[:, 0] * 0.866
-                return out.view(-1)
+            del x, y
 
-            warmup(rope_fn, warmup_iters)
-            ms = benchmark(rope_fn, bench_iters)
-            results.append({
-                "op_name": "rope",
-                "dtype": dt_name,
-                "N": N,
-                "time_ms": f"{ms:.6f}",
-                "flops": 6 * N,   # 2 mul + 2 add per pair → 4 per pair → 2 per element
-                "bytes": 4 * N * dt_bytes,
-            })
-
-            del x, y, w, gate, up, rope_q
-
-    if output_path:
-        save_csv(results, output_path)
+    total_new_or_done = len(done_keys)  # includes both new and pre-existing
+    if skip_count:
+        print(f"  [resume] skipped {skip_count} completed, {new_count} new → {output_path}")
+    elif output_path and new_count > 0:
+        print(f"  Saved {new_count} rows → {output_path}")
     return results

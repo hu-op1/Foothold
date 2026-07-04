@@ -5,8 +5,9 @@ Covers both memory-bound (small M) and compute-bound (large M) regimes.
 
 import torch
 from tqdm import tqdm
-from bench.utils import (warmup, benchmark, save_csv, check_memory,
-                         supports_float8_matmul, make_float8_tensor)
+from bench.utils import (warmup, benchmark, check_memory,
+                         supports_float8_matmul, make_float8_tensor,
+                         load_completed_keys, append_csv_row)
 
 
 # Bytes per element for each dtype.
@@ -17,6 +18,10 @@ DTYPE_BYTES_MAP = {
     "float16": 2, "bfloat16": 2,
     "float8_e4m3fn": 1, "float8_e5m2": 1,
 }
+
+# Fixed CSV column order (for incremental append).
+MATMUL_FIELDS = ["op_name", "dtype", "M", "K", "N", "time_ms", "flops", "bytes"]
+MATMUL_KEY_FIELDS = ["op_name", "dtype", "M", "K", "N"]
 
 
 def _dtype_list(config):
@@ -35,7 +40,13 @@ def bench_matmul(config, output_path="results/matmul.csv"):
     from itertools import product
 
     grid = config["matmul"]
+
+    # ── resume: load already-completed combos ──
+    done_keys = load_completed_keys(output_path, MATMUL_KEY_FIELDS)
+
     results = []
+    new_count = 0
+    skip_count = 0
 
     for dt_name in dtypes:
         dtype = getattr(torch, dt_name)
@@ -51,18 +62,24 @@ def bench_matmul(config, output_path="results/matmul.csv"):
 
         combos = list(product(grid["M"], grid["K"], grid["N"]))
         for M, K, N in tqdm(combos, desc=f"Matmul {dt_name}"):
+            key = ("matmul", dt_name, M, K, N)
+            if key in done_keys:
+                skip_count += 1
+                continue
+
             act_bytes = (M * K + K * N + M * N) * dt_bytes
             act_gb = act_bytes / (1024 ** 3)
             oom = not check_memory(act_gb, max_mem)
             if oom:
-                results.append({
-                    "op_name": "matmul",
-                    "dtype": dt_name,
+                row = {
+                    "op_name": "matmul", "dtype": dt_name,
                     "M": M, "K": K, "N": N,
                     "time_ms": "OOM",
-                    "flops": 2 * M * K * N,
-                    "bytes": act_bytes,
-                })
+                    "flops": 2 * M * K * N, "bytes": act_bytes,
+                }
+                results.append(row)
+                append_csv_row(output_path, MATMUL_FIELDS, row)
+                done_keys.add(key)
                 continue
 
             if is_float8:
@@ -83,17 +100,22 @@ def bench_matmul(config, output_path="results/matmul.csv"):
             warmup(mm, warmup_iters)
             avg_ms = benchmark(mm, bench_iters)
 
-            results.append({
-                "op_name": "matmul",
-                "dtype": dt_name,
+            row = {
+                "op_name": "matmul", "dtype": dt_name,
                 "M": M, "K": K, "N": N,
                 "time_ms": f"{avg_ms:.6f}",
-                "flops": 2 * M * K * N,
-                "bytes": act_bytes,
-            })
+                "flops": 2 * M * K * N, "bytes": act_bytes,
+            }
+            results.append(row)
+            append_csv_row(output_path, MATMUL_FIELDS, row)
+            done_keys.add(key)
+            new_count += 1
 
             del a, w
 
-    if output_path:
-        save_csv(results, output_path)
+    total = len(done_keys) + skip_count  # done_keys now includes all combos
+    if skip_count:
+        print(f"  [resume] skipped {skip_count} completed, {new_count} new → {output_path}")
+    elif output_path and new_count > 0:
+        print(f"  Saved {new_count} rows → {output_path}")
     return results

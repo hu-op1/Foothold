@@ -14,7 +14,8 @@ platforms (Windows, CPU).
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from bench.utils import warmup, benchmark, save_csv, check_memory
+from bench.utils import (warmup, benchmark, check_memory,
+                         load_completed_keys, append_csv_row)
 
 # Try native flash_attn first (matches vLLM backend), fall back to PyTorch SDPA.
 try:
@@ -29,6 +30,11 @@ DTYPE_BYTES_MAP = {
     "float16": 2, "bfloat16": 2,
     "float8_e4m3fn": 1, "float8_e5m2": 1,
 }
+
+# Fixed CSV column order (for incremental append).
+FA_FIELDS = ["op_name", "dtype", "b", "nh", "nh_kv", "hd",
+             "s_q", "s_kv", "time_ms", "flops", "bytes"]
+FA_KEY_FIELDS = ["op_name", "dtype", "b", "s_q", "s_kv"]
 
 
 def _dtype_list(config):
@@ -69,7 +75,12 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
     print(f"FlashAttn dtypes: {dtypes}")
     print(f"FlashAttn batch sizes: {batch_list}")
 
+    # ── resume: load already-completed combos ──
+    done_keys = load_completed_keys(output_path, FA_KEY_FIELDS)
+
     results = []
+    new_count = 0
+    skip_count = 0
 
     for dt_name in dtypes:
         dtype = getattr(torch, dt_name)
@@ -84,28 +95,34 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
                   f"accept float8 inputs")
             continue
 
-        combos = [(b_val, sq, skv) for b_val in batch_list for sq in fa_cfg["s_q"] for skv in fa_cfg["s_kv"]]
+        combos = [(b_val, sq, skv) for b_val in batch_list
+                  for sq in fa_cfg["s_q"] for skv in fa_cfg["s_kv"]]
         for b_val, s_q, s_kv in tqdm(combos, desc=f"FlashAttn {dt_name}"):
+            key = ("flashattn", dt_name, b_val, s_q, s_kv)
+            if key in done_keys:
+                skip_count += 1
+                continue
+
             # Memory check
             act_bytes = b_val * (nh * s_q + 2 * nh_kv * s_kv + nh * s_q) * hd * dt_bytes
             act_gb = act_bytes / (1024 ** 3)
             oom = not check_memory(act_gb, max_mem)
             if oom:
-                results.append({
-                    "op_name": "flashattn",
-                    "dtype": dt_name,
+                row = {
+                    "op_name": "flashattn", "dtype": dt_name,
                     "b": b_val, "nh": nh, "nh_kv": nh_kv, "hd": hd,
                     "s_q": s_q, "s_kv": s_kv,
-                    "time_ms": "OOM",
-                    "flops": 0,
-                    "bytes": 0,
-                })
+                    "time_ms": "OOM", "flops": 0, "bytes": 0,
+                }
+                results.append(row)
+                append_csv_row(output_path, FA_FIELDS, row)
+                done_keys.add(key)
                 continue
 
-            # Create tensors and benchmark
-            q = torch.randn(b_val, nh, s_q, hd, dtype=dtype, device=device)
-            k = torch.randn(b_val, nh_kv, s_kv, hd, dtype=dtype, device=device)
-            v = torch.randn(b_val, nh_kv, s_kv, hd, dtype=dtype, device=device)
+            # Create tensors — flash_attn / SDPA expect (batch, seqlen, nheads, hd)
+            q = torch.randn(b_val, s_q, nh, hd, dtype=dtype, device=device)
+            k = torch.randn(b_val, s_kv, nh_kv, hd, dtype=dtype, device=device)
+            v = torch.randn(b_val, s_kv, nh_kv, hd, dtype=dtype, device=device)
 
             if _HAS_NATIVE_FA:
                 def fa_fn(q=q, k=k, v=v):
@@ -117,18 +134,23 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
             warmup(fa_fn, warmup_iters)
             ms = benchmark(fa_fn, bench_iters)
 
-            results.append({
-                "op_name": "flashattn",
-                "dtype": dt_name,
+            row = {
+                "op_name": "flashattn", "dtype": dt_name,
                 "b": b_val, "nh": nh, "nh_kv": nh_kv, "hd": hd,
                 "s_q": s_q, "s_kv": s_kv,
                 "time_ms": f"{ms:.6f}",
                 "flops": _fa_flops(b_val, nh, s_q, s_kv, hd),
                 "bytes": _fa_bytes(b_val, nh, s_q, nh_kv, s_kv, hd, dt_bytes),
-            })
+            }
+            results.append(row)
+            append_csv_row(output_path, FA_FIELDS, row)
+            done_keys.add(key)
+            new_count += 1
 
             del q, k, v
 
-    if output_path:
-        save_csv(results, output_path)
+    if skip_count:
+        print(f"  [resume] skipped {skip_count} completed, {new_count} new → {output_path}")
+    elif output_path and new_count > 0:
+        print(f"  Saved {new_count} rows → {output_path}")
     return results

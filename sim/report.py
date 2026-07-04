@@ -190,77 +190,82 @@ def _plot_scalability(results: list[dict], csv_path: str) -> None:
     print(f"Scalability plot saved to: {png_path}")
 
 
+# Fixed CSV column order — shared between incremental append and final export.
+SEARCH_FIELDNAMES = [
+    "strategy_type",
+    "batch",
+    "thr",
+    "throughput_tok_s",
+    "input_throughput_tok_s",
+    "output_throughput_tok_s",
+    "total_throughput_tok_s",
+    "ttft_mean_ms", "ttft_p50_ms", "ttft_p90_ms", "ttft_p99_ms",
+    "tpot_mean_ms", "tpot_p50_ms", "tpot_p90_ms", "tpot_p99_ms",
+    "latency_p50_ms", "latency_p90_ms", "latency_p95_ms", "latency_p99_ms",
+    "num_requests",
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_time_s",
+    "cache_hit_rate",
+    "attn_proj_pct", "ffn_proj_pct",
+    "attn_prefill_pct", "attn_decode_pct",
+    "fused_add_norm_pct", "swiglu_pct", "rope_pct",
+    "lm_head_pct",
+    "all_reduce_pct", "inter_stage_comm_pct",
+    "kv_transfer_pct", "swap_pct",
+    "score",
+    "elapsed_s",
+]
+
+
+def flatten_result(entry: dict) -> dict:
+    """Flatten a search result dict into a CSV row dict."""
+    m = entry["metrics_raw"]
+    strategy_type, batch, thr = _parse_label(entry["label"])
+    return {
+        "strategy_type": strategy_type,
+        "batch": batch,
+        "thr": thr,
+        "throughput_tok_s": m["throughput"],
+        "input_throughput_tok_s": m["input_throughput"],
+        "output_throughput_tok_s": m["output_throughput"],
+        "total_throughput_tok_s": m["total_throughput"],
+        "ttft_mean_ms": m["mean_ttft_ms"], "ttft_p50_ms": m["p50_ttft_ms"],
+        "ttft_p90_ms": m["p90_ttft_ms"], "ttft_p99_ms": m["p99_ttft_ms"],
+        "tpot_mean_ms": m["mean_tpot_ms"], "tpot_p50_ms": m["p50_tpot_ms"],
+        "tpot_p90_ms": m["p90_tpot_ms"], "tpot_p99_ms": m["p99_tpot_ms"],
+        "latency_p50_ms": m["p50_ms"], "latency_p90_ms": m["p90_ms"],
+        "latency_p95_ms": m["p95_ms"], "latency_p99_ms": m["p99_ms"],
+        "num_requests": m["num_requests"],
+        "total_input_tokens": m["total_input_tokens"],
+        "total_output_tokens": m["total_output_tokens"],
+        "total_time_s": m["total_time_s"],
+        "cache_hit_rate": m.get("cache_hit_rate", 0.0),
+        "attn_proj_pct": m.get("attn_proj_pct", 0.0),
+        "ffn_proj_pct": m.get("ffn_proj_pct", 0.0),
+        "attn_prefill_pct": m.get("attn_prefill_pct", 0.0),
+        "attn_decode_pct": m.get("attn_decode_pct", 0.0),
+        "fused_add_norm_pct": m.get("fused_add_norm_pct", 0.0),
+        "swiglu_pct": m.get("swiglu_pct", 0.0),
+        "rope_pct": m.get("rope_pct", 0.0),
+        "lm_head_pct": m.get("lm_head_pct", 0.0),
+        "all_reduce_pct": m.get("all_reduce_pct", 0.0),
+        "inter_stage_comm_pct": m.get("inter_stage_comm_pct", 0.0),
+        "kv_transfer_pct": m.get("kv_transfer_pct", 0.0),
+        "swap_pct": m.get("swap_pct", 0.0),
+        "score": entry["score"],
+        "elapsed_s": entry["elapsed"],
+    }
+
+
 def export_csv(results: list[dict], path: str) -> None:
-    """Export results to CSV with strategy_type, batch, and thr as separate columns."""
+    """Export results to CSV (overwrites), plus scalability artifacts."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
-    fieldnames = [
-        "strategy_type",
-        "batch",
-        "thr",
-        "throughput_tok_s",
-        "input_throughput_tok_s",
-        "output_throughput_tok_s",
-        "total_throughput_tok_s",
-        "ttft_mean_ms", "ttft_p50_ms", "ttft_p90_ms", "ttft_p99_ms",
-        "tpot_mean_ms", "tpot_p50_ms", "tpot_p90_ms", "tpot_p99_ms",
-        "latency_p50_ms", "latency_p90_ms", "latency_p95_ms", "latency_p99_ms",
-        "num_requests",
-        "total_input_tokens",
-        "total_output_tokens",
-        "total_time_s",
-        "cache_hit_rate",
-        "attn_proj_pct", "ffn_proj_pct",
-        "attn_prefill_pct", "attn_decode_pct",
-        "fused_add_norm_pct", "swiglu_pct", "rope_pct",
-        "lm_head_pct",
-        "all_reduce_pct", "inter_stage_comm_pct",
-        "kv_transfer_pct", "swap_pct",
-        "score",
-        "elapsed_s",
-    ]
-
-    rows = []
-    for entry in results:
-        m = entry["metrics_raw"]
-        strategy_type, batch, thr = _parse_label(entry["label"])
-        rows.append({
-            "strategy_type": strategy_type,
-            "batch": batch,
-            "thr": thr,
-            "throughput_tok_s": m["throughput"],
-            "input_throughput_tok_s": m["input_throughput"],
-            "output_throughput_tok_s": m["output_throughput"],
-            "total_throughput_tok_s": m["total_throughput"],
-            "ttft_mean_ms": m["mean_ttft_ms"], "ttft_p50_ms": m["p50_ttft_ms"],
-            "ttft_p90_ms": m["p90_ttft_ms"], "ttft_p99_ms": m["p99_ttft_ms"],
-            "tpot_mean_ms": m["mean_tpot_ms"], "tpot_p50_ms": m["p50_tpot_ms"],
-            "tpot_p90_ms": m["p90_tpot_ms"], "tpot_p99_ms": m["p99_tpot_ms"],
-            "latency_p50_ms": m["p50_ms"], "latency_p90_ms": m["p90_ms"],
-            "latency_p95_ms": m["p95_ms"], "latency_p99_ms": m["p99_ms"],
-            "num_requests": m["num_requests"],
-            "total_input_tokens": m["total_input_tokens"],
-            "total_output_tokens": m["total_output_tokens"],
-            "total_time_s": m["total_time_s"],
-            "cache_hit_rate": m.get("cache_hit_rate", 0.0),
-            "attn_proj_pct": m.get("attn_proj_pct", 0.0),
-            "ffn_proj_pct": m.get("ffn_proj_pct", 0.0),
-            "attn_prefill_pct": m.get("attn_prefill_pct", 0.0),
-            "attn_decode_pct": m.get("attn_decode_pct", 0.0),
-            "fused_add_norm_pct": m.get("fused_add_norm_pct", 0.0),
-            "swiglu_pct": m.get("swiglu_pct", 0.0),
-            "rope_pct": m.get("rope_pct", 0.0),
-            "lm_head_pct": m.get("lm_head_pct", 0.0),
-            "all_reduce_pct": m.get("all_reduce_pct", 0.0),
-            "inter_stage_comm_pct": m.get("inter_stage_comm_pct", 0.0),
-            "kv_transfer_pct": m.get("kv_transfer_pct", 0.0),
-            "swap_pct": m.get("swap_pct", 0.0),
-            "score": entry["score"],
-            "elapsed_s": entry["elapsed"],
-        })
+    rows = [flatten_result(r) for r in results]
 
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=SEARCH_FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
     print(f"Results exported to: {path}")

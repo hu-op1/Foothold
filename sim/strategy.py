@@ -1,11 +1,12 @@
 """Grid search over colocated and disaggregated strategy parameters.
 
-Checkpoint/resume: each completed strategy is appended as one JSON line to a
-checkpoint file (`.jsonl`).  On restart the file is read and matching labels are
-skipped so only unfinished strategies run.
+Checkpoint/resume: each completed strategy is appended immediately to the output
+CSV.  On restart completed rows are read back and matching labels are skipped so
+only unfinished strategies run.
 """
 
 import copy
+import csv
 import json
 import os
 import time
@@ -15,58 +16,95 @@ from tqdm import tqdm
 
 from sim.engine import SimulationEngine
 from sim.config import valid_tp_sizes, valid_pp_sizes, total_vram_gb
+from sim.report import SEARCH_FIELDNAMES, flatten_result
 
 
-# ── checkpoint helpers ──────────────────────────────────────────────────────
+# ── checkpoint helpers (CSV-based) ──────────────────────────────────────────
 
-def _checkpoint_path(cfg: dict) -> str:
-    """Derive the checkpoint file path from the output csv path."""
-    out = str(cfg.get("output", "sim/output/results.csv"))
-    base, _ = os.path.splitext(out)
-    return base + ".checkpoint.jsonl"
+def _load_completed_labels(csv_path: str) -> set[str]:
+    """Read output CSV and return set of completed strategy labels.
 
-
-def _load_completed_labels(ckpt_path: str) -> set[str]:
-    """Return the set of already-completed strategy labels from a JSONL file."""
-    if not os.path.exists(ckpt_path):
+    Reconstructs the full label from strategy_type + batch + thr columns
+    so it matches the task labels built by _search_one.
+    """
+    if not os.path.exists(csv_path):
         return set()
     labels = set()
-    with open(ckpt_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                r = json.loads(line)
-                labels.add(r["label"])
-            except json.JSONDecodeError:
-                continue
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                st = row.get("strategy_type", "")
+                batch = row.get("batch", "")
+                thr = row.get("thr", "")
+                if st:
+                    labels.add(f"{st} (batch={batch}, thr={thr})")
+    except Exception:
+        pass
     return labels
 
 
-def _append_checkpoint(ckpt_path: str, result: dict) -> None:
-    """Append one result dict as a JSON line to the checkpoint file."""
-    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
-    with open(ckpt_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(result, ensure_ascii=False) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
+def _append_csv(csv_path: str, result: dict) -> None:
+    """Flatten and append one search result to the output CSV."""
+    from bench.utils import append_csv_row
+    row = flatten_result(result)
+    append_csv_row(csv_path, SEARCH_FIELDNAMES, row)
 
 
-def _load_all_from_checkpoint(ckpt_path: str) -> list[dict]:
-    """Load all completed results from a JSONL checkpoint file."""
+def _load_results_from_csv(csv_path: str) -> list[dict]:
+    """Read output CSV and reconstruct result dicts for merge."""
     results = []
-    if not os.path.exists(ckpt_path):
+    if not os.path.exists(csv_path):
         return results
-    with open(ckpt_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                results.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                m = {
+                    "throughput": float(row.get("throughput_tok_s", 0)),
+                    "input_throughput": float(row.get("input_throughput_tok_s", 0)),
+                    "output_throughput": float(row.get("output_throughput_tok_s", 0)),
+                    "total_throughput": float(row.get("total_throughput_tok_s", 0)),
+                    "mean_ttft_ms": float(row.get("ttft_mean_ms", 0)),
+                    "p50_ttft_ms": float(row.get("ttft_p50_ms", 0)),
+                    "p90_ttft_ms": float(row.get("ttft_p90_ms", 0)),
+                    "p99_ttft_ms": float(row.get("ttft_p99_ms", 0)),
+                    "mean_tpot_ms": float(row.get("tpot_mean_ms", 0)),
+                    "p50_tpot_ms": float(row.get("tpot_p50_ms", 0)),
+                    "p90_tpot_ms": float(row.get("tpot_p90_ms", 0)),
+                    "p99_tpot_ms": float(row.get("tpot_p99_ms", 0)),
+                    "p50_ms": float(row.get("latency_p50_ms", 0)),
+                    "p90_ms": float(row.get("latency_p90_ms", 0)),
+                    "p95_ms": float(row.get("latency_p95_ms", 0)),
+                    "p99_ms": float(row.get("latency_p99_ms", 0)),
+                    "num_requests": int(float(row.get("num_requests", 0))),
+                    "total_input_tokens": int(float(row.get("total_input_tokens", 0))),
+                    "total_output_tokens": int(float(row.get("total_output_tokens", 0))),
+                    "total_time_s": float(row.get("total_time_s", 0)),
+                    "cache_hit_rate": float(row.get("cache_hit_rate", 0)),
+                    "attn_proj_pct": float(row.get("attn_proj_pct", 0)),
+                    "ffn_proj_pct": float(row.get("ffn_proj_pct", 0)),
+                    "attn_prefill_pct": float(row.get("attn_prefill_pct", 0)),
+                    "attn_decode_pct": float(row.get("attn_decode_pct", 0)),
+                    "fused_add_norm_pct": float(row.get("fused_add_norm_pct", 0)),
+                    "swiglu_pct": float(row.get("swiglu_pct", 0)),
+                    "rope_pct": float(row.get("rope_pct", 0)),
+                    "lm_head_pct": float(row.get("lm_head_pct", 0)),
+                    "all_reduce_pct": float(row.get("all_reduce_pct", 0)),
+                    "inter_stage_comm_pct": float(row.get("inter_stage_comm_pct", 0)),
+                    "kv_transfer_pct": float(row.get("kv_transfer_pct", 0)),
+                    "swap_pct": float(row.get("swap_pct", 0)),
+                }
+                st = row.get("strategy_type", "")
+                batch = row.get("batch", "")
+                thr = row.get("thr", "")
+                results.append({
+                    "label": f"{st} (batch={batch}, thr={thr})",
+                    "metrics_raw": m,
+                    "score": float(row.get("score", 0)),
+                    "elapsed": float(row.get("elapsed_s", 0)),
+                })
+    except Exception:
+        pass
     return results
 
 
@@ -268,9 +306,9 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
                                         "mode_label": "disaggregated",
                                     })
 
-    # ── checkpoint: skip already-finished strategies ─────────────────────
-    ckpt_path = _checkpoint_path(cfg)
-    completed_labels = _load_completed_labels(ckpt_path)
+    # ── checkpoint: skip already-finished strategies (read from output CSV) ──
+    out_path = str(cfg.get("output", "sim/output/results.csv"))
+    completed_labels = _load_completed_labels(out_path)
     pending = [t for t in tasks if t["label"] not in completed_labels]
     skipped = len(tasks) - len(pending)
 
@@ -295,7 +333,7 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
                     for future in as_completed(futures):
                         r = future.result()
                         results.append(r)
-                        _append_checkpoint(ckpt_path, r)
+                        _append_csv(out_path, r)
                         pbar.update(1)
         else:
             for t in tqdm(pending, desc="  Searching", unit="strat",
@@ -303,11 +341,11 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
                                      "{n_fmt}/{total_fmt} [{elapsed}<{remaining}]"):
                 r = _run_one(t, requests, model_spec, hw_params, slo)
                 results.append(r)
-                _append_checkpoint(ckpt_path, r)
+                _append_csv(out_path, r)
 
     # Merge with previously-checkpointed results for the final sorted list
     if skipped:
-        prev_results = _load_all_from_checkpoint(ckpt_path)
+        prev_results = _load_results_from_csv(out_path)
         # Deduplicate by label (keep the freshly-computed copy when overlap exists)
         seen = {r["label"] for r in results}
         for pr in prev_results:
