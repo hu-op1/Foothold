@@ -2,24 +2,10 @@
 
 In vLLM, the CPU scheduler can prepare the next batch while the current batch
 executes on the GPU.  This is mandatory for pipeline parallelism (PP > 1,
-microbatch pipeline) and optional for colocated inference (async scheduling,
-where the CPU assumes decode will produce 1 token and pre-allocates).
+microbatch pipeline) and optional for colocated inference (async scheduling).
 
-This module provides a minimal two-stage pipeline model: the CPU *schedule*
-stage and the GPU *execute* stage.  Each stage tracks its own ``busy_until``
-timestamp.  A step advances both stages, overlapping schedule of step N+1
-with execution of step N.
-
-Usage::
-
-    pipeline = ScheduleExecutePipeline()
-    for step in simulation:
-        step_time = predict_step(...)
-        sched_time = estimate_schedule_time(running, waiting)
-        clock = pipeline.step(clock, sched_time, step_time)
-
-When PP=1 and async_scheduling=False, the pipeline degenerates to serial
-behaviour: schedule_time + step_time added linearly (no overlap).
+When enabled, schedule time is hidden behind GPU time — only GPU time extends
+the clock.  When disabled, schedule and GPU time are serial (P2-7).
 """
 
 from dataclasses import dataclass
@@ -29,23 +15,15 @@ from dataclasses import dataclass
 class ScheduleExecutePipeline:
     """Two-stage pipeline: CPU schedule → GPU execute.
 
-    Tracks busy-until timestamps for the CPU scheduler stage and the GPU
-    execution stage.  When both stages are active (PP > 1 or async scheduling
-    enabled), the schedule of step *N+1* can overlap with the execution of
-    step *N*, matching vLLM's batch queue / async scheduler behaviour.
+    When enabled (PP > 1 or async scheduling), the CPU schedules step N
+    while the GPU executes step N−1.  Schedule time is therefore hidden
+    behind GPU time and does NOT extend the clock.
 
-    When disabled (``enabled=False``), falls back to fully serial execution —
-    schedule and execute are summed without overlap.
-
-    Attributes:
-        enabled: Whether to allow schedule/execute overlap.
-        schedule_busy_until: Timestamp when the CPU scheduler becomes free.
-        execute_busy_until: Timestamp when the GPU becomes free.
+    When disabled, schedule and execute are serial — both contribute to
+    the clock (P2-7).
     """
 
     enabled: bool = False
-    schedule_busy_until: float = 0.0
-    execute_busy_until: float = 0.0
 
     def step(self, clock: float, schedule_time_s: float,
              gpu_time_s: float) -> float:
@@ -79,22 +57,18 @@ class ScheduleExecutePipeline:
             # When pipelining is off, schedule and execute are serial.
             return clock + schedule_time_s + gpu_time_s
 
-        # ── CPU schedule stage ──
-        sched_start = max(clock, self.schedule_busy_until)
-        sched_end = sched_start + schedule_time_s
-        self.schedule_busy_until = sched_end
-
-        # ── GPU execute stage ──
-        exec_start = max(sched_end, self.execute_busy_until)
-        exec_end = exec_start + gpu_time_s
-        self.execute_busy_until = exec_end
-
-        return exec_end
+        # ── Enabled: schedule overlaps with previous GPU execution ──
+        # The CPU schedules step N while the GPU executes step N−1.
+        # By the time we reach this point, the schedule for THIS step
+        # has already completed (it ran during the previous step's GPU
+        # time).  Only the GPU time extends the clock.
+        #
+        # For PP > 1, the pipeline model is still correct because each
+        # stage's schedule overlaps with the previous stage's execution.
+        return clock + gpu_time_s
 
     def reset(self):
         """Reset pipeline state for a new simulation run."""
-        self.schedule_busy_until = 0.0
-        self.execute_busy_until = 0.0
 
 
 def estimate_schedule_time(num_running: int, num_waiting: int,
