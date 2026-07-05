@@ -271,81 +271,89 @@ class ColocatedScheduler:
                         self.skipped_waiting.add(request)
                     continue
 
-                    # Swapped-out request: restore blocks from CPU
-                    if self.pool.is_swapped(request.request_id):
-                        t_swap = self.pool.swap_in(request, self.block_size)
-                        if t_swap == float("inf"):
-                            # Not enough free blocks — wait for next step
-                            break
-                        output.swap_time += t_swap
+                # Swapped-out request: restore blocks from CPU
+                if self.pool.is_swapped(request.request_id):
+                    t_swap = self.pool.swap_in(request, self.block_size)
+                    if t_swap == float("inf"):
+                        # Not enough free blocks — wait for next step
+                        break
+                    output.swap_time += t_swap
 
-                    # Prefix cache hit
-                    cached_blocks, num_cached_blocks = self.pool.get_computed_blocks(
-                        request.block_hashes
-                    )
-                    cache_touched = False
-                    if num_cached_blocks > 0:
-                        num_cached_tokens = num_cached_blocks * self.block_size
-                        request.num_computed_tokens = num_cached_tokens
-                        request.is_prefill_chunk = request.num_computed_tokens < request.num_tokens_with_spec
-                        self.pool.touch(cached_blocks)
-                        cache_touched = True
+                # Prefix cache hit
+                cached_blocks, num_cached_blocks = self.pool.get_computed_blocks(
+                    request.block_hashes
+                )
+                cache_touched = False
+                if num_cached_blocks > 0:
+                    num_cached_tokens = num_cached_blocks * self.block_size
+                    request.num_computed_tokens = num_cached_tokens
+                    request.is_prefill_chunk = request.num_computed_tokens < request.num_tokens_with_spec
+                    self.pool.touch(cached_blocks)
+                    cache_touched = True
+                    for bid in cached_blocks:
+                        if bid not in request.block_table:
+                            request.block_table.append(bid)
+
+                num_new = request.num_tokens - request.num_computed_tokens
+                if self.long_prefill_token_threshold > 0:
+                    num_new = min(num_new, self.long_prefill_token_threshold)
+
+                if not self.enable_chunked_prefill and num_new > token_budget:
+                    if cache_touched:
+                        self.pool.free_blocks(cached_blocks)
+                    break
+
+                num_new = min(num_new, token_budget)
+                if num_new <= 0:
+                    # Decode request from disaggregated P→D transfer:
+                    # prefill already done, need to generate 1 token
+                    if not request.is_prefill_chunk:
+                        num_new = 1
+                    else:
+                        queue.pop()
+                        if queue is self.waiting:
+                            self.skipped_waiting.add(request)
+                        continue
+
+                # ── Full-sequence KV cache gate ──
+                # When chunked prefill is enabled, vLLM checks that the
+                # ENTIRE input sequence can fit in the remaining KV cache
+                # before admitting the first chunk.  Without this gate,
+                # the simulator would admit the first chunk and then
+                # repeatedly preempt as subsequent chunks run OOM.
+                if (self.reserve_full_isl and self.enable_chunked_prefill
+                        and request.num_computed_tokens == 0
+                        and request.prompt_len > 0):
+                    total_blocks_needed = (
+                        request.num_prompt_tokens + self.block_size - 1
+                    ) // self.block_size
+                    # If the request needs more blocks than the entire pool,
+                    # it can never be admitted — skip it to avoid deadlock.
+                    if total_blocks_needed > self.pool.num_blocks:
+                        queue.pop()
+                        request.status = RequestStatus.FINISHED_ABORTED
+                        request.finish_reason = FinishReason.ABORT
+                        request.finish_time = self.pool.clock
+                        continue
+                    if total_blocks_needed > self.pool.get_num_free_blocks():
+                        # Not enough room for full sequence — wait
+                        break
+
+                new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
+                if new_blocks is None:
+                    if cache_touched:
+                        self.pool.free_blocks(cached_blocks)
+                        # Undo block_table append
                         for bid in cached_blocks:
-                            if bid not in request.block_table:
-                                request.block_table.append(bid)
+                            if bid in request.block_table:
+                                request.block_table.remove(bid)
+                    break
 
-                    num_new = request.num_tokens - request.num_computed_tokens
-                    if self.long_prefill_token_threshold > 0:
-                        num_new = min(num_new, self.long_prefill_token_threshold)
-
-                    if not self.enable_chunked_prefill and num_new > token_budget:
-                        if cache_touched:
-                            self.pool.free_blocks(cached_blocks)
-                        break
-
-                    num_new = min(num_new, token_budget)
-                    if num_new <= 0:
-                        # Decode request from disaggregated P→D transfer:
-                        # prefill already done, need to generate 1 token
-                        if not request.is_prefill_chunk:
-                            num_new = 1
-                        else:
-                            queue.pop()
-                            if queue is self.waiting:
-                                self.skipped_waiting.add(request)
-                            continue
-
-                    # ── Full-sequence KV cache gate ──
-                    # When chunked prefill is enabled, vLLM checks that the
-                    # ENTIRE input sequence can fit in the remaining KV cache
-                    # before admitting the first chunk.  Without this gate,
-                    # the simulator would admit the first chunk and then
-                    # repeatedly preempt as subsequent chunks run OOM.
-                    if (self.reserve_full_isl and self.enable_chunked_prefill
-                            and request.num_computed_tokens == 0
-                            and request.prompt_len > 0):
-                        total_blocks_needed = (
-                            request.num_prompt_tokens + self.block_size - 1
-                        ) // self.block_size
-                        if total_blocks_needed > self.pool.get_num_free_blocks():
-                            # Not enough room for full sequence — wait
-                            break
-
-                    new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
-                    if new_blocks is None:
-                        if cache_touched:
-                            self.pool.free_blocks(cached_blocks)
-                            # Undo block_table append
-                            for bid in cached_blocks:
-                                if bid in request.block_table:
-                                    request.block_table.remove(bid)
-                        break
-
-                    queue.pop()
-                    output.scheduled_new_reqs.append((request, num_new, new_blocks))
-                    token_budget -= num_new
-                    request.status = RequestStatus.RUNNING
-                    self.running.append(request)
+                queue.pop()
+                output.scheduled_new_reqs.append((request, num_new, new_blocks))
+                token_budget -= num_new
+                request.status = RequestStatus.RUNNING
+                self.running.append(request)
 
         output.total_num_scheduled_tokens = sum(
             nt for _, nt, _ in output.scheduled_requests

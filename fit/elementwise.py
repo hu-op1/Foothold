@@ -28,6 +28,7 @@ PROXY = {
     "causal_mask": "residual_add",        # simple add pattern
     "rope": "residual_add",               # single fused in-place kernel
     "rmsnorm": "residual_add",            # per-token norm, not global reduction
+    "fused_residual_norm": "residual_add",  # fused residual + norm, not separately benchmarked
 }
 
 # Ops that have reliable direct benchmarks — fit independently.

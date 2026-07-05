@@ -19,12 +19,22 @@ Covers:
 """
 
 import os
+import sys
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 from bench.utils import (warmup, benchmark, auto_warmup_iters, check_memory,
                          supports_float8_matmul, make_float8_tensor,
                          load_completed_keys, append_csv_row, CudaTimer)
-from flash_attn import flash_attn_func
+
+# flash_attn is Linux + CUDA only; fall back to torch SDPA on Windows / CPU.
+try:
+    from flash_attn import flash_attn_func
+    _HAS_FLASH_ATTN = True
+except ModuleNotFoundError:
+    flash_attn_func = None
+    _HAS_FLASH_ATTN = False
+    print("[flash_attn] flash_attn 未安装，回退至 torch SDPA（Windows/CPU 兼容）", file=sys.stderr)
 
 DTYPE_BYTES_MAP = {
     "float16": 2, "bfloat16": 2,
@@ -417,8 +427,15 @@ def bench_cudagraph_flashattn(config, output_path="results/cudagraph_flashattn.c
             def setup():
                 return (q, k, v), {}
 
-            def forward(q_t, k_t, v_t):
-                flash_attn_func(q_t, k_t, v_t, causal=True)
+            if _HAS_FLASH_ATTN:
+                def forward(q_t, k_t, v_t):
+                    flash_attn_func(q_t, k_t, v_t, causal=True)
+            else:
+                def forward(q_t, k_t, v_t):
+                    F.scaled_dot_product_attention(
+                        q_t.transpose(1, 2), k_t.transpose(1, 2), v_t.transpose(1, 2),
+                        is_causal=True,
+                    )
 
             if warmup_cfg == "auto":
                 wu = auto_warmup_iters(lambda: forward(*setup()[0], **setup()[1]),

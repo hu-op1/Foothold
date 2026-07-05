@@ -23,8 +23,8 @@ simulation:
   enable_chunked_prefill: true
   long_prefill_token_threshold: 2048
   scheduling_policy: fcfs
-  use_cudagraph: false  # set true after running cudagraph bench+fit
-  async_scheduling: false  # enable schedule/execute overlap (auto-enabled for PP>1)
+  use_cudagraph: true  # set true after running cudagraph bench+fit
+  async_scheduling: true  # enable schedule/execute overlap (auto-enabled for PP>1)
   scheduler_reserve_full_isl: true  # gate: full prompt must fit KV cache before first chunk
 
 strategy:

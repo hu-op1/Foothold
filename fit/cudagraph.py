@@ -18,6 +18,7 @@ Output keys are namespaced with ``_cudagraph`` suffix, e.g.:
 
 import numpy as np
 from fit.utils import roofline_fit
+from fit.elementwise import PROXY  # share proxy map with eager fit
 
 M_SPLIT = 256
 S_Q_SPLIT = 1
@@ -156,6 +157,16 @@ def _fit_cg_elem_dtype(elem_results, label_suffix=""):
 
         print(f"  {op_name}{label_suffix}: B_eff={b_effs[op_name]/1e9:.2f} GB/s  "
               f"overhead={overheads[op_name]*1e6:.1f} us")
+
+    # Apply proxy mapping for unbenchmarked ops (matches fit/elementwise.py).
+    # CUDA Graph benchmarks only cover residual_add, rmsnorm, rope, swiglu;
+    # ops like fused_residual_norm, layernorm, causal_mask, softmax inherit
+    # from their semantically closest proxy for graph-replay mode too.
+    for op, proxy in PROXY.items():
+        if proxy in b_effs and op not in b_effs:
+            b_effs[op] = b_effs[proxy]
+            overheads[op] = overheads[proxy]
+            print(f"  {op}{label_suffix}: → proxied to {proxy} (CUDA Graph)")
 
     params = {
         f"elem_b_effs_cudagraph{label_suffix}": b_effs,

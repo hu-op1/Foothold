@@ -194,7 +194,12 @@ def fused_residual_norm_ops(b, s, h, b_effs, overheads, dt_bytes=None):
     if "fused_residual_norm" in b_effs:
         N = b * s * h
         return 2 * elem_time("fused_residual_norm", N, b_effs, overheads, dt_bytes)
-    # Fallback: separate residual_add + rmsnorm (backward compatible)
-    print("  [fallback] fused_residual_norm data not found, using separate residual_add + rmsnorm")
+    # Fallback: separate residual_add + rmsnorm (backward compatible).
+    # Print once per process to avoid log spam in multi-step simulations.
+    if not getattr(fused_residual_norm_ops, "_warned", False):
+        import sys
+        print("  [fallback] fused_residual_norm data not found, "
+              "using separate residual_add + rmsnorm", file=sys.stderr)
+        fused_residual_norm_ops._warned = True
     return (residual_add_ops(b, s, h, b_effs, overheads, dt_bytes)
             + norm_ops(b, s, h, "rmsnorm", b_effs, overheads, dt_bytes))

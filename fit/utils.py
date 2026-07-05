@@ -33,7 +33,7 @@ def load_results(path):
         reader = csv.DictReader(f)
         for d in reader:
             val = d.get("time_ms")
-            if val is None or val == "OOM":
+            if val == "OOM":
                 continue
             # Coerce all fields so int/floats compare correctly
             d = {k: _coerce_value(v) for k, v in d.items()}

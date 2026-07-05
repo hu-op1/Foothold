@@ -13,10 +13,20 @@ platforms (Windows, CPU).
 
 import os
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 from bench.utils import (warmup, benchmark, auto_warmup_iters, check_memory,
                          load_completed_keys, append_csv_row)
-from flash_attn import flash_attn_func
+
+# flash_attn is Linux + CUDA only; fall back to torch SDPA on Windows / CPU.
+try:
+    from flash_attn import flash_attn_func
+    _HAS_FLASH_ATTN = True
+except ModuleNotFoundError:
+    flash_attn_func = None
+    _HAS_FLASH_ATTN = False
+    import sys
+    print("[flash_attn] flash_attn 未安装，回退至 torch SDPA（Windows/CPU 兼容）", file=sys.stderr)
 
 
 # Bytes per element for each dtype.
@@ -67,7 +77,7 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
     nh_kv = fa_cfg.get("num_kv_heads", 8)
     hd = fa_cfg.get("head_dim", 128)
 
-    print("FlashAttn backend: flash_attn (native)")
+    print(f"FlashAttn backend: {'flash_attn (native)' if _HAS_FLASH_ATTN else 'torch SDPA (fallback)'}")
     print(f"FlashAttn dtypes: {dtypes}")
     print(f"FlashAttn batch sizes: {batch_list}")
 
@@ -91,7 +101,7 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
         # dedicated Hopper kernels (cuDNN/cuBLAS) is a different codepath.
         is_float8 = dt_name in ("float8_e4m3fn", "float8_e5m2")
         if is_float8:
-            print(f"\n  [skip] float8 FlashAttn: flash_attn does not support float8")
+            print(f"\n  [skip] float8 FlashAttn: not supported for float8")
             continue
 
         combos = [(b_val, sq, skv) for b_val in batch_list
@@ -118,13 +128,22 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
                 done_keys.add(key)
                 continue
 
-            # Create tensors — flash_attn / SDPA expect (batch, seqlen, nheads, hd)
+            # Create tensors in (batch, seqlen, nheads, hd) — flash_attn format.
+            # SDPA expects (batch, nheads, seqlen, hd); we transpose on the fly.
             q = torch.randn(b_val, s_q, nh, hd, dtype=dtype, device=device)
             k = torch.randn(b_val, s_kv, nh_kv, hd, dtype=dtype, device=device)
             v = torch.randn(b_val, s_kv, nh_kv, hd, dtype=dtype, device=device)
 
-            def fa_fn(q=q, k=k, v=v):
-                flash_attn_func(q, k, v, causal=True)
+            if _HAS_FLASH_ATTN:
+                def fa_fn(q=q, k=k, v=v):
+                    flash_attn_func(q, k, v, causal=True)
+            else:
+                # SDPA fallback: (N, S, H, D) → (N, H, S, D).
+                def fa_fn(q=q, k=k, v=v):
+                    F.scaled_dot_product_attention(
+                        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+                        is_causal=True,
+                    )
 
             if warmup_cfg == "auto":
                 wu = auto_warmup_iters(fa_fn, bench_min_time, bench_max_iters,
