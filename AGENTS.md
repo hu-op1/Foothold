@@ -13,11 +13,12 @@ AI coding agent guidance for this repository. See [CLAUDE.md](CLAUDE.md) for ful
 
 - **`main.py` is the only CLI entry point** — subcommands: `bench`, `fit`, `search`, `sim`, `validate`
 - Config files by stage: `config/bench.yaml` (bench/fit), `config/search.yaml` (search), `config/sim.yaml` (sim)
-- Results saved as `.xlsx` via `openpyxl` (not CSV)
+- Results saved as CSV (`bench/results/<gpu>/`, `sim/output/`) or JSON (`fit/results/<gpu>.json`)
 - Use `pathlib.Path` for filesystem paths (some legacy uses of `os.path` exist in `main.py` and `bench/`)
 - Use `torch.cuda.Event` for GPU timing — see `CudaTimer`, `warmup()`, `benchmark()` in `bench/utils.py:8`
 - Call `check_memory()` before allocating large tensors to avoid OOM
-- Model specs auto-discovered from `models/<vendor>/<family>/<model>/config.json` (HF format). YAML fallback at `config/model_specs.yaml`
+- Model specs loaded from **HuggingFace Hub** via `transformers.AutoConfig.from_pretrained()` — no local `config.json` files needed. Any HF model ID works in YAML configs.
+- Trace format: `sharegpt` (one JSONL line per request) or `agentic` (session chains with sub-requests, `tool_duration`)
 
 ## External repos (standalone — not part of this project, do not modify or import)
 
@@ -32,6 +33,19 @@ uv run python test/<script>.py               # standalone scripts (analyze.py, e
 ```
 All tests require a CUDA GPU and benchmark/fit result data.
 
+## Module-specific instructions
+
+Granular instruction files live in `.github/instructions/` — auto-attached when editing files in the matching module:
+
+| File | Applies To | What It Covers |
+|------|-----------|----------------|
+| `.github/instructions/bench.instructions.md` | `bench/**/*.py` | CUDA timing, checkpoint/resume, OOM handling, benchmark conventions |
+| `.github/instructions/fit.instructions.md` | `fit/**/*.py` | Roofline fitting, matmul prefill/decode split, elementwise proxy map |
+| `.github/instructions/sim.instructions.md` | `sim/**/*.py` | Event-driven engine, scheduler, executor, memory pool, request lifecycle |
+| `.github/instructions/config.instructions.md` | `config/*.yaml` | Config schemas, model spec loading, common pitfalls |
+| `.github/instructions/test.instructions.md` | `test/**/*.py` | Pytest conventions, fixtures, trace generation, sim test patterns |
+
 ## Design docs
 
-`docs/architecture.md` — comprehensive Chinese-language architecture doc.
+- `docs/vllm-simulator-gaps.md` — vLLM v0.19.0 vs simulator gap analysis (CUDA Graph, kernel launch overhead, async scheduling, etc.)
+- `docs/accuracy-improvements.md` — Simulation accuracy improvement tracking & regression log

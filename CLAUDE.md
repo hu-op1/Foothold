@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 LLM inference performance toolchain: **GPU characterization → Roofline fitting → PD disaggregation simulation**.
 
 ```
-config/bench.yaml  →  bench/   →  bench/results/<gpu>/*.xlsx
+config/bench.yaml  →  bench/   →  bench/results/<gpu>/*.csv
                                 │                           │
                                 ▼                           │
 config/bench.yaml  →  fit/  →  fit/results/<gpu>.json     │
@@ -45,6 +45,9 @@ uv run python main.py sim                          # Single simulation from conf
 uv run python main.py --sim                        # Legacy flag form
 uv run python main.py --search                     # Legacy flag form
 
+# Visualization (stage 4)
+uv run python main.py validate -o <out>             # Visualize sim output (CDF, throughput, compare)
+
 # Tests
 uv run python -m pytest test/                        # All tests
 uv run python -m pytest test/test_sim.py -v       # PD sim tests verbose
@@ -58,17 +61,20 @@ Model architecture specs are loaded from HuggingFace Hub via `transformers.AutoC
 
 - `sim/config.py` — `load_model_spec(model_name)` calls `AutoConfig`, maps fields (`hidden_size` → `hidden_dim`, `num_attention_heads` → `num_heads`, etc.) to the internal model_spec dict format. `_compute_params()` derives `total_params_b` from architecture dimensions.
 - Key handling: GQA (`num_key_value_heads < num_attention_heads` → `num_kv_heads`), Qwen3.5 nested `text_config`, `layer_types` → `attn_layers` for hybrid architectures.
-- See [docs/architecture.md](docs/architecture.md) §1 for complete field mapping.
+- See [docs/architecture.md](docs/architecture.md) §1 for complete field mapping. (This file is a work-in-progress; for now refer to `sim/config.py:load_model_spec()` for details.)
 
 ### Stage 1: `bench/` — GPU kernel microbenchmarks
 
 Two benchmark categories, not per-operator. Every shape iterates the Cartesian product from config, guards against OOM via `check_memory()`, warms up, then measures with `CudaTimer`.
 
-- `bench/utils.py` — `CudaTimer` (CUDA event-based timing), `warmup()`, `benchmark()`, `save_xlsx()`, `check_memory()`
+- `bench/utils.py` — `CudaTimer` (CUDA event-based timing), `warmup()`, `benchmark()`, `save_csv()`, `check_memory()`
 - `bench/matmul.py` — `torch.mm` over M×K×N grid. Covers memory-bound (small M) and compute-bound (large M) regimes. Records flops + bytes per run.
-- `bench/elementwise.py` — residual_add, rmsnorm, softmax over element count N. Validates bandwidth consistency across ops with different arithmetic complexity.
+- `bench/elementwise.py` — residual_add, rmsnorm, softmax, swiglu, rope over element count N
+- `bench/flashattn.py` — `F.scaled_dot_product_attention` over (s_q, s_kv) grid
+- `bench/cudagraph.py` — Each op under CUDA Graph replay (eliminates kernel launch overhead)
+- `bench/launch_overhead.py` — CPU→GPU kernel dispatch latency via slope method
 
-Output: `bench/results/<gpu>/matmul.xlsx`, `elementwise.xlsx`
+Output: `bench/results/<gpu>/matmul.csv`, `elementwise.csv`, `flashattn.csv`, `cudagraph_*.csv`, `launch_overhead.csv`
 
 ### Stage 2: `fit/` — Smooth roofline model fitting
 
@@ -85,23 +91,28 @@ Output: `fit/results/<gpu>.json`
 
 Simulates vLLM-style inference serving with colocated and disaggregated (separate prefill/decode GPU pools) configurations.
 
-- `sim/config.py` — Loads `config/search.yaml` with model-aware defaults: `activation_memory_gb()` computes peak activation from model arch × max_batched_tokens (no longer hardcoded). `valid_tp_sizes()` checks head divisibility + memory constraints. GPU VRAM lookup table for known GPU models.
+- `sim/config.py` — Loads YAML config with model-aware defaults: `load_model_spec()` fetches architecture from HuggingFace Hub via `AutoConfig.from_pretrained()`. `activation_memory_gb()` computes peak activation from model arch × max_batched_tokens. `valid_tp_sizes()` checks head divisibility + memory constraints. GPU VRAM lookup table for known GPU models.
 - `sim/engine.py` — `SimulationEngine` with event-driven loop. Clock advances only when all GPUs are truly idle. Two modes: `_run_colocated` (data-parallel via least-loaded routing) and `_run_disaggregated` (P pool → KV transfer → D pool with swap preemption).
 - `sim/scheduler.py` — vLLM v1 two-phase scheduler: Phase 1 iterates running queue (decode tokens + chunked prefill, OOM handling via preemption or swap), Phase 2 admits from waiting queue with token budget + prefill threshold.
 - `sim/memory.py` — `BlockPool` with PagedAttention block allocation, prefix caching (SHA-256 based), and GPU↔CPU swap support for D-side OOM recovery.
-- `sim/executor.py` — `predict_step()` computes single-step GPU time using roofline. Attention uses **per-request params** (prefill params for prefill chunks, decode params for decode steps). Projections use unified params based on total batch M. `predict_step_tp()` adds all-reduce overhead for tensor parallelism.
-- `sim/trace.py` — Loads JSONL request traces into `Request` objects.
-- `sim/strategy.py` — Grid search over `tp_sizes × max_batched_tokens × prefill_thresholds × pd_ratios × decode_tp_sizes`. Results scored by `throughput × SLO_compliance` and exported to xlsx.
-- `sim/report.py` — xlsx export with per-strategy metrics.
-- `sim/communication.py` — KV transfer cost modeling with overlap.
-- `sim/metrics.py` — TTFT/TPOT/latency distribution tracking.
-- `sim/request.py` — `Request` dataclass with lifecycle state.
+- `sim/executor.py` — `predict_step()` computes single-step GPU time using roofline. Attention uses **per-request params** (prefill params for prefill chunks, decode params for decode steps). Projections use unified params based on total batch M. `predict_step_tp()` adds all-reduce overhead for tensor parallelism. `predict_step_pp()` adds inter-stage communication for pipeline parallelism.
+- `sim/roofline.py` — Core roofline math: `roofline_time()`, `matmul_time()`, `attention_fused()`, `attn_projections()`, `ffn_projections()`, `norm_ops()`, `swiglu_op()`, `rope_op()`.
+- `sim/trace.py` — Loads JSONL request traces (ShareGPT format or agentic format with session chains) into `Request` objects.
+- `sim/strategy.py` — Grid search over `tp_sizes × pp_sizes × max_batched_tokens × prefill_thresholds × pd_ratios`. Results scored by `throughput × SLO_compliance` with CSV checkpoint/resume.
+- `sim/report.py` — Terminal tables, Matplotlib charts, CSV export, scalability CSV export.
+- `sim/communication.py` — KV transfer cost modeling with overlap support.
+- `sim/metrics.py` — TTFT/TPOT/latency distribution tracking (p50/p90/p99, SLO compliance).
+- `sim/request.py` — `Request` dataclass with lifecycle state (`WAITING → RUNNING → FINISHED`). Supports agentic trace sessions.
+- `sim/pipeline.py` — `ScheduleExecutePipeline` for overlapping CPU schedule time with GPU execute time.
+- `sim/recorder.py` — `SimRecorder` for time-series output (`meta.json`, `requests.jsonl`, `timeseries.csv`) compatible with LLMServingSim format.
+- `sim/validate.py` — Comparison charts (CDF, throughput) against LLMServingSim baselines.
+- `sim/run_single.py` — `run_single()` helper that runs one full simulation with recording.
 
-See [docs/architecture.md](docs/architecture.md) §4 for detailed design rationale, DP architecture, swap mechanics, and prefix caching behavior.
+See `docs/vllm-simulator-gaps.md` for vLLM vs simulator gap analysis and `docs/accuracy-improvements.md` for accuracy regression tracking.
 
 ### Entry point: `main.py`
 
-CLI with subcommands: `bench`, `fit`, `search`, `sim`. Also supports legacy `--bench`/`--fit`/`--search` flags for backward compat.
+CLI with subcommands: `bench`, `fit`, `search`, `sim`, `validate`. Also supports legacy `--bench`/`--fit`/`--search` flags for backward compat.
 
 ## Key design decisions
 
