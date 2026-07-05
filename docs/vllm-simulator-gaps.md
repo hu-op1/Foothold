@@ -202,7 +202,11 @@ if victim in [r for r, _, _ in output.scheduled_running_reqs]:
 
 ---
 
-## 🟡 P1-5: `scheduler_reserve_full_isl` 准入门控缺失
+## 🟡 P1-5: `scheduler_reserve_full_isl` 准入门控缺失 ✅
+
+**日期**: 2026-07-05　**分支**: main
+
+**解决方案**: 在 `ColocatedScheduler.__init__` 中新增 `scheduler_reserve_full_isl` 配置参数（默认 `true`）。Phase 2 中，对首次调度的 chunked prefill 请求，在分配 block 之前检查整个 prompt 的 block 数是否 ≤ 空闲 block 数，不足则 `break` 等待——而非先调度第一个 chunk 再反复抢占。
 
 **源码**: `vllm-0.19.0/vllm/v1/core/sched/scheduler.py` L~680-690  
 **相关**: `vllm-0.19.0/vllm/v1/core/kv_cache_manager.py` — `can_fit_full_sequence()` (L~230-260)
@@ -447,7 +451,7 @@ def update_from_output(self, output, clock):
 |------|------|------|-------------|
 | **Phase 1** (立刻) | P0-2 Kernel Launch Overhead + P2-7 Schedule CPU 开销 | ✅ P0-2 已完成，⬜ P2-7 | ~15-30% |
 | **Phase 2** (本周) | P0-1 CUDA Graph 加速因子 | ✅ 已完成 | ~40-60% |
-| **Phase 3** (本周) | P1-4 抢占回退逻辑 + P1-5 准入门控 | ✅ P1-4 已完成，⬜ P1-5 | ~5-10% |
+| **Phase 3** (本周) | P1-4 抢占回退逻辑 + P1-5 准入门控 | ✅ 已完成 | ~5-10% |
 | **Phase 4** (后续) | P2-8 Swap 异步 | ⬜ | ~5-15% |
 | **Phase 5** (按需) | P1-6, P2-7, P2-9, P3-10 | ⬜ | <5% |
 

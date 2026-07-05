@@ -107,6 +107,12 @@ class ColocatedScheduler:
         self.policy = config["simulation"].get("scheduling_policy", SchedulingPolicy.FCFS)
         self.max_model_len = config.get("max_model_len", 131072)
         self.reset_on_preempt = reset_on_preempt
+        # When enabled, a new request's full input sequence must fit in the
+        # remaining KV cache before its first chunk is admitted.  Prevents
+        # admitting a chunk only to repeatedly preempt later.  Matches vLLM's
+        # ``can_fit_full_sequence()`` gate.
+        self.reserve_full_isl = config["simulation"].get(
+            "scheduler_reserve_full_isl", True)
         # Use swap instead of skip when OOM on D-side
         self.use_swap = (not reset_on_preempt
                          and getattr(memory_pool, "cpu_swap_bw", None) is not None)
@@ -278,6 +284,22 @@ class ColocatedScheduler:
                             if queue is self.waiting:
                                 self.skipped_waiting.add(request)
                             continue
+
+                    # ── Full-sequence KV cache gate ──
+                    # When chunked prefill is enabled, vLLM checks that the
+                    # ENTIRE input sequence can fit in the remaining KV cache
+                    # before admitting the first chunk.  Without this gate,
+                    # the simulator would admit the first chunk and then
+                    # repeatedly preempt as subsequent chunks run OOM.
+                    if (self.reserve_full_isl and self.enable_chunked_prefill
+                            and request.num_computed_tokens == 0
+                            and request.prompt_len > 0):
+                        total_blocks_needed = (
+                            request.num_prompt_tokens + self.block_size - 1
+                        ) // self.block_size
+                        if total_blocks_needed > self.pool.get_num_free_blocks():
+                            # Not enough room for full sequence — wait
+                            break
 
                     new_blocks = self.pool.allocate_slots(request, num_new, self.block_size)
                     if new_blocks is None:
