@@ -114,7 +114,7 @@ class SimulationEngine:
         # freeing (tp−1)/tp × weight_gb for additional KV cache.
         if tp_size > 1 or d_tp_size > 1:
             eff_tp = max(tp_size, d_tp_size)
-            total_params = model_spec.get("total_params_b", 0)
+            total_params = self.model.get("total_params_b", 0)
             if total_params > 0:
                 weight_gb = total_params * 2 / 1e9  # float16
                 extra_kv_gb = weight_gb * (eff_tp - 1) / eff_tp
