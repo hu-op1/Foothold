@@ -568,18 +568,25 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     ar_bytes_per_layer = total_new_tokens * h * dt_bytes
     all_reduce_time = (2 * na + (nl - na)) * _ar_time(ar_bytes_per_layer)
 
-    # Scale compute components by 1/tp; inter_stage_comm (PP) is also divided.
-    # launch_overhead is CPU-side dispatch cost — it scales with kernel count,
-    # which is per-GPU (each GPU runs its own set of kernels).  Divide by tp.
+    # Scale compute components by 1/tp.
+    # vLLM source (vllm/model_executor/models/llama.py) confirms:
+    #   SHARDED by TP: QKV, O, gate, up, down, attention, SwiGLU, RoPE, lm_head
+    #   NOT SHARDED:  RMSNorm, residual_add → each GPU computes on FULL hidden_size
+    #   (fused_add_norm combines RMSNorm + residual_add — also NOT sharded)
     result = {}
     compute_total = 0.0
-    for k in ("attn_proj", "ffn_proj", "attn_prefill", "attn_decode",
-              "fused_add_norm", "swiglu", "rope",
-              "lm_head", "inter_stage_comm", "launch_overhead"):
+    TP_SCALED = ("attn_proj", "ffn_proj", "attn_prefill", "attn_decode",
+                 "swiglu", "rope", "lm_head", "inter_stage_comm",
+                 "launch_overhead")
+    for k in TP_SCALED:
         v = base.get(k, 0.0)
         scaled = v / num_gpus
         result[k] = scaled
         compute_total += scaled
+    # fused_add_norm is NOT sharded — each GPU does full work
+    fan = base.get("fused_add_norm", 0.0)
+    result["fused_add_norm"] = fan
+    compute_total += fan
     result["all_reduce"] = all_reduce_time
     result["total"] = compute_total + all_reduce_time
     return result
