@@ -159,7 +159,11 @@ schedule → predict_step → clock += step_time → schedule → ...
 
 ---
 
-## 🟡 P1-4: 抢占时"撤销已调度请求"的回退逻辑缺失
+## 🟡 P1-4: 抢占时"撤销已调度请求"的回退逻辑缺失 ✅
+
+**日期**: 2026-07-05　**分支**: main
+
+**解决方案**: 新增 `_rollback_if_scheduled()` 辅助函数，在 Phase 1 抢占 victim 后检查其是否已在 `scheduled_running_reqs` 中。若已调度则回退：从列表中移除、恢复 `token_budget`、回退 `req_index`。同时适用于 swap 和 recompute 两种抢占路径。
 
 **源码**: `vllm-0.19.0/vllm/v1/core/sched/scheduler.py` L~470-483
 
@@ -443,7 +447,7 @@ def update_from_output(self, output, clock):
 |------|------|------|-------------|
 | **Phase 1** (立刻) | P0-2 Kernel Launch Overhead + P2-7 Schedule CPU 开销 | ✅ P0-2 已完成，⬜ P2-7 | ~15-30% |
 | **Phase 2** (本周) | P0-1 CUDA Graph 加速因子 | ✅ 已完成 | ~40-60% |
-| **Phase 3** (本周) | P0-3 流水线模型 + P1-4 抢占回退逻辑 + P1-5 准入门控 | ✅ P0-3 已完成，⬜ P1-4, P1-5 | ~10-25% |
+| **Phase 3** (本周) | P1-4 抢占回退逻辑 + P1-5 准入门控 | ✅ P1-4 已完成，⬜ P1-5 | ~5-10% |
 | **Phase 4** (后续) | P2-8 Swap 异步 | ⬜ | ~5-15% |
 | **Phase 5** (按需) | P1-6, P2-7, P2-9, P3-10 | ⬜ | <5% |
 

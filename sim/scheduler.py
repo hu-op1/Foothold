@@ -64,6 +64,30 @@ class SchedulerOutput:
         return self.scheduled_running_reqs + self.scheduled_new_reqs
 
 
+def _rollback_if_scheduled(output: SchedulerOutput, victim: Request) -> int:
+    """Remove *victim* from already-scheduled requests and return its token count.
+
+    When a victim is preempted during Phase 1, it may have already been
+    scheduled earlier in the same iteration (i.e., already present in
+    ``output.scheduled_running_reqs``).  vLLM undoes this scheduling:
+    removes the entry and returns the token count so the caller can
+    restore ``token_budget`` and rewind ``req_index``.
+
+    Args:
+        output: Current scheduler output being built.
+        victim: The request being preempted.
+
+    Returns:
+        Number of tokens the victim had consumed from this step's budget
+        (0 if the victim was not yet scheduled).
+    """
+    for i, (r, nt, _blk) in enumerate(output.scheduled_running_reqs):
+        if r is victim:
+            output.scheduled_running_reqs.pop(i)
+            return nt
+    return 0
+
+
 class ColocatedScheduler:
     """Scheduler for colocated (P+D on same GPU) or D-only (disaggregated) deployment.
 
@@ -138,6 +162,14 @@ class ColocatedScheduler:
                     # Its blocks go to CPU memory; num_computed_tokens is preserved
                     # so it can resume later via swap-in without recomputation.
                     victim = self.running[-1]
+
+                    # ── Rollback check: victim may have been scheduled earlier
+                    # in this same Phase 1 iteration ──
+                    victim_nt = _rollback_if_scheduled(output, victim)
+                    if victim_nt > 0:
+                        token_budget += victim_nt
+                        req_index -= 1
+
                     swap_time = self.pool.swap_out(victim, self.block_size)
                     output.swap_time += swap_time
                     victim.status = RequestStatus.PREEMPTED
@@ -160,6 +192,16 @@ class ColocatedScheduler:
                         victim = max(self.running, key=lambda r: (r.priority, r.arrival_time))
                     else:
                         victim = self.running[-1]
+
+                    # ── Rollback check: victim may have been scheduled earlier
+                    # in this same Phase 1 iteration.  vLLM undoes the
+                    # scheduling (removes from scheduled_running_reqs, restores
+                    # token_budget) and rewinds req_index so the current
+                    # position is re-processed after the victim is evicted. ──
+                    victim_nt = _rollback_if_scheduled(output, victim)
+                    if victim_nt > 0:
+                        token_budget += victim_nt
+                        req_index -= 1
 
                     self._preempt(victim)
                     preempted = True
