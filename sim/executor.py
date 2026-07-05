@@ -543,28 +543,30 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     na = model_spec.get("attn_layers", nl)
 
     # ── Per-layer all-reduce data volumes ──
-    # Column-parallel QKV output: [tokens, dim_q + 2·dim_kv]
-    dim_qkv_out = nh * hd + 2 * nh_kv * hd
-    qkv_ar_bytes = total_new_tokens * dim_qkv_out * dt_bytes
-
-    # Column-parallel FFN gate+up output: [tokens, 2·inter]
-    ffn_ar_bytes = total_new_tokens * 2 * inter * dt_bytes
-
+    # vLLM uses two TP patterns (see vllm/model_executor/layers/linear.py):
+    #   ColumnParallelLinear (QKV, gate_proj, up_proj):
+    #     Each GPU holds a column-wise shard of weights.  Output is LOCAL —
+    #     no cross-GPU communication needed (attention uses local heads).
+    #   RowParallelLinear (O_proj, down_proj):
+    #     Each GPU computes a partial sum.  Needs all-reduce to combine.
+    #
+    # Per attention layer: O_proj + down_proj → 2 all-reduces of [tokens, h]
+    # Per delta (non-attn) layer: down_proj only → 1 all-reduce of [tokens, h]
+    #
     # Ring all-reduce: reduce-scatter (N−1 steps) + all-gather (N−1 steps).
     # Each step sends data/N bytes over one hop.
     # Total data: 2·(N−1)/N · data  →  ≈ 2·data for large N
     # Total latency: 2·(N−1) · hop_latency
+    # vLLM executes communication serially after each layer's compute
+    # (no CUDA-stream overlap).  So total = compute + communicate.
     def _ar_time(ar_bytes):
         steps = 2 * (num_gpus - 1)
         factor = steps / num_gpus          # = 2·(N−1)/N
         return (ar_bytes * factor / (intra_node_bw_gb_s * 1e9)
                 + steps * intra_latency_us * 1e-6)
 
-    # Total all-reduce: attention layers have QKV+FFN AR, delta layers FFN only
-    all_reduce_time = na * (_ar_time(qkv_ar_bytes) + _ar_time(ffn_ar_bytes))
-    if na < nl:
-        # DeltaNet / non-attention layers: FFN AR only
-        all_reduce_time += (nl - na) * _ar_time(ffn_ar_bytes)
+    ar_bytes_per_layer = total_new_tokens * h * dt_bytes
+    all_reduce_time = (2 * na + (nl - na)) * _ar_time(ar_bytes_per_layer)
 
     # Scale compute components by 1/tp; inter_stage_comm (PP) is also divided.
     # launch_overhead is CPU-side dispatch cost — it scales with kernel count,
