@@ -19,7 +19,7 @@ elementwise:
 # Large s_kv × large batch will OOM on 24GB; check_memory skips those combos.
 # Uses GQA defaults (nh=32, nh_kv=8, hd=128) — representative of 7B-class models.
 flashattn:
-  s_q: [1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+  s_q: [1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
   s_kv: [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
   batch: [1, 4, 16, 64]
   num_heads: 32
@@ -40,5 +40,5 @@ warmup_ratio: 0.1        # fraction of estimated iters used when warmup=auto
 min_time_ms: 500
 max_iters: 100000
 calib_iters: 20  # initial calibration batch — higher = more accurate per-iter estimate
-overwrite: true  # true = delete existing CSV and re-benchmark everything
+overwrite: false  # true = delete existing CSV and re-benchmark everything
 max_memory_gb: 24
