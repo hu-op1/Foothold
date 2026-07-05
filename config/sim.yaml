@@ -18,7 +18,7 @@ simulation:
   max_num_batched_tokens: 2048
   kv_cache_memory_gb: null
   activation_memory_gb: null
-  gpu_memory_utilization: 0.85
+  gpu_memory_utilization: 0.88
   enable_prefix_caching: true
   enable_chunked_prefill: true
   long_prefill_token_threshold: 2048

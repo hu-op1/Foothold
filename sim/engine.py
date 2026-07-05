@@ -108,16 +108,19 @@ class SimulationEngine:
         self.pp_size = pp_size
         self.d_pp_size = d_pp_size
 
-        # ── TP-aware KV cache correction ──
+        # ── TP/PP-aware KV cache correction ──
         # load_config() computes kv_cache_memory_gb assuming the FULL model
-        # fits on one GPU.  With TP > 1, each GPU only holds 1/tp of weights,
-        # freeing (tp−1)/tp × weight_gb for additional KV cache.
-        if tp_size > 1 or d_tp_size > 1:
-            eff_tp = max(tp_size, d_tp_size)
+        # on one GPU.  With TP>1 or PP>1, each GPU only holds a fraction of
+        # the weights (1/tp for TP, nl/pp for PP), freeing VRAM for KV cache.
+        # The existing tp_size × pp multiplier in blocks_per_pool already
+        # accounts for smaller block sizes (fewer heads / fewer layers).
+        # Here we add the VRAM freed by weight reduction.
+        eff_parallel = max(tp_size * pp_size, d_tp_size * d_pp_size)
+        if eff_parallel > 1:
             total_params = self.model.get("total_params_b", 0)
             if total_params > 0:
                 weight_gb = total_params * 2 / 1e9  # float16
-                extra_kv_gb = weight_gb * (eff_tp - 1) / eff_tp
+                extra_kv_gb = weight_gb * (eff_parallel - 1) / eff_parallel
                 extra_blocks = int(extra_kv_gb * 1024**3) // self.bytes_per_block
                 self.num_blocks += max(0, extra_blocks)
         # Reset request state for fresh simulation run
