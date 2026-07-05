@@ -13,6 +13,7 @@ from sim.communication import (
     effective_xfer_overhead,
     transfer_blocks,
 )
+from sim.pipeline import ScheduleExecutePipeline, estimate_schedule_time
 
 
 class EventType(Enum):
@@ -125,13 +126,21 @@ class SimulationEngine:
         self.time_acc = {"attn_proj": 0.0, "ffn_proj": 0.0,
                          "attn_prefill": 0.0, "attn_decode": 0.0,
                          "fused_add_norm": 0.0, "swiglu": 0.0, "rope": 0.0,
-                         "lm_head": 0.0,
+                         "lm_head": 0.0, "launch_overhead": 0.0,
                          "all_reduce": 0.0, "inter_stage_comm": 0.0,
                          "kv_transfer": 0.0, "swap": 0.0}
 
         # Safety iteration limit scales with workload (worst case: 1 token/step)
         total_decode_tokens = sum(r.max_output_len for r in requests)
         self._max_iterations = max(100_000, total_decode_tokens * 2 + len(requests) * 5)
+
+        # ── Schedule/execute pipeline ──
+        # Enabled when PP > 1 (microbatch pipeline requires batch queue) or
+        # when async_scheduling is explicitly turned on (PP=1 optional overlap).
+        sim_cfg = self.cfg.get("simulation", {})
+        async_sched = sim_cfg.get("async_scheduling", False)
+        pipeline_enabled = (pp_size > 1 or d_pp_size > 1 or async_sched)
+        self._pipeline = ScheduleExecutePipeline(enabled=pipeline_enabled)
 
         if mode == "colocated":
             return self._run_colocated(requests, dp=dp, pp=pp_size, recorder=recorder)
@@ -237,7 +246,13 @@ class SimulationEngine:
                         step_prompt += (num_new - dec)
                         step_gen += dec
 
-            self.clock += max_step
+            # ── Advance clock with schedule/execute pipeline ──
+            # Pipeline allows CPU scheduling of step N+1 to overlap with
+            # GPU execution of step N.  Enabled when PP > 1 or async_scheduling.
+            total_running = sum(len(s.running) for s in scheds)
+            total_waiting = sum(len(s.waiting) for s in scheds)
+            sched_time = estimate_schedule_time(total_running, total_waiting)
+            self.clock = self._pipeline.step(self.clock, sched_time, max_step)
 
             # Record per-tick timeseries
             if recorder:
@@ -493,7 +508,17 @@ class SimulationEngine:
             self.time_acc["swap"] += total_swap
             if step_time == 0 and total_swap == 0:
                 step_time = 0.001
-            self.clock += step_time + total_swap
+            # ── Advance clock with schedule/execute pipeline ──
+            # P-side + D-side schedule overheads can overlap with GPU time.
+            p_running = len(p_sched.running) if p_total > 0 else 0
+            p_waiting = len(p_sched.waiting)
+            d_running = sum(len(s.running) for s in d_scheds)
+            d_waiting = sum(len(s.waiting) for s in d_scheds)
+            sched_time = estimate_schedule_time(p_running + d_running,
+                                                 p_waiting + d_waiting)
+            # Pipeline step: GPU time = max(P, D) + swap overhead
+            self.clock = self._pipeline.step(
+                self.clock, sched_time, step_time + total_swap)
 
             # Record per-tick timeseries
             if recorder:

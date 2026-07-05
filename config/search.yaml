@@ -19,6 +19,7 @@ simulation:
   enable_chunked_prefill: true
   scheduling_policy: fcfs
   use_cudagraph: false  # set true after running cudagraph bench+fit
+  async_scheduling: false  # enable schedule/execute overlap (auto-enabled for PP>1)
 
 strategy:
   mode: both  # both / colocated / disaggregated

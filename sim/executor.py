@@ -320,7 +320,23 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16",
     # ── Output projection (single lm_head, batched) ──
     lm_head_time = matmul_time(total_new_tokens, h, vs, F, B, p, dt_bytes, matmul_ov)
 
-    total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + fused_add_norm_time + swiglu_time + rope_time + lm_head_time
+    # ── Kernel launch overhead (CPU→GPU dispatch) ──
+    # Each kernel launch has ~5-10 µs of fixed CPU→GPU scheduling cost that
+    # CUDA events cannot measure.  For decode (small batch, GPU time ~100-500 µs)
+    # this is 10-30% of step time; for prefill (GPU time ~10-100 ms) it's 1-3%.
+    # Under CUDA Graph, graph replay uses a single host launch — zero overhead.
+    # Per-layer kernel count: QKV(1) + O(1) + gate(1) + up(1) + down(1)
+    #   + fused_add_norm(2) + swiglu(1) + rope(1) + attention(1) = 10
+    kernel_overhead_us = hw.get("kernel_launch_overhead_us", 0.0)
+    if use_cudagraph:
+        launch_overhead_time = 0.0
+    elif kernel_overhead_us > 0:
+        num_kernels = nl * 10 + 1  # +1 for lm_head
+        launch_overhead_time = num_kernels * kernel_overhead_us * 1e-6
+    else:
+        launch_overhead_time = 0.0
+
+    total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + fused_add_norm_time + swiglu_time + rope_time + lm_head_time + launch_overhead_time
     return {
         "total": total,
         "attn_proj": attn_proj_time,
@@ -331,6 +347,7 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16",
         "swiglu": swiglu_time,
         "rope": rope_time,
         "lm_head": lm_head_time,
+        "launch_overhead": launch_overhead_time,
     }
 
 
@@ -450,7 +467,18 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
         inter_stage_bytes / (intra_node_bw_gb_s * 1e9) + intra_latency_us * 1e-6
     )
 
-    total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + fused_add_norm_time + swiglu_time + rope_time + lm_head_time + inter_stage_comm
+    # ── Kernel launch overhead (CPU→GPU dispatch) ──
+    # Per-stage kernel count (same per-layer logic as predict_step).
+    kernel_overhead_us = hw.get("kernel_launch_overhead_us", 0.0)
+    if use_cudagraph:
+        launch_overhead_time = 0.0
+    elif kernel_overhead_us > 0:
+        num_kernels = layers_per_stage * 10 + 1  # +1 for lm_head (on last stage)
+        launch_overhead_time = num_kernels * kernel_overhead_us * 1e-6
+    else:
+        launch_overhead_time = 0.0
+
+    total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + fused_add_norm_time + swiglu_time + rope_time + lm_head_time + inter_stage_comm + launch_overhead_time
     return {
         "total": total,
         "attn_proj": attn_proj_time,
@@ -462,6 +490,7 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
         "rope": rope_time,
         "lm_head": lm_head_time,
         "inter_stage_comm": inter_stage_comm,
+        "launch_overhead": launch_overhead_time,
     }
 
 
@@ -537,12 +566,14 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
         # DeltaNet / non-attention layers: FFN AR only
         all_reduce_time += (nl - na) * _ar_time(ffn_ar_bytes)
 
-    # Scale compute components by 1/tp; inter_stage_comm (PP) is also divided
+    # Scale compute components by 1/tp; inter_stage_comm (PP) is also divided.
+    # launch_overhead is CPU-side dispatch cost — it scales with kernel count,
+    # which is per-GPU (each GPU runs its own set of kernels).  Divide by tp.
     result = {}
     compute_total = 0.0
     for k in ("attn_proj", "ffn_proj", "attn_prefill", "attn_decode",
               "fused_add_norm", "swiglu", "rope",
-              "lm_head", "inter_stage_comm"):
+              "lm_head", "inter_stage_comm", "launch_overhead"):
         v = base.get(k, 0.0)
         scaled = v / num_gpus
         result[k] = scaled

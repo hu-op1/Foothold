@@ -49,7 +49,11 @@
 
 ---
 
-## 🔴 P0-2: Kernel Launch Overhead 完全缺失
+## 🔴 P0-2: Kernel Launch Overhead 完全缺失 ✅
+
+**日期**: 2026-07-05　**分支**: main
+
+**解决方案**: 新增 `bench/launch_overhead.py` + `fit/launch_overhead.py`，使用 CPU wall-clock vs GPU event 斜率法测量纯 CPU→GPU dispatch 开销。结果存入 `kernel_launch_overhead_us` 参数，`predict_step()` 中按每步 kernel 数量累加（`nl × 10 + 1` 个 kernel × overhead），CUDA Graph 模式下自动归零。
 
 **源码**: `vllm-0.19.0/vllm/v1/worker/gpu_model_runner.py`
 
@@ -83,7 +87,11 @@ total += num_kernels * KERNEL_LAUNCH_OVERHEAD
 
 ---
 
-## 🔴 P0-3: 异步调度 / Batch Queue "零气泡"优化未建模
+## 🔴 P0-3: 异步调度 / Batch Queue "零气泡"优化未建模 ✅
+
+**日期**: 2026-07-05　**分支**: main
+
+**解决方案**: 新增 `sim/pipeline.py` — `ScheduleExecutePipeline` 两阶段流水线模型（CPU schedule + GPU execute），通过 `busy_until` 时间戳追踪实现 schedule/execute 重叠。`pp_size > 1` 时自动启用（PP 场景必须），`pp_size == 1` 时可通过 `async_scheduling` 配置手动开启。`estimate_schedule_time()` 提供 schedule CPU 耗时估值（与 P2-7 共享）。
 
 **源码**:
 - `vllm-0.19.0/vllm/v1/engine/core.py` — `step_with_batch_queue()` (L~440-530)
@@ -431,12 +439,12 @@ def update_from_output(self, output, clock):
 
 ## 修正路线图建议
 
-| 阶段 | 项目 | 预计消除误差 |
-|------|------|-------------|
-| **Phase 1** (立刻) | P0-2 Kernel Launch Overhead + P2-7 Schedule CPU 开销 | ~15-30% |
-| **Phase 2** (本周) | P0-1 CUDA Graph 加速因子（需要补充 benchmark） | ~40-60% |
-| **Phase 3** (本周) | P1-4 抢占回退逻辑 + P1-5 准入门控 | ~5-10% |
-| **Phase 4** (后续) | P0-3 流水线模型 + P2-8 Swap 异步 | ~5-15% |
-| **Phase 5** (按需) | P1-6, P2-9, P3-10 | <3% |
+| 阶段 | 项目 | 状态 | 预计消除误差 |
+|------|------|------|-------------|
+| **Phase 1** (立刻) | P0-2 Kernel Launch Overhead + P2-7 Schedule CPU 开销 | ✅ P0-2 已完成，⬜ P2-7 | ~15-30% |
+| **Phase 2** (本周) | P0-1 CUDA Graph 加速因子 | ✅ 已完成 | ~40-60% |
+| **Phase 3** (本周) | P0-3 流水线模型 + P1-4 抢占回退逻辑 + P1-5 准入门控 | ✅ P0-3 已完成，⬜ P1-4, P1-5 | ~10-25% |
+| **Phase 4** (后续) | P2-8 Swap 异步 | ⬜ | ~5-15% |
+| **Phase 5** (按需) | P1-6, P2-7, P2-9, P3-10 | ⬜ | <5% |
 
-**Phase 1+2 完成后预计总体误差可从当前的 ±50-200% 降至 ±15-30%。**
+**P0-1 + P0-2 + P0-3 完成后预计总体误差可从当前的 ±50-200% 降至 ±20-40%。**

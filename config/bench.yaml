@@ -65,3 +65,20 @@ cudagraph:
     num_heads: 32
     num_kv_heads: 8
     head_dim: 128
+
+# ── Kernel launch overhead benchmark ─────────────────────────────────────
+# Measures CPU→GPU kernel dispatch overhead using CPU wall-clock vs GPU
+# event timing (CudaTimer sees only GPU-side time).  The slope method
+# runs a trivial kernel at varying batch sizes N and regresses CPU and
+# GPU times against N; the slope difference is the per-launch overhead.
+#
+# kernel_launch_overhead_us is stored in fitted_params.json and used by
+# sim/executor.py:predict_step() to add per-step dispatch cost.  This
+# cost is zero when CUDA Graph is active (graph replay = 1 host launch).
+#
+# Set this section to null (or remove it) to skip the benchmark:
+#   launch_overhead: null
+launch_overhead:
+  n_values: [10, 50, 100, 200, 500, 1000]  # kernel counts for slope analysis
+  trials: 5                                   # measurement trials per N (median taken)
+  warmup: 10                                  # warmup iterations
