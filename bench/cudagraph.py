@@ -296,7 +296,7 @@ def bench_cudagraph_elementwise(config, output_path="results/cudagraph_elementwi
                         return (gate, up), {}
 
                     def forward(g_t, u_t):
-                        torch.silu(g_t, out=g_t)
+                        torch.nn.functional.silu(g_t, inplace=True)
                         g_t.mul_(u_t)
 
                 elif op_name == "rope":
@@ -318,7 +318,7 @@ def bench_cudagraph_elementwise(config, output_path="results/cudagraph_elementwi
                         q_rot[..., :half_hd] = -q2[..., half_hd:]
                         q_rot[..., half_hd:] = q2[..., :half_hd]
                         q_r.add_(q_rot * sin_t)
-                        q_t.copy_(q_r.reshape(n_tokens, nh_val * hd_val))
+                        q_t.copy_(q_r)
 
                 else:
                     continue

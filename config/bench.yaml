@@ -4,14 +4,14 @@
 # N extended to 256M elements for long-context elementwise op coverage
 
 matmul:
-  M: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
-  K: [512, 1024, 2048, 4096, 8192]
-  N: [512, 1024, 2048, 4096, 8192]
+  M: [32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1]
+  K: [8192, 4096, 2048, 1024, 512]
+  N: [8192, 4096, 2048, 1024, 512]
 
 # elementwise ops for bandwidth validation, N spans 1K to 256M elements
 # max N covers 256K context × 4K hidden_dim
 elementwise:
-  N: [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456]
+  N: [268435456, 134217728, 67108864, 33554432, 16777216, 8388608, 4194304, 2097152, 1048576, 524288, 262144, 131072, 65536, 32768, 16384, 8192, 4096, 2048, 1024]
   operators: [residual_add, rmsnorm, softmax, swiglu, rope]
 
 # FlashAttention benchmark — (s_q, s_kv) grid covering decode (s_q=1)
@@ -19,9 +19,9 @@ elementwise:
 # Large s_kv × large batch will OOM on 24GB; check_memory skips those combos.
 # Uses GQA defaults (nh=32, nh_kv=8, hd=128) — representative of 7B-class models.
 flashattn:
-  s_q: [1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
-  s_kv: [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
-  batch: [1, 4, 16, 64]
+  s_q: [32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 1]
+  s_kv: [262144, 131072, 65536, 32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128]
+  batch: [64, 16, 4, 1]
   num_heads: 32
   num_kv_heads: 8
   head_dim: 128
@@ -37,10 +37,10 @@ warmup_ratio: 0.1        # fraction of estimated iters used when warmup=auto
 # Time-budgeted measurement: run enough iterations to accumulate ≥500ms
 # of GPU time, capped at max_iters.  Adapts per-kernel so a 5µs rmsnorm
 # gets ~10k samples while a 50ms matmul stops after ~4 samples.
-min_time_ms: 500
+min_time_ms: 1000
 max_iters: 100000
 calib_iters: 20  # initial calibration batch — higher = more accurate per-iter estimate
-overwrite: false  # true = delete existing CSV and re-benchmark everything
+overwrite: true  # true = delete existing CSV and re-benchmark everything
 max_memory_gb: 24
 
 # ── CUDA Graph replay benchmark ──────────────────────────────────────────
@@ -52,16 +52,16 @@ max_memory_gb: 24
 # Grids default to the eager benchmark grids above if not specified.
 cudagraph:
   matmul:
-    M: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
-    K: [512, 1024, 2048, 4096, 8192]
-    N: [512, 1024, 2048, 4096, 8192]
+    M: [32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1]
+    K: [8192, 4096, 2048, 1024, 512]
+    N: [8192, 4096, 2048, 1024, 512]
   elementwise:
-    N: [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456]
+    N: [268435456, 134217728, 67108864, 33554432, 16777216, 8388608, 4194304, 2097152, 1048576, 524288, 262144, 131072, 65536, 32768, 16384, 8192, 4096, 2048, 1024]
     operators: [residual_add, rmsnorm, swiglu, rope]
   flashattn:
-    s_q: [1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-    s_kv: [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
-    batch: [1, 4, 16, 64]
+    s_q: [8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 1]
+    s_kv: [32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128]
+    batch: [64, 16, 4, 1]
     num_heads: 32
     num_kv_heads: 8
     head_dim: 128
