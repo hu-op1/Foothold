@@ -510,15 +510,17 @@ class SimulationEngine:
                 step_time = 0.001
             # ── Advance clock with schedule/execute pipeline ──
             # P-side + D-side schedule overheads can overlap with GPU time.
+            # Swap (GPU↔CPU) is asynchronous in vLLM — issued before the GPU
+            # step and completed in the background.  Model this by overlapping
+            # swap time with GPU time: only the longer of the two matters.
             p_running = len(p_sched.running) if p_total > 0 else 0
             p_waiting = len(p_sched.waiting)
             d_running = sum(len(s.running) for s in d_scheds)
             d_waiting = sum(len(s.waiting) for s in d_scheds)
             sched_time = estimate_schedule_time(p_running + d_running,
                                                  p_waiting + d_waiting)
-            # Pipeline step: GPU time = max(P, D) + swap overhead
-            self.clock = self._pipeline.step(
-                self.clock, sched_time, step_time + total_swap)
+            gpu_time = max(step_time, total_swap)  # swap overlaps with GPU
+            self.clock = self._pipeline.step(self.clock, sched_time, gpu_time)
 
             # Record per-tick timeseries
             if recorder:

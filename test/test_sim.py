@@ -88,6 +88,7 @@ def test_prefix_cache_hit():
     r1 = Request("r1", 0.0, shared, 50)
     r1.block_hashes = compute_block_hashes(r1.prompt_token_ids, block_size)
     pool.allocate_slots(r1, 64, block_size)
+    pool.commit_pending_cache()  # P3-10: deferred cache requires explicit commit
 
     # Second request: same prefix, longer
     r2_tokens = shared + list(range(100, 196))  # 4 shared blocks + 2 unique

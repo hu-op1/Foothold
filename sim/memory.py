@@ -72,6 +72,10 @@ class BlockPool:
         # Block hash → block_id for prefix cache lookup.
         self.cached_block_hash_to_block: dict[bytes, int] = {}
 
+        # Deferred cache: blocks allocated this step whose hashes are
+        # committed only after GPU execution completes (P3-10).
+        self._pending_cache: list[KVCacheBlock] = []
+
         self.clock: float = 0.0
 
     # ── query ──────────────────────────────────────────────────────────
@@ -126,6 +130,19 @@ class BlockPool:
         if block.block_hash is not None:
             self.cached_block_hash_to_block.pop(block.block_hash, None)
             block.reset_hash()
+
+    def commit_pending_cache(self) -> None:
+        """Commit deferred block hashes into the prefix cache.
+
+        Called after GPU execution completes (via scheduler's
+        ``update_from_output()``) so that blocks allocated in this step
+        become visible to subsequent scheduling rounds only AFTER their
+        content has been written by the GPU.  Matches vLLM's
+        ``cache_blocks()`` called from ``update_from_output()``.
+        """
+        for block in self._pending_cache:
+            self._cache_block(block)
+        self._pending_cache.clear()
 
     # ── allocation ─────────────────────────────────────────────────────
 
@@ -208,10 +225,12 @@ class BlockPool:
                 return None
             new_block_ids.append(block.block_id)
 
-            # If this block is now full, cache it
+            # If this block is now full, defer caching until GPU step completes.
+            # vLLM caches after execution (update_from_output), not at allocation
+            # time.  Premature caching allows same-step requests to falsely hit.
             if block_end - block_start == block_size and bi < len(request.block_hashes):
                 block.block_hash = request.block_hashes[bi]
-                self._cache_block(block)
+                self._pending_cache.append(block)
 
         # Extend request's block table, filling gaps with empty slots.
         # Free any old block at each position before overwriting.

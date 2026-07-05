@@ -240,7 +240,11 @@ if self.cfg["simulation"].get("scheduler_reserve_full_isl", False):
 
 ---
 
-## 🟡 P1-6: `skipped_waiting` 双队列优先级选择逻辑不完整
+## 🟡 P1-6: `skipped_waiting` 双队列优先级选择逻辑不完整 ✅
+
+**日期**: 2026-07-05　**分支**: main
+
+**解决方案**: 新增 `ColocatedScheduler._select_waiting_queue()` 方法，FCFS 下优先处理 `skipped_waiting`（被跳过的请求），PRIORITY 下比较两个队列队首优先级。Phase 2 改为动态队列选择替代固定 `(waiting, skipped_waiting)` 遍历。
 
 **源码**: `vllm-0.19.0/vllm/v1/core/sched/scheduler.py` — `_select_waiting_queue_for_scheduling()` (L~1570-1578)
 
@@ -280,7 +284,11 @@ def _select_waiting_queue(self):
 
 ---
 
-## 🟢 P2-7: Schedule CPU 开销未建模
+## 🟢 P2-7: Schedule CPU 开销未建模 ✅
+
+**日期**: 2026-07-05　**分支**: main
+
+**解决方案**: `ScheduleExecutePipeline.step()` 在禁用流水线时改为 `clock + schedule_time + gpu_time`（串行累加），启用时 schedule_time 被 GPU 执行隐藏。`estimate_schedule_time()` 基于运行/等待队列长度动态估算（base 100μs + per-request 遍历开销）。
 
 **源码**: `vllm-0.19.0/vllm/v1/core/sched/scheduler.py` — `schedule()` (~200 行逻辑)
 
@@ -315,7 +323,11 @@ self.clock += schedule_overhead
 
 ---
 
-## 🟢 P2-8: CPU Offloading / Swap 的异步性缺失
+## 🟢 P2-8: CPU Offloading / Swap 的异步性缺失 ✅
+
+**日期**: 2026-07-05　**分支**: main
+
+**解决方案**: `_run_disaggregated()` 中 swap 时间与 GPU 时间取 `max(step_time, total_swap)` 替代原来的 `step_time + total_swap`，建模 swap 为可与 GPU 计算重叠的后台操作。
 
 **源码**:
 - `vllm-0.19.0/vllm/v1/simple_kv_offload/manager.py` — `SimpleCPUOffloadScheduler`
@@ -356,7 +368,9 @@ request.kv_ready_time = swap_finish_time
 
 ---
 
-## 🟢 P2-9: 多 KV Cache Group 不支持
+## 🟢 P2-9: 多 KV Cache Group 不支持 ⏭️
+
+**状态**: 跳过 — 当前仅支持全注意力模型，混合架构（Qwen3.5 + DeltaNet）暂无需求。
 
 **源码**:
 - `vllm-0.19.0/vllm/v1/core/kv_cache_coordinator.py` — `KVCacheCoordinator`
@@ -388,7 +402,11 @@ class MultiGroupBlockPool:
 
 ---
 
-## 🟢 P3-10: KV Cache Block Caching 时机差异
+## 🟢 P3-10: KV Cache Block Caching 时机差异 ✅
+
+**日期**: 2026-07-05　**分支**: main
+
+**解决方案**: 新增 `BlockPool._pending_cache` 延迟缓存队列 + `commit_pending_cache()` 方法。`allocate_slots()` 中 block 不再立即进入 prefix cache，而是暂存到 `_pending_cache`；`update_from_output()` 末尾调用 `commit_pending_cache()` 完成缓存——匹配 vLLM 的 `cache_blocks()` 时机。
 
 **源码**:
 - `vllm-0.19.0/vllm/v1/core/sched/scheduler.py` — `update_from_output()` 中调用 `kv_cache_manager.cache_blocks()`
@@ -428,31 +446,32 @@ def update_from_output(self, output, clock):
 
 ```
 影响 ↑
- 5 │  P0-1 CUDA Graph (🔴)
-   │  P0-2 Kernel Launch (🔴)
- 4 │  P0-3 Async/Batch Queue (🔴)
+ 5 │  P0-1 CUDA Graph ✅
+   │  P0-2 Kernel Launch ✅
+ 4 │  P0-3 Async/Batch Queue ✅
    │
- 3 │  P1-4 抢占回退 (🟡)
-   │  P1-5 准入门控 (🟡)
+ 3 │  P1-4 抢占回退 ✅
+   │  P1-5 准入门控 ✅
    │
- 2 │  P1-6 双队列优先级 (🟡)
-   │  P2-7 CPU 开销 (🟢)
-   │  P2-8 Swap 异步 (🟢)
+ 2 │  P1-6 双队列优先级 ✅
+   │  P2-7 CPU 开销 ✅
+   │  P2-8 Swap 异步 ✅
    │
- 1 │  P2-9 多 KV Group (🟢)
-   │  P3-10 Cache 时机 (🟢)
+ 1 │  P2-9 多 KV Group ⏭️
+   │  P3-10 Cache 时机 ✅
    └──────────────────────────→ 难度
       低          中          高
 ```
 
 ## 修正路线图建议
 
-| 阶段 | 项目 | 状态 | 预计消除误差 |
-|------|------|------|-------------|
-| **Phase 1** (立刻) | P0-2 Kernel Launch Overhead + P2-7 Schedule CPU 开销 | ✅ P0-2 已完成，⬜ P2-7 | ~15-30% |
-| **Phase 2** (本周) | P0-1 CUDA Graph 加速因子 | ✅ 已完成 | ~40-60% |
-| **Phase 3** (本周) | P1-4 抢占回退逻辑 + P1-5 准入门控 | ✅ 已完成 | ~5-10% |
-| **Phase 4** (后续) | P2-8 Swap 异步 | ⬜ | ~5-15% |
-| **Phase 5** (按需) | P1-6, P2-7, P2-9, P3-10 | ⬜ | <5% |
+| 阶段 | 项目 | 状态 |
+|------|------|------|
+| **Phase 1** | P0-2 Kernel Launch Overhead + P2-7 Schedule CPU 开销 | ✅ 已完成 |
+| **Phase 2** | P0-1 CUDA Graph 加速因子 | ✅ 已完成 |
+| **Phase 3** | P0-3 流水线模型 + P1-4 抢占回退 + P1-5 准入门控 | ✅ 已完成 |
+| **Phase 4** | P2-8 Swap 异步 | ✅ 已完成 |
+| **Phase 5** | P1-6 双队列优先级 + P3-10 Cache 时机 | ✅ 已完成 |
+| **跳过** | P2-9 多 KV Group | ⏭️ 仅混合架构模型需要 |
 
-**P0-1 + P0-2 + P0-3 完成后预计总体误差可从当前的 ±50-200% 降至 ±20-40%。**
+**全部 P0/P1 项已完成，预计总体误差从 ±50-200% 降至 ±10-25%。**

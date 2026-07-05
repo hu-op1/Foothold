@@ -129,6 +129,34 @@ class ColocatedScheduler:
     def add_request(self, request: Request) -> None:
         self.waiting.add(request)
 
+    def _select_waiting_queue(self) -> RequestQueue | None:
+        """Select which queue to pop from based on scheduling policy.
+
+        Matches vLLM's ``_select_waiting_queue_for_scheduling()``:
+          - FCFS: prefer *skipped_waiting* first (requests that were skipped
+            earlier, e.g. waiting for remote KVS), then *waiting*.
+          - PRIORITY: compare heads of both queues, pick the higher-priority
+            one.  Ties go to *waiting* (FCFS within same priority).
+        """
+        has_waiting = bool(self.waiting)
+        has_skipped = bool(self.skipped_waiting)
+
+        if not has_waiting and not has_skipped:
+            return None
+        if has_waiting and not has_skipped:
+            return self.waiting
+        if has_skipped and not has_waiting:
+            return self.skipped_waiting
+
+        if self.policy == SchedulingPolicy.PRIORITY:
+            w = self.waiting.peek()
+            s = self.skipped_waiting.peek()
+            if w is not None and s is not None:
+                return self.waiting if w.priority >= s.priority else self.skipped_waiting
+
+        # FCFS (default): skipped_waiting first
+        return self.skipped_waiting if has_skipped else self.waiting
+
     def schedule(self) -> SchedulerOutput:
         """Run one scheduling step. Returns SchedulerOutput."""
         output = SchedulerOutput()
@@ -225,21 +253,23 @@ class ColocatedScheduler:
 
         # ── Phase 2: Admit WAITING requests ──
         if not preempted:
-            for queue in (self.waiting, self.skipped_waiting):
-                while queue and token_budget > 0:
-                    if len(self.running) >= self.max_num_seqs:
-                        break
+            while token_budget > 0:
+                queue = self._select_waiting_queue()
+                if queue is None:
+                    break
+                if len(self.running) >= self.max_num_seqs:
+                    break
 
-                    request = queue.peek()
-                    if request is None:
-                        break
+                request = queue.peek()
+                if request is None:
+                    break
 
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        queue.pop()
-                        # Only move to skipped_waiting if not already there
-                        if queue is self.waiting:
-                            self.skipped_waiting.add(request)
-                        continue
+                if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                    queue.pop()
+                    # Only move to skipped_waiting if not already there
+                    if queue is self.waiting:
+                        self.skipped_waiting.add(request)
+                    continue
 
                     # Swapped-out request: restore blocks from CPU
                     if self.pool.is_swapped(request.request_id):
@@ -369,6 +399,11 @@ class ColocatedScheduler:
                 req.finish_reason = FinishReason.LENGTH
                 req.finish_time = clock
                 self._finish_request(req)
+
+        # ── Commit deferred prefix cache ──
+        # Blocks allocated this step become visible to other requests only
+        # AFTER GPU execution completes (P3-10: matches vLLM's cache_blocks()).
+        self.pool.commit_pending_cache()
 
     def _finish_request(self, request: Request) -> None:
         """Mark request finished and release resources."""

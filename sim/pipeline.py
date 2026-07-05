@@ -75,9 +75,9 @@ class ScheduleExecutePipeline:
                        |── sched N+1 ──|          |── exec N+1 ──|
         """
         if not self.enabled:
-            # Backward-compatible: schedule time is hidden (P2-7 adds it
-            # separately).  Only GPU time advances the clock.
-            return clock + gpu_time_s
+            # Schedule CPU overhead is always modeled (P2-7).
+            # When pipelining is off, schedule and execute are serial.
+            return clock + schedule_time_s + gpu_time_s
 
         # ── CPU schedule stage ──
         sched_start = max(clock, self.schedule_busy_until)
