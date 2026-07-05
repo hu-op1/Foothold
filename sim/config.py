@@ -35,7 +35,7 @@ def load_config(path=None, model_spec=None):
         if model_spec:
             weight_gb = model_weight_gb(model_spec)
             eff_vram = total_vram_gb(cfg.get("gpu", "3090")) * mem_util
-            sim["kv_cache_memory_gb"] = max(1, int(eff_vram - weight_gb - act_conf))
+            sim["kv_cache_memory_gb"] = max(1.0, eff_vram - weight_gb - act_conf)
         else:
             sim["kv_cache_memory_gb"] = _default_vram(cfg.get("gpu", "3090")) * mem_util
 
