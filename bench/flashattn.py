@@ -13,17 +13,10 @@ platforms (Windows, CPU).
 
 import os
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
 from bench.utils import (warmup, benchmark, auto_warmup_iters, check_memory,
                          load_completed_keys, append_csv_row)
-
-# Try native flash_attn first (matches vLLM backend), fall back to PyTorch SDPA.
-try:
-    from flash_attn import flash_attn_func as _fa_native
-    _HAS_NATIVE_FA = True
-except ImportError:
-    _HAS_NATIVE_FA = False
+from flash_attn import flash_attn_func
 
 
 # Bytes per element for each dtype.
@@ -74,8 +67,7 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
     nh_kv = fa_cfg.get("num_kv_heads", 8)
     hd = fa_cfg.get("head_dim", 128)
 
-    backend = "flash_attn (native)" if _HAS_NATIVE_FA else "torch SDPA"
-    print(f"FlashAttn backend: {backend}")
+    print("FlashAttn backend: flash_attn (native)")
     print(f"FlashAttn dtypes: {dtypes}")
     print(f"FlashAttn batch sizes: {batch_list}")
 
@@ -99,8 +91,7 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
         # dedicated Hopper kernels (cuDNN/cuBLAS) is a different codepath.
         is_float8 = dt_name in ("float8_e4m3fn", "float8_e5m2")
         if is_float8:
-            print(f"\n  [skip] float8 FlashAttn: flash_attn / SDPA do not "
-                  f"accept float8 inputs")
+            print(f"\n  [skip] float8 FlashAttn: flash_attn does not support float8")
             continue
 
         combos = [(b_val, sq, skv) for b_val in batch_list
@@ -132,12 +123,8 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
             k = torch.randn(b_val, s_kv, nh_kv, hd, dtype=dtype, device=device)
             v = torch.randn(b_val, s_kv, nh_kv, hd, dtype=dtype, device=device)
 
-            if _HAS_NATIVE_FA:
-                def fa_fn(q=q, k=k, v=v):
-                    _fa_native(q, k, v, causal=True)
-            else:
-                def fa_fn(q=q, k=k, v=v):
-                    F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            def fa_fn(q=q, k=k, v=v):
+                flash_attn_func(q, k, v, causal=True)
 
             if warmup_cfg == "auto":
                 wu = auto_warmup_iters(fa_fn, bench_min_time, bench_max_iters,

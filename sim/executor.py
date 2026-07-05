@@ -42,6 +42,9 @@ def _select_dtype_params(hw_params, dtype):
     helper strips the ``_{dtype}`` suffix so downstream code can use
     the same key names regardless of precision.
 
+    Also handles ``_cudagraph`` suffix: when present, cudagraph-specific
+    params are lifted to unsuffixed keys (taking priority over eager params).
+
     Falls back to the unsuffixed (unified) keys when no dtype-specific
     params exist (backward compat with single-dtype fit data).
     """
@@ -57,47 +60,78 @@ def _select_dtype_params(hw_params, dtype):
     return result
 
 
-def _select_roofline_params(M_total, hw):
+def _has_cudagraph_params(hw):
+    """Return True if CUDA Graph-specific roofline params are available."""
+    return "F_peak_decode_cudagraph" in hw or "F_peak_prefill_cudagraph" in hw
+
+
+def _select_roofline_params(M_total, hw, use_cudagraph=False):
     """Smoothly interpolate between decode and prefill roofline params.
 
     M_total ≤ 32  → pure decode (memory-bound, low B_peak)
     M_total ≥ 256 → pure prefill (compute-bound, high B_peak)
     32 < M < 256  → log-space interpolation of B_peak and p
+
+    When *use_cudagraph* is True and cudagraph params are available,
+    uses CUDA Graph-specific fitted values (keys with ``_cudagraph`` suffix).
+    CUDA Graph params reflect true hardware limits without per-kernel
+    launch overhead baked in.
     """
+    if use_cudagraph and _has_cudagraph_params(hw):
+        key_F_d = "F_peak_decode_cudagraph"
+        key_B_d = "B_peak_decode_cudagraph"
+        key_p_d = "p_decode_cudagraph"
+        key_F_p = "F_peak_prefill_cudagraph"
+        key_B_p = "B_peak_prefill_cudagraph"
+        key_p_p = "p_prefill_cudagraph"
+        key_ov_d = "matmul_overhead_decode_cudagraph"
+        key_ov_p = "matmul_overhead_prefill_cudagraph"
+    else:
+        key_F_d = "F_peak_decode"
+        key_B_d = "B_peak_decode"
+        key_p_d = "p_decode"
+        key_F_p = "F_peak_prefill"
+        key_B_p = "B_peak_prefill"
+        key_p_p = "p_prefill"
+        key_ov_d = "matmul_overhead_decode"
+        key_ov_p = "matmul_overhead_prefill"
+
     if M_total <= _M_LO:
         return {
-            "F": hw["F_peak_decode"],
-            "B": hw["B_peak_decode"],
-            "p": hw["p_decode"],
-            "overhead": hw.get("matmul_overhead_decode", 0.0),
+            "F": hw[key_F_d],
+            "B": hw[key_B_d],
+            "p": hw[key_p_d],
+            "overhead": hw.get(key_ov_d, 0.0),
         }
     if M_total >= _M_HI:
         return {
-            "F": hw["F_peak_prefill"],
-            "B": hw["B_peak_prefill"],
-            "p": hw["p_prefill"],
-            "overhead": hw.get("matmul_overhead_prefill", hw.get("matmul_overhead_decode", 0.0)),
+            "F": hw[key_F_p],
+            "B": hw[key_B_p],
+            "p": hw[key_p_p],
+            "overhead": hw.get(key_ov_p, hw.get(key_ov_d, 0.0)),
         }
 
-    w = (log2(M_total) - log2(_M_LO)) / _LOG_RANGE  # 0 → 1
+    w = (log2(M_total) - log2(_M_LO)) / _LOG_RANGE
 
-    # Interpolate B in log space (physical: bandwidth ratios are multiplicative)
-    log_B = log(hw["B_peak_decode"]) + w * (log(hw["B_peak_prefill"]) - log(hw["B_peak_decode"]))
+    log_B = log(hw[key_B_d]) + w * (log(hw[key_B_p]) - log(hw[key_B_d]))
     B = exp(log_B)
-    p = hw["p_decode"] + w * (hw["p_prefill"] - hw["p_decode"])
+    p = hw[key_p_d] + w * (hw[key_p_p] - hw[key_p_d])
 
-    # F_peak is the same in both regimes (fit/matmul.py fixes F for decode)
-    return {"F": hw["F_peak_prefill"], "B": B, "p": p,
-            "overhead": hw.get("matmul_overhead_decode", 0.0)}
+    return {"F": hw[key_F_p], "B": B, "p": p,
+            "overhead": hw.get(key_ov_d, 0.0)}
 
 
-def _select_fa_params(n_requests, regime, hw_params, nh_model=None):
+def _select_fa_params(n_requests, regime, hw_params, nh_model=None,
+                      use_cudagraph=False):
     """Select FlashAttention roofline params based on concurrent request count.
 
     When per-batch FA params are available (fa_batch_sizes), interpolates
     B_peak and p in log-space across batch sizes — mirroring the M-based
     interpolation in _select_roofline_params.  Falls back to unified FA
     params, then to matmul-fitted params.
+
+    When *use_cudagraph* is True and cudagraph FA params are available,
+    uses CUDA Graph-specific keys (``_cudagraph`` suffix).
 
     The interpolation is done on **total query heads** (n_requests × nh_model),
     normalised by the benchmark's nh (fa_bench_nh).  This makes the sweep
@@ -109,18 +143,20 @@ def _select_fa_params(n_requests, regime, hw_params, nh_model=None):
         hw_params: fitted hardware params dict.
         nh_model: model's num_heads (for query-head normalisation).  If None,
             uses n_requests directly (backward compat).
+        use_cudagraph: if True, use CUDA Graph-specific roofline params.
 
     Returns:
         dict with keys F, B, p.
     """
-    batch_sizes = hw_params.get("fa_batch_sizes")
-    B_key = f"fa_{regime}_B"
-    p_key = f"fa_{regime}_p"
-    F_key = f"F_peak_fa_{regime}"
+    cg = "_cudagraph" if (use_cudagraph and "fa_decode_B_cudagraph" in hw_params) else ""
+    batch_sizes = hw_params.get(f"fa_batch_sizes{cg}")
+    B_key = f"fa_{regime}_B{cg}"
+    p_key = f"fa_{regime}_p{cg}"
+    F_key = f"F_peak_fa_{regime}{cg}"
 
     # Normalise to benchmark batch: effective_batch = total_query_heads / bench_nh
     if nh_model is not None:
-        bench_nh = hw_params.get("fa_bench_nh", nh_model)
+        bench_nh = hw_params.get(f"fa_bench_nh{cg}", nh_model)
         effective = n_requests * nh_model / bench_nh if bench_nh > 0 else n_requests
     else:
         effective = n_requests
@@ -159,19 +195,21 @@ def _select_fa_params(n_requests, regime, hw_params, nh_model=None):
 
     # Fallback: unified FA params → matmul params
     F_fb = hw_params.get(F_key)
-    B_fb = hw_params.get(f"B_peak_fa_{regime}")
-    p_fb = hw_params.get(f"p_fa_{regime}")
+    B_fb = hw_params.get(f"B_peak_fa_{regime}{cg}")
+    p_fb = hw_params.get(f"p_fa_{regime}{cg}")
     if F_fb is not None and B_fb is not None and p_fb is not None:
         return {"F": F_fb, "B": B_fb, "p": p_fb}
 
+    print(f"  [fallback] FA {regime} params not found, using matmul roofline params")
     return {
-        "F": hw_params[f"F_peak_{regime}"],
-        "B": hw_params[f"B_peak_{regime}"],
-        "p": hw_params[f"p_{regime}"],
+        "F": hw_params[f"F_peak_{regime}{cg if cg else ''}"],
+        "B": hw_params[f"B_peak_{regime}{cg if cg else ''}"],
+        "p": hw_params[f"p_{regime}{cg if cg else ''}"],
     }
 
 
-def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16"):
+def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16",
+                 use_cudagraph=False):
     """Predict GPU execution time for one scheduler step.
 
     Args:
@@ -215,12 +253,12 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16"):
     na = model_spec.get("attn_layers", nl)
     nd = nl - na  # DeltaNet layers (no attention)
 
-    b_effs = hw["elem_b_effs"]
-    overheads = hw["elem_overheads"]
+    b_effs = hw.get("elem_b_effs_cudagraph", hw["elem_b_effs"]) if use_cudagraph else hw["elem_b_effs"]
+    overheads = hw.get("elem_overheads_cudagraph", hw["elem_overheads"]) if use_cudagraph else hw["elem_overheads"]
 
     # Total new tokens this step — used for batched projections / LM head
     total_new_tokens = sum(nt for _, nt in scheduled_requests)
-    params = _select_roofline_params(total_new_tokens, hw)
+    params = _select_roofline_params(total_new_tokens, hw, use_cudagraph=use_cudagraph)
     F, B, p = params["F"], params["B"], params["p"]
     matmul_ov = params.get("overhead", 0.0)
 
@@ -242,8 +280,8 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16"):
     n_decode = sum(1 for req, _ in scheduled_requests if not req.is_prefill_chunk)
 
     # Per-batch FA params selected from actual concurrency counts
-    fa_d = _select_fa_params(n_decode, "decode", hw, nh)
-    fa_p = _select_fa_params(n_prefill, "prefill", hw, nh)
+    fa_d = _select_fa_params(n_decode, "decode", hw, nh, use_cudagraph=use_cudagraph)
+    fa_p = _select_fa_params(n_prefill, "prefill", hw, nh, use_cudagraph=use_cudagraph)
     F_d, B_d, p_d = fa_d["F"], fa_d["B"], fa_d["p"]
     F_p, B_p, p_p = fa_p["F"], fa_p["B"], fa_p["p"]
 
@@ -298,7 +336,7 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16"):
 
 def predict_step_pp(scheduled_requests, model_spec, hw_params,
                     pp_size, intra_node_bw_gb_s, intra_latency_us=2.0,
-                    dtype="float16"):
+                    dtype="float16", use_cudagraph=False):
     """Predict step time with pipeline parallelism.
 
     Splits model layers evenly across *pp_size* pipeline stages.
@@ -319,7 +357,8 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
         step_time_s with PP overhead.
     """
     if pp_size <= 1:
-        return predict_step(scheduled_requests, model_spec, hw_params, dtype)
+        return predict_step(scheduled_requests, model_spec, hw_params, dtype,
+                            use_cudagraph=use_cudagraph)
 
     if not scheduled_requests:
         return {"total": 0.0, "attn_proj": 0.0, "ffn_proj": 0.0,
@@ -352,7 +391,7 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
 
     # ── Roofline params ──
     # Projections / LM head use total M to pick prefill vs decode params
-    params = _select_roofline_params(total_new_tokens, hw)
+    params = _select_roofline_params(total_new_tokens, hw, use_cudagraph=use_cudagraph)
     F, B, p = params["F"], params["B"], params["p"]
     matmul_ov = params.get("overhead", 0.0)
 
@@ -367,8 +406,8 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
     n_prefill = sum(1 for req, _ in scheduled_requests if req.is_prefill_chunk)
     n_decode = sum(1 for req, _ in scheduled_requests if not req.is_prefill_chunk)
 
-    fa_d = _select_fa_params(n_decode, "decode", hw, nh)
-    fa_p = _select_fa_params(n_prefill, "prefill", hw, nh)
+    fa_d = _select_fa_params(n_decode, "decode", hw, nh, use_cudagraph=use_cudagraph)
+    fa_p = _select_fa_params(n_prefill, "prefill", hw, nh, use_cudagraph=use_cudagraph)
     F_d, B_d, p_d = fa_d["F"], fa_d["B"], fa_d["p"]
     F_p, B_p, p_p = fa_p["F"], fa_p["B"], fa_p["p"]
 
@@ -429,7 +468,7 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
 def predict_step_tp(scheduled_requests, model_spec, hw_params,
                     num_gpus, intra_node_bw_gb_s,
                     intra_latency_us=2.0,
-                    pp_size=1, dtype="float16"):
+                    pp_size=1, dtype="float16", use_cudagraph=False):
     """Predict step time with tensor parallelism (and optional pipeline parallelism).
 
     When pp_size > 1, pipeline parallelism is applied first (splitting layers
@@ -446,6 +485,7 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
         intra_latency_us: intra-node latency per all-reduce step (µs).
         pp_size: pipeline parallelism degree (1 = no PP).
         dtype: precision string.
+        use_cudagraph: if True, use CUDA Graph-specific roofline params.
 
     Returns:
         dict with keys: total, proj, attn_prefill, attn_decode, elem,
@@ -453,9 +493,11 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     """
     if pp_size > 1:
         base = predict_step_pp(scheduled_requests, model_spec, hw_params,
-                               pp_size, intra_node_bw_gb_s, intra_latency_us, dtype)
+                               pp_size, intra_node_bw_gb_s, intra_latency_us, dtype,
+                               use_cudagraph=use_cudagraph)
     else:
-        base = predict_step(scheduled_requests, model_spec, hw_params, dtype)
+        base = predict_step(scheduled_requests, model_spec, hw_params, dtype,
+                            use_cudagraph=use_cudagraph)
 
     if num_gpus <= 1:
         base["all_reduce"] = 0.0

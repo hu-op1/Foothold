@@ -180,6 +180,7 @@ def _search_with_sweep(gpu_sweep: list[int], mode, search_cfg, slo,
         all_results.extend(batch)
 
         # Extract best per-mode for this GPU count (prefer SLO-compliant, fall back to raw throughput)
+        print("  [fallback] no SLO-compliant strategy, falling back to raw throughput")
         colo_all = sorted(
             [r for r in batch if r.get("mode_label") == "colocated"],
             key=lambda r: r["metrics_raw"]["throughput"], reverse=True)

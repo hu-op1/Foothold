@@ -539,12 +539,15 @@ class SimulationEngine:
             tp = getattr(self, "tp_size", 1)
         if pp is None:
             pp = getattr(self, "pp_size", 1)
+        use_cg = self.cfg.get("simulation", {}).get("use_cudagraph", False)
         if tp > 1 or pp > 1:
             return predict_step_tp(scheduled_requests, self.model, self.hw,
                                    tp, self.intra_bw_gb_s,
                                    self.intra_latency_us,
-                                   pp_size=pp, dtype=self.dtype)
-        return predict_step(scheduled_requests, self.model, self.hw, self.dtype)
+                                   pp_size=pp, dtype=self.dtype,
+                                   use_cudagraph=use_cg)
+        return predict_step(scheduled_requests, self.model, self.hw, self.dtype,
+                            use_cudagraph=use_cg)
 
     def _compute_xfer(self, request: Request, prefill_time: float) -> float:
         """Compute KV transfer time for a completed prefill, accounting for overlap."""

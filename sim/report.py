@@ -108,6 +108,7 @@ def _plot_scalability(results: list[dict], csv_path: str) -> None:
                  for s in scalability]
 
     # If all zero (SLO too strict), fall back to raw best throughput from all results
+    print("  [fallback] no SLO-compliant results, falling back to raw best throughput")
     if max(colo_tp) == 0 and max(disagg_tp) == 0:
         for i, g in enumerate(gpus):
             colo_best = max(

@@ -195,5 +195,6 @@ def fused_residual_norm_ops(b, s, h, b_effs, overheads, dt_bytes=None):
         N = b * s * h
         return 2 * elem_time("fused_residual_norm", N, b_effs, overheads, dt_bytes)
     # Fallback: separate residual_add + rmsnorm (backward compatible)
+    print("  [fallback] fused_residual_norm data not found, using separate residual_add + rmsnorm")
     return (residual_add_ops(b, s, h, b_effs, overheads, dt_bytes)
             + norm_ops(b, s, h, "rmsnorm", b_effs, overheads, dt_bytes))

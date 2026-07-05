@@ -22,6 +22,7 @@ from tqdm import tqdm
 from bench.matmul import bench_matmul
 from bench.elementwise import bench_elementwise
 from bench.flashattn import bench_flashattn
+from bench.cudagraph import bench_cudagraph_all
 
 BENCH_RESULTS = os.path.join("bench", "results")
 FIT_RESULTS = os.path.join("fit", "results")
@@ -82,10 +83,16 @@ def run_benchmarks(args):
         bench_flashattn(cfg, output_path=fa_csv)
         torch.cuda.empty_cache()
 
+    if cfg.get("cudagraph"):
+        tqdm.write("\n[CUDA Graph: Matmul + Elementwise + FlashAttn]")
+        cg_matmul, cg_elem, cg_fa = bench_cudagraph_all(cfg, out_dir=out_dir)
+        torch.cuda.empty_cache()
+
     elapsed = time.perf_counter() - t0
+    cg_info = f", {cg_matmul}, {cg_elem}, {cg_fa}" if cfg.get("cudagraph") else ""
     print(f"\nDone in {elapsed:.1f}s")
     print(f"Output files: {matmul_csv}, {elem_csv}"
-          + (f", {fa_csv}" if fa_cfg else ""))
+          + (f", {fa_csv}" if fa_cfg else "") + cg_info)
 
 
 def run_fit(args):
@@ -97,9 +104,13 @@ def run_fit(args):
     matmul_csv = os.path.join(bench_dir, "matmul.csv")
     elem_csv = os.path.join(bench_dir, "elementwise.csv")
     fa_csv = os.path.join(bench_dir, "flashattn.csv")
+    cg_matmul_csv = os.path.join(bench_dir, "cudagraph_matmul.csv")
+    cg_elem_csv = os.path.join(bench_dir, "cudagraph_elementwise.csv")
+    cg_fa_csv = os.path.join(bench_dir, "cudagraph_flashattn.csv")
 
     results = []
-    for path in [matmul_csv, elem_csv, fa_csv]:
+    for path in [matmul_csv, elem_csv, fa_csv,
+                 cg_matmul_csv, cg_elem_csv, cg_fa_csv]:
         if os.path.exists(path):
             results.extend(load_results(path))
         else:

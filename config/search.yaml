@@ -18,6 +18,7 @@ simulation:
   enable_prefix_caching: true
   enable_chunked_prefill: true
   scheduling_policy: fcfs
+  use_cudagraph: false  # set true after running cudagraph bench+fit
 
 strategy:
   mode: both  # both / colocated / disaggregated
