@@ -14,16 +14,13 @@ uv sync
 ## 整体流程
 
 ```
-models/<vendor>/<family>/<model>/config.json    ──→  model_spec dict (auto-discovered)
-                                                          │
-                                                          ▼
-config/bench.yaml  →  bench/   →  bench/results/<gpu>/*.xlsx
-                              │                           │
-                              ▼                           │
-config/bench.yaml  →  fit/  →  fit/results/<gpu>.json   │
-                                    (F_peak, B_peak, p)    │
-                                         │                 │
-                                         └──────┬──────────┘
+config/bench.yaml  →  bench/   →  bench/results/<gpu>/*.csv
+                                │                           │
+                                ▼                           │
+config/bench.yaml  →  fit/  →  fit/results/<gpu>.json     │
+                                    (F_peak, B_peak, p)     │
+                                         │                  │
+                                         └──────┬───────────┘
                                                 ▼
                                     hw_params dict
                                           │
@@ -34,38 +31,17 @@ config/bench.yaml  →  fit/  →  fit/results/<gpu>.json   │
                                      config/sim.yaml
 ```
 
-## 0. 模型建模 — `models/`
+## 0. 模型规格加载
 
-从 HuggingFace `config.json` 自动发现模型架构参数，无需手工维护模型列表。
+模型架构参数从 **HuggingFace Hub** 动态加载，无需本地模型文件。
 
 ```bash
-uv run python -c "from models import load_model_specs; print(load_model_specs()['models'])"
+uv run python -c "from sim.config import load_model_spec; print(load_model_spec('meta-llama/Llama-2-7b-hf'))"
 ```
 
-### 目录约定
+`sim/config.py:load_model_spec()` 调用 `transformers.AutoConfig.from_pretrained()` 获取 HF 配置，自动映射为内部 `model_spec` 字典。参数总量按架构公式精确计算，无需手工维护。
 
-```
-models/<vendor>/<family>/<model>/config.json
-```
-
-例：
-
-```
-models/
-├── Qwen/
-│   ├── Qwen3/
-│   │   ├── Qwen3-4B/config.json
-│   │   └── Qwen3-8B/config.json
-│   └── Qwen3.5/
-│       ├── Qwen3.5-2B/config.json
-│       ├── Qwen3.5-4B/config.json
-│       └── Qwen3.5-9B/config.json
-└── meta-llama/
-    ├── Llama-2-7b-hf/config.json
-    └── Llama-2-13b-hf/config.json
-```
-
-### 映射规则
+### 字段映射
 
 | HF config.json 字段 | model_spec 字段 | 说明 |
 |---|---|---|
@@ -88,9 +64,18 @@ per_layer = 2·h·nh·hd + 2·h·nkv·hd + 3·h·inter + 2·h
 total = vocab·h + nl·per_layer + (vocab·h if not tied) + h
 ```
 
-嵌套 `text_config`（Qwen3.5 多模态）自动展开；无 `config.json` 的模型可回退到 `config/model_specs.yaml`。
+关键处理：
+- **GQA**：`num_key_value_heads < num_attention_heads` → `num_kv_heads`
+- **Qwen3.5 嵌套**：展开多模态 `text_config`
+- **混合架构**：`layer_types` → `attn_layers` 统计全 attention 层数
+- 任何 HF 模型 ID（`Qwen/Qwen3-8B`、`meta-llama/Llama-2-7b-hf` 等）可直接在 config YAML 中使用
 
 ## 1. 硬件标定 — `bench/`
+
+```bash
+uv run python main.py bench
+uv run python main.py --bench        # 旧版 flag
+```
 
 ```bash
 uv run python main.py bench
@@ -100,17 +85,30 @@ uv run python main.py --bench        # 旧版 flag
 ### 配置 — [config/bench.yaml](config/bench.yaml)
 
 ```yaml
+gpu: "3090"
+dtype: ["float16", "bfloat16"]
 matmul:
   M: [1, 2, 4, ..., 32768]         # 1=memory-bound, 32768=prefill-bound
-  K: [512, 1024, 2048, 4096, 8192]
-  N: [512, 1024, 2048, 4096, 8192]
+  K: [4096, 8192]
+  N: [4096, 8192]
 elementwise:
-  N: [1024, 4096, ..., 134217728]
-  operators: [residual_add, rmsnorm, softmax]
-dtype: "float16"
-warmup_iters: 200
-bench_iters: 2000
-max_memory_gb: 24
+  N: [1024, 4096, ..., 268435456]
+  operators: [residual_add, rmsnorm, softmax, swiglu, rope]
+flashattn:
+  s_q: [1, 4, 16, ..., 32768]
+  s_kv: [128, 512, ..., 262144]
+  batch: [1, 2, 4, 6, 8]
+  num_heads: 32
+  num_kv_heads: 32
+  head_dim: 128
+cudagraph:
+  matmul: { M: [...], K: [...], N: [...] }
+  elementwise: { N: [...], operators: [...] }
+  flashattn: { s_q: [...], s_kv: [...], batch: [...] }
+launch_overhead:
+  n_values: [1, 2, 4, 8, 16, 32, 64, 128]
+  trials: 50
+  warmup: 5
 ```
 
 ### 原理
@@ -120,9 +118,12 @@ max_memory_gb: 24
 | 类别 | bench 内容 | 用途 |
 |------|-----------|------|
 | matmul | `torch.mm` 的 M×K×N 网格 | 拟合 roofline 参数 |
-| elementwise | residual_add / rmsnorm / softmax | 验证带宽一致性 |
+| elementwise | residual_add / rmsnorm / softmax / swiglu / rope | 拟合 B_eff + overhead |
+| flashattn | `F.scaled_dot_product_attention` 的 (s_q, s_kv) 网格 | 拟合 FA 专用 roofline 参数 |
+| cudagraph | 各算子 under CUDA Graph replay | 消除 kernel launch overhead 的独立参数 |
+| launch_overhead | CPU wall-clock vs GPU event 斜率分析 | kernel dispatch 延迟 |
 
-输出：`bench/results/<gpu>/matmul.xlsx`, `elementwise.xlsx`
+输出：`bench/results/<gpu>/matmul.csv`, `elementwise.csv`, `flashattn.csv`, `cudagraph_*.csv`, `launch_overhead.csv`
 
 ## 2. Roofline 拟合 — `fit/`
 
@@ -141,14 +142,19 @@ uv run python main.py --fit          # 旧版 flag
 
 ```json
 {
-  "F_peak_prefill": 2.76e13,
-  "B_peak_prefill": 6.18e11,
-  "p_prefill": 1.01,
-  "F_peak_decode": 2.76e13,
-  "B_peak_decode": 4.91e11,
-  "p_decode": 1.12,
-  "elem_b_effs": { "residual_add": 4.2e11, "rmsnorm": 4.0e11, ... },
-  "elem_overheads": { "residual_add": 0.0012, ... }
+  "type": "roofline",
+  "F_peak_prefill": 80e12,
+  "B_peak_prefill": 2.6e12,
+  "p_prefill": 1.02,
+  "F_peak_decode": null,
+  "B_peak_decode": 700e9,
+  "p_decode": 1.01,
+  "elementwise": {
+    "residual_add": { "B_eff": 839e9, "overhead_us": 37 },
+    "softmax": { "B_eff": 550e9, "overhead_us": 45 },
+    "swiglu": { "B_eff": 500e9, "overhead_us": 57 }
+  },
+  "kernel_launch_overhead_us": 5.2
 }
 ```
 
@@ -156,7 +162,9 @@ uv run python main.py --fit          # 旧版 flag
 - **M ≥ 256**（prefill 大 batch）：拟合 F_peak、B_peak、p
 - **M < 256**（decode 小 batch）：固定 F_peak，拟合 B_peak 和 p
 
-elementwise 模型：`time = bytes / B_eff + overhead`，B_eff 从大 N 点拟合，overhead 从小 N 点拟合。未实测的 op（swiglu、rope、layernorm）通过 proxy 映射继承。
+elementwise 模型：`time = bytes / B_eff + overhead`，B_eff 从大 N 点拟合，overhead 从小 N 点拟合。未实测的 op（`rope`、`layernorm`、`causal_mask`、`fused_residual_norm`）通过 proxy 映射到 `residual_add` 继承参数。
+
+CUDA Graph 参数：独立命名空间（键含 `_cudagraph` 后缀），拟合自 `bench/cudagraph.py` 数据。
 
 可选线性拟合后端（无参数假设，直接用查表插值）：
 ```python
@@ -171,29 +179,44 @@ params = fit_all(results, backend="linear")
 事件驱动的 vLLM 推理服务仿真器，支持 colocated（共址）和 disaggregated（P/D 分离 GPU 池）两种部署模式。
 
 ```bash
-uv run python main.py search                     # 从 config/search.yaml
+uv run python main.py search                     # 策略网格搜索（从 config/search.yaml）
 uv run python main.py search --config <path>     # 指定配置
+uv run python main.py sim                        # 单次模拟（从 config/sim.yaml）
+uv run python main.py validate -o <out>          # 可视化 sim 输出（CDF、throughput）
 ```
 
 ### 配置 — [config/search.yaml](config/search.yaml)
 
 ```yaml
 gpu: "3090"
-model: "Qwen3-8B"
+model: "Qwen/Qwen3-4B"
+dtype: "float16"
+communication:
+  intra_bw_gb_s: 9.7
+  intra_latency_us: 2.0
+  inter_bw_gb_s: 9.7
+  inter_latency_us: 6.9
 simulation:
   block_size: 16
-  max_num_seqs: 32
-  gpu_memory_utilization: 0.85
+  max_num_seqs: 256
+  max_num_batched_tokens: 2048
+  gpu_memory_utilization: 0.89
   enable_prefix_caching: true
   enable_chunked_prefill: true
+  use_cudagraph: true
+  async_scheduling: true
 strategy:
-  mode: auto         # colocated / disaggregated / auto
+  mode: colocated      # colocated / disaggregated
   total_gpus: 4
   search:
-    pd_ratios: [[3,1], [1,3], [2,2]]
-    max_batched_tokens: [256, 512, 1024, 2048, 4096, 8192]
+    max_batched_tokens: [256, 512, 1024, 2048, 4096]
     prefill_thresholds: [256, 512, 1024, 2048]
+    pd_ratios: [[1,3], [2,2], [3,1]]
     tp_sizes: [1, 2, 4]
+    pp_sizes: [1]
+slo:
+  p90_ttft_ms: 500
+  p90_tpot_ms: 50
 ```
 
 ### 模块结构
@@ -203,13 +226,18 @@ strategy:
 | `engine.py` | 事件驱动主循环，colocated + disaggregated 双模式 |
 | `scheduler.py` | vLLM v1 两阶段调度器（chunked prefill、抢占、swap） |
 | `memory.py` | PagedAttention BlockPool、前缀缓存（SHA-256）、GPU↔CPU swap |
-| `executor.py` | Roofline 步长时间预测（逐请求 attention 参数分离） |
-| `trace.py` | JSONL 请求 trace 加载 |
-| `strategy.py` | 网格策略搜索，score = throughput × SLO_compliance |
-| `metrics.py` | TTFT / TPOT / latency 分布统计 |
-| `config.py` | 配置加载、显存预算计算、TP 校验 |
-| `communication.py` | KV cache 网络传输开销建模 |
-| `report.py` | xlsx 结果导出 |
+| `executor.py` | Roofline 步长时间预测（TP/PP 通信叠加） |
+| `roofline.py` | 核心 roofline 数学：`roofline_time()`、`matmul_time()`、`attention_fused()` |
+| `trace.py` | JSONL trace 加载（ShareGPT / agentic 会话链） |
+| `strategy.py` | 网格策略搜索，CSV checkpoint/resume |
+| `metrics.py` | TTFT / TPOT / latency 分布统计（p50/p90/p99） |
+| `config.py` | 配置加载、显存预算计算、TP/PP 校验 |
+| `communication.py` | KV cache 网络传输开销建模（overlap 支持） |
+| `request.py` | Request dataclass（WAITING→RUNNING→FINISHED 生命周期） |
+| `pipeline.py` | CPU schedule / GPU execute 时间重叠流水线 |
+| `recorder.py` | 时序记录（meta.json + requests.jsonl + timeseries.csv） |
+| `report.py` | 终端表格、Matplotlib 图表、CSV 导出 |
+| `validate.py` | 对比 LLMServingSim 基线生成 CDF/chart |
 
 ### 显存建模
 
@@ -231,14 +259,16 @@ Block pool 耗尽时，D 侧将 victim 请求的 KV cache swap 到 CPU（保留 
 
 ### SLO 评分
 
+SLO 是 p90 二元门——两个指标都必须达标，否则该策略得分为 0。达标后按 throughput 排序。
+
 ```
-compliance = ttft_pass_rate × tpot_pass_rate × (p99_pass ? 1 : 0)
-score = throughput × compliance
+slo_pass = (p90_ttft_ms ≤ threshold) AND (p90_tpot_ms ≤ threshold)
+score = throughput if slo_pass else 0
 ```
 
-- ttft_pass_rate: TTFT ≤ `slo.ttft_ms` 的请求比例
-- tpot_pass_rate: TPOT ≤ `slo.tpot_ms` 的请求比例
-- p99_pass: P99 总延迟 ≤ `slo.p99_latency_ms` 一票否决
+- `p90_ttft_ms`：p90 Time-To-First-Token（首 token 延迟）
+- `p90_tpot_ms`：p90 Time-Per-Output-Token（每输出 token 延迟）
+- 总延迟**不参与** SLO（随输出长度线性增长，不适合固定阈值）
 
 ## 测试
 
@@ -251,39 +281,72 @@ uv run python -m pytest test/test_sim.py -v       # PD sim 测试
 
 ```
 foothold/
-├── main.py                     # CLI 入口：bench / fit / search / sim
-├── models/                     # HF config.json 自动发现 → model_spec
-│   ├── __init__.py             # 映射、解析、参数计算
-│   ├── Qwen/Qwen3/             # Qwen3-4B, -8B
-│   ├── Qwen/Qwen3.5/           # Qwen3.5-2B, -4B, -9B
-│   └── meta-llama/             # Llama-2-7b, -13b
+├── main.py                     # CLI 入口：bench / fit / search / sim / validate
+├── AGENTS.md                   # AI 代理指令（快速参考）
+├── CLAUDE.md                   # 完整架构与命令文档
+├── .github/
+│   └── instructions/           # 模块级细粒度指令（auto-attach）
+│       ├── bench.instructions.md
+│       ├── fit.instructions.md
+│       ├── sim.instructions.md
+│       ├── config.instructions.md
+│       └── test.instructions.md
 ├── config/
 │   ├── bench.yaml              # 硬件标定配置（bench/fit）
 │   ├── search.yaml             # PD 策略搜索配置
-│   ├── sim.yaml                # 单次模拟配置
-│   └── model_specs.yaml        # 模型参数（仅 fallback）
+│   └── sim.yaml                # 单次模拟配置
 ├── bench/                      # GPU kernel 基准测试
-│   ├── matmul.py, elementwise.py
-│   └── utils.py                # CUDA 计时、保存、内存估算
+│   ├── matmul.py               # torch.mm  M×K×N 网格
+│   ├── elementwise.py          # residual_add / rmsnorm / softmax / swiglu / rope
+│   ├── flashattn.py            # F.scaled_dot_product_attention
+│   ├── cudagraph.py            # CUDA Graph replay 下各算子
+│   ├── launch_overhead.py      # CPU→GPU kernel dispatch 延迟
+│   └── utils.py                # CudaTimer, warmup, benchmark, checkpoint/resume
 ├── fit/                        # Roofline / 线性拟合
 │   ├── __init__.py             # fit_all() 入口
-│   ├── matmul.py, elementwise.py, linear.py
+│   ├── matmul.py               # prefill/decode 分裂拟合
+│   ├── elementwise.py          # per-op B_eff + overhead + proxy 映射
+│   ├── flashattn.py            # FA 专用 roofline 参数
+│   ├── cudagraph.py            # CUDA Graph 专用参数（_cudagraph 后缀）
+│   ├── launch_overhead.py      # kernel launch 开销提取
+│   ├── linear.py               # 无参数线性插值后端
 │   └── utils.py                # roofline_time, roofline_fit, load/save
-├── sim/                     # PD 分离仿真
-│   ├── engine.py, scheduler.py, memory.py, executor.py
-│   ├── config.py, trace.py, strategy.py
-│   ├── metrics.py, report.py, communication.py, request.py
+├── sim/                        # PD 分离仿真
+│   ├── engine.py               # 事件驱动主循环
+│   ├── scheduler.py            # vLLM v1 两阶段调度器
+│   ├── memory.py               # PagedAttention BlockPool + 前缀缓存
+│   ├── executor.py             # Roofline 步长时间预测
+│   ├── roofline.py             # 核心 roofline 数学
+│   ├── config.py               # 配置加载 + 显存预算
+│   ├── trace.py                # JSONL trace 加载
+│   ├── request.py              # Request dataclass
+│   ├── strategy.py             # 网格策略搜索
+│   ├── metrics.py              # TTFT/TPOT/latency 分布
+│   ├── communication.py        # KV 传输建模
+│   ├── pipeline.py             # Schedule/Execute 重叠流水线
+│   ├── recorder.py             # 时序记录（LLMServingSim 兼容）
+│   ├── report.py               # 终端表格 + CSV 导出
+│   ├── validate.py             # 对比 LLMServingSim 基线
+│   └── run_single.py           # 单次仿真运行辅助
 ├── test/                       # 测试
-│   ├── test_sim.py             # sim 集成测试
-│   └── ...
+│   ├── test_sim.py             # sim 集成测试（pytest）
+│   ├── analyze.py              # 时间分解分析
+│   ├── compare.py              # 结果比较
+│   └── gemm.py                 # GEMM 测试
+├── traces/                     # 请求 trace 文件（JSONL）
 ├── bench/results/<gpu>/        # [gitignored] benchmark 输出
 ├── fit/results/                # [gitignored] 拟合结果
+├── sim/output/                 # [gitignored] 仿真输出
 ├── docs/                       # 技术文档
-│   ├── architecture.md         # 完整设计文档（中文）
-│   └── superpowers/            # 开发计划/specs
-└── pyproject.toml
+│   ├── vllm-simulator-gaps.md  # vLLM vs 模拟器差异分析
+│   └── accuracy-improvements.md# 模拟精度提升跟踪
+├── pyproject.toml
+└── README.md
 ```
 
 ## 详细参考
 
-见 [docs/architecture.md](docs/architecture.md)（中文）— 包含 GQA 支持细节、显存建模推导、DP 架构、前缀缓存策略等完整技术说明。
+- [CLAUDE.md](CLAUDE.md) — 完整架构与命令参考
+- `.github/instructions/*.instructions.md` — 各模块细粒度编码指南
+- [docs/vllm-simulator-gaps.md](docs/vllm-simulator-gaps.md) — vLLM v0.19.0 vs 模拟器差异分析及已修复项
+- [docs/accuracy-improvements.md](docs/accuracy-improvements.md) — 模拟精度提升路线图与回归日志
