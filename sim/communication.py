@@ -98,7 +98,7 @@ def transfer_blocks(request: Request, pool_d, bytes_per_block: int,
             block_end = min(block_start + block_size, request.num_prompt_tokens)
             if block_end - block_start == block_size:
                 block.block_hash = request.block_hashes[i]
-                pool_d._cache_block(block)
+                pool_d.cached_block_hash_to_block.insert(request.block_hashes[i], block)
 
     # Replace request's block_table with D-side blocks
     request.block_table = new_table

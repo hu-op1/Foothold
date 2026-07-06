@@ -133,6 +133,7 @@ class SimulationEngine:
             r.ttft = None
             r.is_prefill_chunk = True
             r.block_hashes = compute_block_hashes(r.prompt_token_ids, self.block_size)
+            # Store output_tok_ids for incremental hash extension during decode.
             r.block_table.clear()
             r.kv_transfer_start = None
             r.kv_transfer_end = None

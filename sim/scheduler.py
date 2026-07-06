@@ -3,6 +3,7 @@
 from collections import deque
 
 from sim.request import Request, RequestStatus, FinishReason
+from sim.memory import extend_block_hashes_from_output
 
 
 class SchedulingPolicy:
@@ -401,6 +402,10 @@ class ColocatedScheduler:
                     req.ttft = clock - req.arrival_time
                 req.num_output_tokens += decode_tokens
 
+            # Extend block_hashes with output token positions so that
+            # cache_new_full_blocks can store their hashes.
+            extend_block_hashes_from_output(req, self.block_size)
+
             # Check stop
             if req.num_output_tokens >= req.max_output_len:
                 req.status = RequestStatus.FINISHED_LENGTH_CAPPED
@@ -408,7 +413,11 @@ class ColocatedScheduler:
                 req.finish_time = clock
                 self._finish_request(req)
 
-        # ── Commit deferred prefix cache ──
+        # Cache blocks that became full after decode filled partial blocks.
+        for req, num_new, _ in output.scheduled_requests:
+            self.pool.cache_new_full_blocks(req, self.block_size)
+
+        # Commit deferred prefix cache.
         # Blocks allocated this step become visible to other requests only
         # AFTER GPU execution completes (P3-10: matches vLLM's cache_blocks()).
         self.pool.commit_pending_cache()

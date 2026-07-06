@@ -54,6 +54,7 @@ def _load_sharegpt_trace(path, max_requests=None):
                 arrival_time=arr,
                 prompt_token_ids=token_ids,
                 max_output_len=output_len,
+                output_tok_ids=entry.get("output_tok_ids", []),
             )
             requests.append(req)
 
@@ -105,6 +106,7 @@ def _load_agentic_trace(path, max_requests=None):
                     session_id=session_id,
                     sub_request_index=j,
                     tool_duration=sub.get("tool_duration_ns", 0) / 1e9,
+                    output_tok_ids=sub.get("output_tok_ids", []),
                 )
                 if prev_req is not None:
                     prev_req.next_sub_request = req

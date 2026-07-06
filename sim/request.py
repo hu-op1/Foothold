@@ -42,6 +42,11 @@ class Request:
     is_prefill_chunk: bool = True
     scheduled_ts: float | None = None  # clock when first admitted to running
 
+    # Output token IDs (for full-sequence hash computation in prefix cache).
+    # Agentic traces: set from sub-request's output_tok_ids at load time.
+    # ShareGPT traces: also set from trace if available.
+    output_tok_ids: list[int] = field(default_factory=list)
+
     # Prefix caching
     block_hashes: list[bytes] = field(default_factory=list)
     block_table: list[int] = field(default_factory=list)  # ordered list of block_ids
