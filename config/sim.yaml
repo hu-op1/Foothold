@@ -2,8 +2,8 @@
 # Structure mirrors search.yaml but with scalar strategy values (no grid search).
 
 gpu: "3090"
-model: "meta-llama/Llama-2-7b-hf"
-dtype: "float16"  # must match a dtype in the benchmark config
+model: "Qwen/Qwen3-4B"
+dtype: "bfloat16"  # must match a dtype in the benchmark config
 
 communication:
   intra_bw_gb_s: 9.7
@@ -30,10 +30,10 @@ simulation:
 strategy:
   mode: colocated       # colocated or disaggregated
 
-  total_gpus: 2
+  total_gpus: 4
 
   # colocated:
-  tp_size: 2
+  tp_size: 4
   pp_size: 1
 
   # disaggregated:
@@ -43,13 +43,13 @@ strategy:
   d_tp_size: 1              # D-side TP
   d_pp_size: 1              # D-side PP
 
-output: "sim/output/llama-2-7b-tp2-sharegpt"
+output: "sim/output/qwen3-4b-tp4-conversation"
 tick_seconds: 0.5            # timeseries downsampling interval
 
 trace:
-  path: "traces/myllama-2-7b-heavy.jsonl"
-  max_requests: 500
-  format: "sharegpt"  # "agentic" or "sharegpt"
+  path: "traces/qwen3-4b-conversation.jsonl"
+  max_requests: 5000
+  format: "agentic"  # "agentic" or "sharegpt"
 
 # ── Service Level Objectives (SLO) ──────────────────────────────────────
 # SLO is a binary gate checked at p90 (not per-request, not p99).
