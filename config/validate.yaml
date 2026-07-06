@@ -1,0 +1,8 @@
+# Validate visualization config for --validate.
+# Used by: uv run python main.py --validate
+
+output_dir: sim\output\qwen3-4b-tp4-conversation          # Required: path to a finished sim run (timeseries.csv, requests.jsonl)
+sim_csv: sim\output\qwen3-4b-tp4-conversation\qwen3-4b-tp4-conversation.csv             # Optional: LLMServingSim sim.csv for side-by-side comparison
+sim_log: sim\output\qwen3-4b-tp4-conversation\qwen3-4b-tp4-conversation.log             # Optional: LLMServingSim sim.log for side-by-side comparison
+title: "qwen3-4b-tp4-conversation"    # Plot title suffix
+prefix: "tp4"                # Output filename prefix

@@ -6,7 +6,7 @@ Usage:
     uv run python main.py --fit                     # Roofline model fitting
     uv run python main.py --search                  # PD disaggregation strategy search
     uv run python main.py --sim                     # Single simulation
-    uv run python main.py --validate -o out/        # Visualize sim output
+    uv run python main.py --validate                # Visualize sim output
 """
 
 import argparse
@@ -232,16 +232,18 @@ def run_sim(args):
 def run_validate(args):
     """Visualize a sim run (optionally vs LLMServingSim)."""
     from sim.validate import run as validate_run
-    output_dir = getattr(args, "output_dir", None)
+
+    cfg = load_config(args.config)
+    output_dir = cfg.get("output_dir")
     if not output_dir:
-        print("validate requires -o/--output-dir")
+        print("validate requires `output_dir` in", args.config)
         return
     validate_run(
         output_dir,
-        sim_csv=getattr(args, "sim_csv", None),
-        sim_log=getattr(args, "sim_log", None),
-        title=getattr(args, "title", "foothold sim"),
-        prefix=getattr(args, "prefix", ""),
+        sim_csv=cfg.get("sim_csv"),
+        sim_log=cfg.get("sim_log"),
+        title=cfg.get("title", "foothold sim"),
+        prefix=cfg.get("prefix", ""),
     )
 
 
@@ -254,8 +256,8 @@ def main():
                "  uv run python main.py --fit\n"
                "  uv run python main.py --search\n"
                "  uv run python main.py --sim\n"
-               "  uv run python main.py --validate -o sim/output/my_run\n"
-               "  uv run python main.py --validate -o sim/output/my_run --sim-csv s.csv --sim-log s.log",
+               "  uv run python main.py --validate\n"
+               "  uv run python main.py --validate --config path/to/validate.yaml",
     )
 
     # ── Mode flags ──
@@ -273,19 +275,11 @@ def main():
     # ── Shared options ──
     parser.add_argument("--config", default=None, dest="config",
                         help="Config file path (default: config/bench.yaml for --bench/--fit, "
-                             "config/search.yaml for --search, config/sim.yaml for --sim)")
+                             "config/search.yaml for --search, config/sim.yaml for --sim, "
+                             "config/validate.yaml for --validate)")
     parser.add_argument("--dir", default=None, metavar="DIR", dest="dir",
                         help="Override bench results directory (for --fit)")
-    parser.add_argument("-o", "--output-dir", default=None, dest="output_dir",
-                        help="Output directory (for --validate)")
-    parser.add_argument("--sim-csv", default=None, dest="sim_csv",
-                        help="LLMServingSim sim.csv for comparison (for --validate)")
-    parser.add_argument("--sim-log", default=None, dest="sim_log",
-                        help="LLMServingSim sim.log for comparison (for --validate)")
-    parser.add_argument("--title", default="foothold sim", dest="title",
-                        help="Plot title suffix (for --validate)")
-    parser.add_argument("--prefix", default="", dest="prefix",
-                        help="Output filename prefix (for --validate)")
+    # validate options are in config/validate.yaml
 
     args = parser.parse_args()
 
@@ -311,6 +305,7 @@ def main():
         args.config = args.config or "config/sim.yaml"
         run_sim(args)
     elif args.validate:
+        args.config = args.config or "config/validate.yaml"
         run_validate(args)
 
 
