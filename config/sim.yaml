@@ -48,7 +48,7 @@ tick_seconds: 0.5            # timeseries downsampling interval
 
 trace:
   path: "traces/qwen3-4b-conversation.jsonl"
-  max_requests: 5000
+  max_requests: 50
   format: "agentic"  # "agentic" or "sharegpt"
 
 # ── Service Level Objectives (SLO) ──────────────────────────────────────

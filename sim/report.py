@@ -227,7 +227,7 @@ def flatten_result(entry: dict) -> dict:
         "strategy_type": strategy_type,
         "batch": batch,
         "thr": thr,
-        "throughput_tok_s": m["throughput"],
+        "throughput_tok_s": m["output_throughput"],
         "input_throughput_tok_s": m["input_throughput"],
         "output_throughput_tok_s": m["output_throughput"],
         "total_throughput_tok_s": m["total_throughput"],

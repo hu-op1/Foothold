@@ -127,7 +127,6 @@ def run_single(
     csv_result = [{
         "label": f"{mode} (batch={max_tokens}, thr={threshold})",
         "metrics_raw": {
-            "throughput": metrics.throughput(),
             "input_throughput": metrics.input_throughput(),
             "output_throughput": metrics.throughput(),
             "total_throughput": metrics.total_throughput(),
@@ -158,12 +157,29 @@ def run_single(
     csv_result[0]["metrics_raw"].update(breakdown)
     export_csv(csv_result, os.path.join(output_dir, "results.csv"))
 
-    print(f"\nSimulation complete ({elapsed:.1f}s)")
-    print(f"  Throughput: {metrics.throughput():.1f} tok/s")
-    print(f"  TTFT mean:  {metrics.mean_ttft() * 1000:.1f} ms")
-    print(f"  TPOT mean:  {metrics.mean_tpot() * 1000:.1f} ms")
-    print(f"  Requests:   {metrics.num_requests}")
-    print(f"  Output:     {output_dir}")
-    print(f"  meta.json  requests.jsonl  timeseries.csv  results.csv")
+    print()
+    width = 60
+    print("━" * width)
+    print(f"  Simulation Complete ({elapsed:.1f}s)".center(width - 2))
+    print("━" * width)
+    print(f"  {'Throughput':<22} {metrics.throughput():>10.1f} tok/s")
+    print(f"  {'Cache hit rate':<22} {metrics.cache_hit_rate*100 if metrics.cache_hit_rate else 0:>10.1f}%")
+    print(f"  {'SLO pass':<22} {'YES' if slo_info['slo_pass'] else 'NO':>10}")
+    print("  " + "─" * (width - 4))
+    print(f"  {'TTFT mean':<22} {metrics.mean_ttft() * 1000:>10.1f} ms")
+    print(f"  {'TTFT p50 / p90 / p99':<22} {metrics.p50_ttft() * 1000:>6.1f} / {metrics.p90_ttft() * 1000:>5.1f} / {metrics.p99_ttft() * 1000:>5.1f} ms")
+    print("  " + "─" * (width - 4))
+    print(f"  {'TPOT mean':<22} {metrics.mean_tpot() * 1000:>10.1f} ms")
+    print(f"  {'TPOT p50 / p90 / p99':<22} {metrics.p50_tpot() * 1000:>6.1f} / {metrics.p90_tpot() * 1000:>5.1f} / {metrics.p99_tpot() * 1000:>5.1f} ms")
+    print("  " + "─" * (width - 4))
+    print(f"  {'Latency p50 / p90 / p99':<22} {metrics.p50_latency() * 1000:>6.1f} / {metrics.p90_latency() * 1000:>5.1f} / {metrics.p99_latency() * 1000:>5.1f} ms")
+    print("  " + "─" * (width - 4))
+    print(f"  {'Requests':<22} {metrics.num_requests:>10}")
+    print(f"  {'Input / output tokens':<22} {metrics.total_input_tokens:>8,} / {metrics.total_output_tokens:,}")
+    print(f"  {'Wall / sim time':<22} {elapsed:>8.1f}s / {metrics.total_time:>5.1f}s")
+    print("━" * width)
+    print(f"  Output: {output_dir}")
+    print(f"  {'meta.json':>9}  {'requests.jsonl':>17}  "
+          f"{'timeseries.csv':>17}  {'results.csv':>16}")
 
     return output_dir

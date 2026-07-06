@@ -21,8 +21,6 @@ from tqdm import tqdm
 
 from bench.matmul import bench_matmul
 from bench.elementwise import bench_elementwise
-from bench.flashattn import bench_flashattn
-from bench.cudagraph import bench_cudagraph_all
 from bench.launch_overhead import bench_launch_overhead
 
 BENCH_RESULTS = os.path.join("bench", "results")
@@ -42,6 +40,9 @@ def bench_results_dir(cfg):
 
 
 def run_benchmarks(args):
+    from bench.flashattn import bench_flashattn
+    from bench.cudagraph import bench_cudagraph_all
+
     if not torch.cuda.is_available():
         print("CUDA not available. Exiting.")
         sys.exit(1)

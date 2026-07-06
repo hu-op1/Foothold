@@ -210,6 +210,16 @@ class SimulationEngine:
 
         loop_count = 0
         idle_ticks = 0
+
+        # ── Progress logging ──
+        _tick_seconds = self.cfg.get("tick_seconds", 0.5)
+        _last_print = 0.0
+        _cum_prompt = 0
+        _cum_gen = 0
+        _last_cum_prompt = 0
+        _last_cum_gen = 0
+        _total_reqs = len(requests)
+
         while event_queue or not _all_idle():
             # Only advance clock to next event if ALL ranks are truly idle
             if event_queue and _all_idle():
@@ -291,6 +301,24 @@ class SimulationEngine:
                         next_req.arrival_time = self.clock + r.tool_duration
                         heapq.heappush(event_queue, SimulationEvent(
                             next_req.arrival_time, EventType.ARRIVAL, next_req))
+
+            # ── Progress logging ──
+            _cum_prompt += step_prompt
+            _cum_gen += step_gen
+            if self.clock - _last_print >= _tick_seconds:
+                interval = self.clock - _last_print or 1e-9
+                p_tput = (_cum_prompt - _last_cum_prompt) / interval
+                g_tput = (_cum_gen - _last_cum_gen) / interval
+                _total_q = sum(p._cache_queries for p in pools)
+                _total_h = sum(p._cache_hits for p in pools)
+                ch = _total_h / _total_q * 100 if _total_q > 0 else 0.0
+                print(f"[{self.clock:.1f}s] prompt={p_tput:.1f} gen={g_tput:.1f} tok/s "
+                      f"| run={total_running} wait={total_waiting} "
+                      f"| cache={ch:.1f}% ({_total_h}/{_total_q}) "
+                      f"| done={metrics.num_requests}/{_total_reqs}")
+                _last_print = self.clock
+                _last_cum_prompt = _cum_prompt
+                _last_cum_gen = _cum_gen
 
             loop_count += 1
             if loop_count > self._max_iterations:
@@ -389,6 +417,15 @@ class SimulationEngine:
         p_time_val: float = 0.0
         loop_count = 0
         idle_ticks = 0
+
+        # ── Progress logging ──
+        _tick_seconds = self.cfg.get("tick_seconds", 0.5)
+        _last_print = 0.0
+        _cum_prompt = 0
+        _cum_gen = 0
+        _last_cum_prompt = 0
+        _last_cum_gen = 0
+        _total_reqs = len(requests)
 
         while (event_queue or stalled_xfers
                or p_sched.has_requests()
@@ -552,6 +589,25 @@ class SimulationEngine:
                                      step_prompt, step_gen, usage)
 
             idle_ticks = 0
+
+            # ── Progress logging ──
+            _cum_prompt += step_prompt
+            _cum_gen += step_gen
+            if self.clock - _last_print >= _tick_seconds:
+                interval = self.clock - _last_print or 1e-9
+                p_tput = (_cum_prompt - _last_cum_prompt) / interval
+                g_tput = (_cum_gen - _last_cum_gen) / interval
+                all_pools = [pool_p] + d_pools
+                _total_q = sum(p._cache_queries for p in all_pools)
+                _total_h = sum(p._cache_hits for p in all_pools)
+                ch = _total_h / _total_q * 100 if _total_q > 0 else 0.0
+                print(f"[{self.clock:.1f}s] prompt={p_tput:.1f} gen={g_tput:.1f} tok/s "
+                      f"| run={p_running + d_running} wait={p_waiting + d_waiting} "
+                      f"| cache={ch:.1f}% ({_total_h}/{_total_q}) "
+                      f"| done={metrics.num_requests}/{_total_reqs}")
+                _last_print = self.clock
+                _last_cum_prompt = _cum_prompt
+                _last_cum_gen = _cum_gen
 
             loop_count += 1
             if loop_count > self._max_iterations:
