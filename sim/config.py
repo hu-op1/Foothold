@@ -98,7 +98,7 @@ def kv_cache_per_token_bytes(model_spec):
     return 2 * nl * nh_kv * hd * 2  # 2 (K+V) × layers × heads × dim × 2 bytes
 
 
-def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1):
+def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1, pp=1):
     """Estimate peak activation memory during inference (GB).
 
     Peak HBM activation = the moment during a layer's FFN block when the
@@ -110,6 +110,10 @@ def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1):
                            [inter]
 
     Simultaneously alive: 2×h + 3×inter elements (fp16).
+
+    With PP > 2, middle pipeline stages (ranks 1..pp-2) hold an extra
+    inter-stage hidden state buffer for simultaneous send/receive:
+    + max_batch_tokens × h elements (fp16).
 
     Plus a fixed ~0.5 GB for CUDA context / allocator overhead.
 
@@ -127,6 +131,11 @@ def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1):
     # Peak FFN-block simultaneously-alive elements per token
     per_token_elems = 2 * h + 3 * inter  # residual, norm, gate, up, silu_result
     peak_bytes = max_batch_tokens * per_token_elems * 2  # fp16
+
+    # Middle pipeline stages (pp > 2): extra inter-stage hidden state buffer
+    # for simultaneous async send to next stage + receive from previous.
+    if pp > 2:
+        peak_bytes += max_batch_tokens * h * 2  # fp16
 
     # CUDA context, allocator overhead, workspace buffers (~0.5 GB)
     cuda_overhead = 0.5 * 1024 ** 3
@@ -185,9 +194,9 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
         if nh_kv % tp != 0:
             continue
 
-        # Activation per GPU is the same regardless of PP (peak per-layer).
-        # TP divides the activation tensor.
-        act_gb = activation_memory_gb(model_spec, max_batch_tokens, tp)
+        # TP divides the activation tensor. PP > 2 adds an extra
+        # inter-stage buffer for middle pipeline ranks.
+        act_gb = activation_memory_gb(model_spec, max_batch_tokens, tp, pp)
         # PP splits layers → each GPU holds 1/(tp×pp) of weights
         weight_per_gpu = weight_gb / (tp * pp)
         if weight_per_gpu + act_gb >= usable_vram:
@@ -212,7 +221,7 @@ def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256
     usable_vram = total_vram_gb(gpu_name) * gpu_memory_utilization
     weight_gb = model_weight_gb(model_spec)
     kv_per_tok = kv_cache_per_token_bytes(model_spec)
-    act_gb = activation_memory_gb(model_spec, max_batch_tokens, tp)
+    act_gb = activation_memory_gb(model_spec, max_batch_tokens, tp, pp)
 
     w_gpu = weight_gb / (tp * pp)
     kv_seq_gb = (kv_per_tok * max_model_len) / 1e9 / (pp * tp)  # per-GPU for one seq
@@ -275,7 +284,7 @@ def load_model_spec(model_name: str) -> dict | None:
     try:
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     except Exception as e:
-        print(f"ERROR loading config for '{model_name}': {e}")
+        print(f"WARNING: failed to load config from HuggingFace for '{model_name}': {e}")
         return None
 
     # Unwrap nested text_config (Qwen3.5 multimodal, etc.)
@@ -346,9 +355,9 @@ def load_model_spec(model_name: str) -> dict | None:
 
     # ── Fail if any required field could not be resolved ──
     if missing:
-        print(f"ERROR: cannot determine architecture for '{model_name}':")
+        print(f"WARNING: cannot determine architecture for '{model_name}' (config.json missing keywords):")
         for field_label, tried in missing:
-            print(f"  - {field_label}: tried {tried} — none found on config object")
+            print(f"  - {field_label}: tried {tried} — not found")
         print(f"  Config class: {type(config).__name__}")
         print(f"  Available attributes: {sorted(k for k in dir(text_cfg) if not k.startswith('_'))}")
         return None
