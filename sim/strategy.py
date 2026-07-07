@@ -60,7 +60,7 @@ def _load_results_from_csv(csv_path: str) -> list[dict]:
         with open(csv_path, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 m = {
-                    "throughput": float(row.get("throughput_tok_s", 0)),
+                    "throughput": float(row.get("output_throughput_tok_s", 0)),
                     "input_throughput": float(row.get("input_throughput_tok_s", 0)),
                     "output_throughput": float(row.get("output_throughput_tok_s", 0)),
                     "total_throughput": float(row.get("total_throughput_tok_s", 0)),
@@ -100,7 +100,7 @@ def _load_results_from_csv(csv_path: str) -> list[dict]:
                 results.append({
                     "label": f"{st} (batch={batch}, thr={thr})",
                     "metrics_raw": m,
-                    "throughput": float(row.get("throughput_tok_s", 0)),
+                    "throughput": float(row.get("output_throughput_tok_s", 0)),
                     "slo_pass": row.get("slo_pass", "False") == "True",
                     "elapsed": float(row.get("elapsed_s", 0)),
                 })
