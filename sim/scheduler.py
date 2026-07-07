@@ -59,6 +59,7 @@ class SchedulerOutput:
         self.preempted_reqs: list[Request] = []
         self.total_num_scheduled_tokens: int = 0
         self.swap_time: float = 0.0  # GPU↔CPU swap time for this step
+        self.scheduled_cache_hit_tokens: int = 0  # cache-hit prompt tokens not requiring compute
 
     @property
     def scheduled_requests(self) -> list[tuple[Request, int, list[int]]]:
@@ -285,6 +286,7 @@ class ColocatedScheduler:
                     request.block_hashes
                 )
                 cache_touched = False
+                num_cached_tokens = 0
                 if num_cached_blocks > 0:
                     num_cached_tokens = num_cached_blocks * self.block_size
                     request.num_computed_tokens = num_cached_tokens
@@ -352,6 +354,7 @@ class ColocatedScheduler:
 
                 queue.pop()
                 output.scheduled_new_reqs.append((request, num_new, new_blocks))
+                output.scheduled_cache_hit_tokens += num_cached_tokens
                 token_budget -= num_new
                 request.status = RequestStatus.RUNNING
                 self.running.append(request)

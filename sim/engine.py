@@ -272,6 +272,7 @@ class SimulationEngine:
                         dec = num_new - min(num_new, prompt_rem)
                         step_prompt += (num_new - dec)
                         step_gen += dec
+                    step_prompt += output.scheduled_cache_hit_tokens
 
             # ── Advance clock with schedule/execute pipeline ──
             # Pipeline allows CPU scheduling of step N+1 to overlap with
@@ -500,8 +501,9 @@ class SimulationEngine:
             if p_total > 0:
                 p_sched.update_from_output(p_out, self.clock + p_time_val)
 
-            # Count P-side tokens (all prefill)
-            step_prompt = sum(nt for _, nt, _ in p_out.scheduled_requests)
+            # Count P-side tokens (all prefill, including cache hits)
+            step_prompt = (sum(nt for _, nt, _ in p_out.scheduled_requests)
+                           + p_out.scheduled_cache_hit_tokens)
             step_gen = 0
 
             d_times: list[float] = []
