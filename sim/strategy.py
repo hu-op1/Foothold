@@ -134,6 +134,7 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
     total_gpus = cfg["strategy"]["total_gpus"]
     model_spec = engine.model
     gpu_name = cfg.get("gpu", "3090")
+    gpus_per_node = cfg["strategy"].get("gpus_per_node")
     kv_cache_gb = cfg["simulation"]["kv_cache_memory_gb"]
     gpu_mem_util = cfg["simulation"].get("gpu_memory_utilization", 0.85)
     max_model_len = model_spec.get("max_model_len", 8192)
@@ -150,17 +151,18 @@ def search(engine: SimulationEngine, requests: list, cfg: dict) -> list[dict]:
         return _search_with_sweep(
             gpu_sweep, mode, search_cfg, slo, model_spec, gpu_name,
             kv_cache_gb, gpu_mem_util, max_model_len, max_num_seqs,
-            hw_params, requests, cfg)
+            hw_params, requests, cfg, gpus_per_node=gpus_per_node)
 
     return _search_one(total_gpus, mode, search_cfg, slo, model_spec,
                        gpu_name, kv_cache_gb, gpu_mem_util, max_model_len,
-                       max_num_seqs, hw_params, requests, cfg)
+                       max_num_seqs, hw_params, requests, cfg,
+                       gpus_per_node=gpus_per_node)
 
 
 def _search_with_sweep(gpu_sweep: list[int], mode, search_cfg, slo,
                        model_spec, gpu_name, kv_cache_gb, gpu_mem_util,
                        max_model_len, max_num_seqs, hw_params, requests,
-                       cfg) -> list[dict]:
+                       cfg, gpus_per_node=None) -> list[dict]:
     """Sweep over GPU counts, returning all results with scalability summary."""
     all_results = []
     scalability = []  # [{gpus, best_colo, best_disagg}, ...]
@@ -171,7 +173,8 @@ def _search_with_sweep(gpu_sweep: list[int], mode, search_cfg, slo,
         print(f"{'='*60}")
         batch = _search_one(n_gpus, mode, search_cfg, slo, model_spec,
                             gpu_name, kv_cache_gb, gpu_mem_util, max_model_len,
-                            max_num_seqs, hw_params, requests, cfg)
+                            max_num_seqs, hw_params, requests, cfg,
+                            gpus_per_node=gpus_per_node)
 
         # Tag each result with its GPU count for downstream grouping
         for r in batch:
@@ -233,7 +236,8 @@ def _search_with_sweep(gpu_sweep: list[int], mode, search_cfg, slo,
 
 def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
                 gpu_name, kv_cache_gb, gpu_mem_util, max_model_len,
-                max_num_seqs, hw_params, requests, cfg) -> list[dict]:
+                max_num_seqs, hw_params, requests, cfg,
+                gpus_per_node=None) -> list[dict]:
     """Run grid search for a single GPU count."""
 
     max_tokens_list = search_cfg.get("max_batched_tokens", [8192])
@@ -251,7 +255,8 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
     valid_tps = valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, total_gpus,
                                max_model_len, max_num_seqs,
                                gpu_memory_utilization=gpu_mem_util,
-                               max_batch_tokens=max(max_tokens_list))
+                               max_batch_tokens=max(max_tokens_list),
+                               gpus_per_node=gpus_per_node)
     p_tp_sizes = d_tp_sizes = valid_tps if enable_tp else [1]
     p_pp_sizes = d_pp_sizes = valid_pps if enable_pp else [1]
 

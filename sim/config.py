@@ -45,6 +45,14 @@ def load_config(path=None, model_spec=None):
     strat = cfg.setdefault("strategy", {})
     strat.setdefault("mode", "both")
 
+    # ── Node topology: derive total_gpus from nodes × gpus_per_node ──
+    nodes = strat.get("nodes")
+    gpus_per_node = strat.get("gpus_per_node")
+    if nodes is not None and gpus_per_node is not None:
+        strat["total_gpus"] = int(nodes) * int(gpus_per_node)
+    else:
+        strat.setdefault("total_gpus", 1)
+
     # Use search list first value as simulation default
     search = strat.setdefault("search", {})
     if "max_num_batched_tokens" not in sim:
@@ -143,6 +151,27 @@ def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1, pp=1):
     return (peak_bytes + cuda_overhead) / 1e9 / tp
 
 
+def pp_cross_node_hops(pp_size, tp_size, gpus_per_node):
+    """Number of PP inter-stage transfers that cross node boundaries.
+
+    Each PP stage occupies ``tp_size`` consecutive GPUs.  When the number of
+    stages per node is not an integer, some stage transitions must cross node
+    boundaries and therefore use the slower inter-node bandwidth.
+
+    Returns 0 when ``gpus_per_node`` is None (flat topology, all intra-node).
+    """
+    if gpus_per_node is None or pp_size <= 1:
+        return 0
+    stages_per_node = gpus_per_node // tp_size
+    if stages_per_node == 0:
+        return pp_size - 1
+    cross = 0
+    for k in range(pp_size - 1):
+        if (k + 1) % stages_per_node == 0:
+            cross += 1
+    return cross
+
+
 def valid_pp_sizes(model_spec, num_gpus):
     """Return list of PP sizes that are valid for this model.
 
@@ -161,14 +190,15 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
                    max_model_len=8192, max_num_seqs=256,
                    gpu_memory_utilization=0.85,
                    max_batch_tokens=8192,
-                   pp=1):
+                   pp=1, gpus_per_node=None):
     """Return list of TP sizes that fit in GPU memory.
 
     Constraints:
     1. num_heads % tp == 0 (attention head divisibility)
     2. num_kv_heads % tp == 0 (KV head divisibility for GQA)
-    3. model_weight/(tp×pp) + activation < usable VRAM (weights must fit)
-    4. KV cache at expected context must fit in remaining usable VRAM.
+    3. tp <= gpus_per_node (TP groups stay within a single node)
+    4. model_weight/(tp×pp) + activation < usable VRAM (weights must fit)
+    5. KV cache at expected context must fit in remaining usable VRAM.
        Uses estimated average seq length (not max_model_len) since the
        block pool (PagedAttention) handles dynamic allocation at runtime.
 
@@ -185,8 +215,12 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
     kv_per_tok = kv_cache_per_token_bytes(model_spec)
     nh_kv = model_spec.get("num_kv_heads", model_spec["num_heads"])
 
+    max_tp = num_gpus
+    if gpus_per_node is not None:
+        max_tp = min(max_tp, gpus_per_node)
+
     valid = []
-    for tp in range(1, num_gpus + 1):
+    for tp in range(1, max_tp + 1):
         if tp * pp > num_gpus:
             continue
         if model_spec["num_heads"] % tp != 0:

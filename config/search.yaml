@@ -24,7 +24,8 @@ simulation:
 
 strategy:
   mode: both  # both / colocated / disaggregated
-  total_gpus: 128
+  nodes: null      # set to override total_gpus; total_gpus = nodes × gpus_per_node
+  gpus_per_node: 8
   search:
     max_batched_tokens: [8192]
     prefill_thresholds: [8192]

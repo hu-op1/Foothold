@@ -65,11 +65,40 @@ def run_single(
     dp = 0
     pd_ratio = (1, 1)
     d_tp = d_pp = 1
+    gpus_per_node = strat.get("gpus_per_node")
+
+    # ── Validate TP/PP constraints ──
+    nh = model_spec["num_heads"]
+    nh_kv = model_spec.get("num_kv_heads", nh)
+    nl = model_spec["num_layers"]
+
+    def _validate_tp(tp, label):
+        if nh % tp != 0:
+            raise ValueError(
+                f"{label} tp_size={tp}: num_heads ({nh}) not divisible by tp")
+        if nh_kv % tp != 0:
+            raise ValueError(
+                f"{label} tp_size={tp}: num_kv_heads ({nh_kv}) not divisible by tp "
+                f"(GQA constraint)")
+        if gpus_per_node is not None and tp > gpus_per_node:
+            raise ValueError(
+                f"{label} tp_size ({tp}) exceeds gpus_per_node ({gpus_per_node})")
+
+    def _validate_pp(pp, label):
+        if nl % pp != 0:
+            raise ValueError(
+                f"{label} pp_size={pp}: num_layers ({nl}) not divisible by pp")
 
     if mode == "colocated":
         tp_size = strat.get("tp_size", 1)
         pp_size = strat.get("pp_size", 1)
         total_gpus = strat.get("total_gpus", 1)
+        _validate_tp(tp_size, "colocated")
+        _validate_pp(pp_size, "colocated")
+        if total_gpus % (tp_size * pp_size) != 0:
+            raise ValueError(
+                f"total_gpus ({total_gpus}) not divisible by tp×pp "
+                f"({tp_size}×{pp_size}={tp_size * pp_size})")
         dp = total_gpus // (tp_size * pp_size)
         metrics = engine.run(list(requests), mode="colocated",
                              tp_size=tp_size, dp=dp, pp_size=pp_size,
@@ -80,6 +109,10 @@ def run_single(
         p_pp = strat.get("p_pp_size", 1)
         d_tp = strat.get("d_tp_size", 1)
         d_pp = strat.get("d_pp_size", 1)
+        _validate_tp(p_tp, "P-side")
+        _validate_pp(p_pp, "P-side")
+        _validate_tp(d_tp, "D-side")
+        _validate_pp(d_pp, "D-side")
         tp_size, pp_size = p_tp, p_pp
         total_gpus = p_tp * p_pp * pd_ratio[0] + d_tp * d_pp * pd_ratio[1]
         metrics = engine.run(list(requests), mode="disaggregated",
@@ -102,6 +135,8 @@ def run_single(
         "total_gpus": total_gpus,
         "tp_size": tp_size,
         "pp_size": pp_size,
+        "gpus_per_node": gpus_per_node,
+        "nodes": strat.get("nodes"),
         "max_batched_tokens": max_tokens,
         "prefill_threshold": threshold,
         "throughput_tok_s": metrics.throughput(),

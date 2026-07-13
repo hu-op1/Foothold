@@ -353,22 +353,35 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16",
 
 def predict_step_pp(scheduled_requests, model_spec, hw_params,
                     pp_size, intra_node_bw_gb_s, intra_latency_us=2.0,
-                    dtype="float16", use_cudagraph=False):
+                    dtype="float16", use_cudagraph=False,
+                    inter_bw_gb_s=None, inter_latency_us=None,
+                    cross_node_hops=0, pipeline_depth=1):
     """Predict step time with pipeline parallelism.
 
     Splits model layers evenly across *pp_size* pipeline stages.
     Each stage computes ``num_layers / pp_size`` layers and sends
     hidden states to the next stage (``pp_size - 1`` transfers).
 
-    Uses the optimistic (pipelined) model: all stages execute in parallel,
-    so compute time divides by pp_size while inter-stage communication
-    adds fixed overhead.
+    Pipeline bubble model:
+      - When *pipeline_depth* < pp_size, only *pipeline_depth* stages out
+        of *pp_size* are actively computing.  The remaining
+        ``pp_size - pipeline_depth`` stages are idle (bubble), inflating
+        the per-step time.
+      - After *pp_size* consecutive steps with scheduled tokens, the
+        pipeline is full and step time = ``stage_compute + comm``.
 
     Args:
         pp_size: number of pipeline stages (GPUs in the PP dimension).
         intra_node_bw_gb_s: intra-node bandwidth for inter-stage P2P (GB/s).
         intra_latency_us: intra-node latency per P2P transfer (µs).
         dtype: precision string.
+        inter_bw_gb_s: inter-node bandwidth (GB/s).  When given, inter-stage
+            transfers that cross node boundaries use this slower link.
+        inter_latency_us: inter-node latency per P2P transfer (µs).
+        cross_node_hops: number of inter-stage transitions that cross
+            node boundaries (0 = all transfers are intra-node).
+        pipeline_depth: how many sequential steps have had tokens in this
+            pipeline (1 = cold start, pp_size = full pipeline).
 
     Returns:
         step_time_s with PP overhead.
@@ -462,10 +475,18 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
     # Each transfer sends hidden states for all tokens: tokens × h × dt_bytes.
     # latency + bandwidth model: real P2P has fixed per-transfer overhead
     # that dominates for small messages (e.g. decode with 1 token).
+    # Transfers that cross node boundaries use the slower inter-node link.
     inter_stage_bytes = total_new_tokens * h * dt_bytes
-    inter_stage_comm = (pp_size - 1) * (
-        inter_stage_bytes / (intra_node_bw_gb_s * 1e9) + intra_latency_us * 1e-6
-    )
+    intra_hops = (pp_size - 1) - cross_node_hops
+    inter_stage_comm = 0.0
+    if intra_hops > 0:
+        inter_stage_comm += intra_hops * (
+            inter_stage_bytes / (intra_node_bw_gb_s * 1e9) + intra_latency_us * 1e-6
+        )
+    if cross_node_hops > 0 and inter_bw_gb_s is not None and inter_latency_us is not None:
+        inter_stage_comm += cross_node_hops * (
+            inter_stage_bytes / (inter_bw_gb_s * 1e9) + inter_latency_us * 1e-6
+        )
 
     # ── Kernel launch overhead (CPU→GPU dispatch) ──
     # Per-stage kernel count (same per-layer logic as predict_step).
@@ -479,6 +500,17 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
         launch_overhead_time = 0.0
 
     total = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + fused_add_norm_time + swiglu_time + rope_time + lm_head_time + inter_stage_comm + launch_overhead_time
+
+    # ── Pipeline bubble ──
+    # When pipeline_depth < pp_size, only pipeline_depth stages are active.
+    # The remaining stages are idle and inflate per-step compute time.
+    # Each active stage does compute/pp work; bubble stages = pp_size - depth.
+    depth = max(1, min(pp_size, pipeline_depth))
+    bubble_stages = pp_size - depth
+    if bubble_stages > 0:
+        stage_compute = attn_proj_time + ffn_proj_time + attn_prefill_time + attn_decode_time + fused_add_norm_time + swiglu_time + rope_time + lm_head_time
+        total += bubble_stages * stage_compute
+
     return {
         "total": total,
         "attn_proj": attn_proj_time,
@@ -497,7 +529,10 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
 def predict_step_tp(scheduled_requests, model_spec, hw_params,
                     num_gpus, intra_node_bw_gb_s,
                     intra_latency_us=2.0,
-                    pp_size=1, dtype="float16", use_cudagraph=False):
+                    pp_size=1, dtype="float16", use_cudagraph=False,
+                    inter_bw_gb_s=None, inter_latency_us=None,
+                    cross_node_hops=0,
+                    pipeline_depth=1):
     """Predict step time with tensor parallelism (and optional pipeline parallelism).
 
     When pp_size > 1, pipeline parallelism is applied first (splitting layers
@@ -515,6 +550,9 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
         pp_size: pipeline parallelism degree (1 = no PP).
         dtype: precision string.
         use_cudagraph: if True, use CUDA Graph-specific roofline params.
+        inter_bw_gb_s: inter-node bandwidth for cross-node PP transfers.
+        inter_latency_us: inter-node latency per cross-node PP transfer (µs).
+        cross_node_hops: number of PP transitions that cross node boundaries.
 
     Returns:
         dict with keys: total, proj, attn_prefill, attn_decode, elem,
@@ -523,7 +561,11 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     if pp_size > 1:
         base = predict_step_pp(scheduled_requests, model_spec, hw_params,
                                pp_size, intra_node_bw_gb_s, intra_latency_us, dtype,
-                               use_cudagraph=use_cudagraph)
+                               use_cudagraph=use_cudagraph,
+                               inter_bw_gb_s=inter_bw_gb_s,
+                               inter_latency_us=inter_latency_us,
+                               cross_node_hops=cross_node_hops,
+                               pipeline_depth=pipeline_depth)
     else:
         base = predict_step(scheduled_requests, model_spec, hw_params, dtype,
                             use_cudagraph=use_cudagraph)

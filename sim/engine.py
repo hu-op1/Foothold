@@ -38,6 +38,12 @@ class SimulationEngine:
         self.clock: float = 0.0
         self.pp_size = 1
 
+        # Pipeline depth tracking per rank group (key=int).
+        # Tracks how many consecutive steps each PP group has had active
+        # batches in-flight.  Capped at pp_size (pipeline full).
+        # When depth < pp_size, bubble stages inflate step time.
+        self._pp_depths: dict[int, int] = {}
+
         # Precision (for per-dtype roofline params + bytes-per-element)
         self.dtype = config.get("dtype", "float16")
 
@@ -62,6 +68,10 @@ class SimulationEngine:
         self.latency_us = config["communication"]["inter_latency_us"]
         self.intra_bw_gb_s = config["communication"]["intra_bw_gb_s"]
         self.intra_latency_us = config["communication"].get("intra_latency_us", 2.0)
+        self.inter_bw_gb_s = config["communication"]["inter_bw_gb_s"]
+        self.inter_latency_us = config["communication"]["inter_latency_us"]
+        # Node topology (for cross-node PP communication)
+        self.gpus_per_node = config.get("strategy", {}).get("gpus_per_node")
         # GPU↔CPU swap bandwidth for D-side preemption (bytes/s)
         self.cpu_swap_bw = config["communication"].get("cpu_swap_bw_gb_s", 32) * 1e9
         # Prefix caching
@@ -258,7 +268,7 @@ class SimulationEngine:
                     scheds[i]._update_after_schedule(output)
                     step = self._predict_step(
                         [(r, nt) for r, nt, _ in output.scheduled_requests],
-                        pp=pp)
+                        pp=pp, group_id=i)
                     scheds[i].update_from_output(output, self.clock + step["total"])
                     max_step = max(max_step, step["total"])
                     # Accumulate time breakdown components
@@ -273,6 +283,8 @@ class SimulationEngine:
                         step_prompt += (num_new - dec)
                         step_gen += dec
                     step_prompt += output.scheduled_cache_hit_tokens
+                else:
+                    self._pp_depths.pop(i, None)
 
             # ── Advance clock with schedule/execute pipeline ──
             # Pipeline allows CPU scheduling of step N+1 to overlap with
@@ -490,8 +502,10 @@ class SimulationEngine:
 
             p_step = self._predict_step(
                 [(r, nt) for r, nt, _ in p_out.scheduled_requests],
-                pp=pp
+                pp=pp, group_id=0
             ) if p_total > 0 else self._zero_step_dict()
+            if p_total == 0:
+                self._pp_depths.pop(0, None)
             p_time_val = p_step["total"]
             # Accumulate P-side time breakdown
             for k, v in p_step.items():
@@ -511,7 +525,7 @@ class SimulationEngine:
                 if o.total_num_scheduled_tokens > 0:
                     d_step = self._predict_step(
                         [(r, nt) for r, nt, _ in o.scheduled_requests],
-                        tp=d_tp, pp=d_pp)
+                        tp=d_tp, pp=d_pp, group_id=i + 1)
                     d_scheds[i].update_from_output(o, self.clock + d_step["total"])
                     d_times.append(d_step["total"])
                     # Accumulate D-side time breakdown
@@ -522,6 +536,7 @@ class SimulationEngine:
                     step_gen += sum(nt for _, nt, _ in o.scheduled_requests)
                 else:
                     d_times.append(0.0)
+                    self._pp_depths.pop(i + 1, None)
 
             # Drain finished from D first (frees blocks), then retry stalled transfers
             d_had_finished = False
@@ -637,25 +652,43 @@ class SimulationEngine:
         metrics.time_breakdown = dict(self.time_acc)
         return metrics
 
-    def _predict_step(self, scheduled_requests, tp=None, pp=None):
+    def _predict_step(self, scheduled_requests, tp=None, pp=None, group_id=0):
         """Predict step time, using TP and/or PP if configured.
 
         Args:
             scheduled_requests: list of (request, num_new_tokens)
             tp: tensor parallelism degree (defaults to self.tp_size)
             pp: pipeline parallelism degree (defaults to self.pp_size)
+            group_id: rank group ID for per-group pipeline depth tracking
         """
         if tp is None:
             tp = getattr(self, "tp_size", 1)
         if pp is None:
             pp = getattr(self, "pp_size", 1)
         use_cg = self.cfg.get("simulation", {}).get("use_cudagraph", False)
+
+        # Pipeline depth: how many active stages in this step.
+        # Incremented before calling predict_step_pp so the bubble
+        # formula uses the correct number of busy stages.
+        new_depth = min(pp, self._pp_depths.get(group_id, 0))
+        if len(scheduled_requests) > 0:
+            new_depth = min(pp, new_depth + 1)
+        else:
+            new_depth = 0
+        self._pp_depths[group_id] = new_depth
+
         if tp > 1 or pp > 1:
+            from sim.config import pp_cross_node_hops
+            cross = pp_cross_node_hops(pp, tp, self.gpus_per_node)
             return predict_step_tp(scheduled_requests, self.model, self.hw,
                                    tp, self.intra_bw_gb_s,
                                    self.intra_latency_us,
                                    pp_size=pp, dtype=self.dtype,
-                                   use_cudagraph=use_cg)
+                                   use_cudagraph=use_cg,
+                                   inter_bw_gb_s=self.inter_bw_gb_s,
+                                   inter_latency_us=self.inter_latency_us,
+                                   cross_node_hops=cross,
+                                   pipeline_depth=new_depth)
         return predict_step(scheduled_requests, self.model, self.hw, self.dtype,
                             use_cudagraph=use_cg)
 

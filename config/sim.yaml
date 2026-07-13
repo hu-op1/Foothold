@@ -2,7 +2,7 @@
 # Structure mirrors search.yaml but with scalar strategy values (no grid search).
 
 gpu: "3090"
-model: "Qwen/Qwen3-4B"
+model: "Qwen/Qwen3-8B"
 dtype: "bfloat16"  # must match a dtype in the benchmark config
 
 communication:
@@ -30,7 +30,8 @@ simulation:
 strategy:
   mode: colocated       # colocated or disaggregated
 
-  total_gpus: 4
+  nodes: 1               # number of nodes (overrides total_gpus)
+  gpus_per_node: 4       # GPUs per node (total_gpus = nodes × gpus_per_node)
 
   # colocated:
   tp_size: 4
@@ -43,11 +44,11 @@ strategy:
   d_tp_size: 1              # D-side TP
   d_pp_size: 1              # D-side PP
 
-output: "sim/output/qwen3-4b-tp4-conversation"
+output: "sim/output/try"  # output directory for timeseries.csv, requests.jsonl, sim.log
 tick_seconds: 0.5            # timeseries downsampling interval
 
 trace:
-  path: "traces/qwen3-4b-conversation.jsonl"
+  path: "traces/qwen3-8b-conversation.jsonl"
   max_requests: 50
   format: "agentic"  # "agentic" or "sharegpt"
 
