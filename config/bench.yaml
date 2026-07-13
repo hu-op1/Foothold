@@ -82,3 +82,11 @@ launch_overhead:
   n_values: [10, 50, 100, 200, 500, 1000]  # kernel counts for slope analysis
   trials: 5                                   # measurement trials per N (median taken)
   warmup: 10                                  # warmup iterations
+
+# ── GPU↔CPU memory copy bandwidth benchmark ─────────────────────────────
+# Measures cudaMemcpy D2H/H2D transfer time over byte sizes from 256 B
+# to 256 MiB.  Results are stored as a lookup table (LUT) in fitted_params
+# and used by the simulator to replace the simple BW+latency model for
+# inter-GPU communication, KV cache transfer, and GPU↔CPU swap.
+memcpy:
+  bytes: [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296]

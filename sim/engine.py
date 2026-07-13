@@ -12,6 +12,7 @@ from sim.roofline import dtype_bytes
 from sim.communication import (
     effective_xfer_overhead,
     transfer_blocks,
+    memcpy_time,
 )
 from sim.pipeline import ScheduleExecutePipeline, estimate_schedule_time
 
@@ -63,19 +64,21 @@ class SimulationEngine:
         # creating pools because each GPU stores KV for only nl/pp layers.
         self.num_blocks = self._compute_num_blocks()
 
-        # Network params
-        self.bw_gb_s = config["communication"]["inter_bw_gb_s"]
-        self.latency_us = config["communication"]["inter_latency_us"]
-        self.intra_bw_gb_s = config["communication"]["intra_bw_gb_s"]
-        self.intra_latency_us = config["communication"].get("intra_latency_us", 2.0)
-        self.inter_bw_gb_s = config["communication"]["inter_bw_gb_s"]
-        self.inter_latency_us = config["communication"]["inter_latency_us"]
-        # Node topology (for cross-node PP communication)
+        # Network / communication — all modelled via measured memcpy LUT.
+        # The old BW+latency config values are retained for reference but
+        # NOT used at runtime.  Run --bench then --fit to generate the LUT.
         self.gpus_per_node = config.get("strategy", {}).get("gpus_per_node")
-        # GPU↔CPU swap bandwidth for D-side preemption (bytes/s)
-        self.cpu_swap_bw = config["communication"].get("cpu_swap_bw_gb_s", 32) * 1e9
         # Prefix caching
         self.enable_cache = config["simulation"].get("enable_prefix_caching", True)
+
+        # Memcpy LUT from fitted params (REQUIRED — must run --bench then --fit first)
+        self._comm_lut_bytes = hw_params.get("memcpy_d2h_bytes")
+        self._comm_lut_time_s = hw_params.get("memcpy_d2h_time_s")
+        if self._comm_lut_bytes is None or self._comm_lut_time_s is None:
+            raise RuntimeError(
+                "memcpy LUT missing from fitted params. "
+                "Run: uv run python main.py --bench && uv run python main.py --fit"
+            )
 
         # Per-step time breakdown accumulator (reset in run())
         self.time_acc: dict[str, float] = {}
@@ -394,7 +397,8 @@ class SimulationEngine:
         d_cfg = _deep_copy_config(self.cfg)
         d_pools = [BlockPool(self.num_blocks * d_tp * d_pp_size,
                              enable_caching=self.enable_cache,
-                             cpu_swap_bw_bytes_per_s=self.cpu_swap_bw)
+                             comm_lut_bytes=list(self._comm_lut_bytes),
+                             comm_lut_time_s=list(self._comm_lut_time_s))
                    for _ in range(num_d_groups)]
         for dp in d_pools:
             dp.bytes_per_block = self.bytes_per_block
@@ -420,7 +424,8 @@ class SimulationEngine:
             if len(sched.running) >= sched.max_num_seqs:
                 return False
             xfer_time = transfer_blocks(req, d_pools[d_idx], self.bytes_per_block,
-                                        self.bw_gb_s, self.latency_us,
+                                        self._comm_lut_bytes,
+                                        self._comm_lut_time_s,
                                         self.block_size)
             if xfer_time == float("inf"):
                 return False
@@ -681,14 +686,13 @@ class SimulationEngine:
             from sim.config import pp_cross_node_hops
             cross = pp_cross_node_hops(pp, tp, self.gpus_per_node)
             return predict_step_tp(scheduled_requests, self.model, self.hw,
-                                   tp, self.intra_bw_gb_s,
-                                   self.intra_latency_us,
+                                   tp,
                                    pp_size=pp, dtype=self.dtype,
                                    use_cudagraph=use_cg,
-                                   inter_bw_gb_s=self.inter_bw_gb_s,
-                                   inter_latency_us=self.inter_latency_us,
                                    cross_node_hops=cross,
-                                   pipeline_depth=new_depth)
+                                   pipeline_depth=new_depth,
+                                   comm_lut_bytes=self._comm_lut_bytes,
+                                   comm_lut_time_s=self._comm_lut_time_s)
         return predict_step(scheduled_requests, self.model, self.hw, self.dtype,
                             use_cudagraph=use_cg)
 
@@ -696,7 +700,9 @@ class SimulationEngine:
         """Compute KV transfer time for a completed prefill, accounting for overlap."""
         return effective_xfer_overhead(
             request.prompt_len, self.nl, self.nh_kv, self.hd,
-            self.bw_gb_s, self.latency_us, prefill_time,
+            prefill_time,
+            self._comm_lut_bytes,
+            self._comm_lut_time_s,
         )
 
 

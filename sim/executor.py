@@ -14,6 +14,7 @@ from sim.roofline import (
     roofline_time,
     dtype_bytes,
 )
+from sim.communication import memcpy_time
 
 # ── Roofline param selection ──────────────────────────────────────────────
 # The smooth-roofline fit produces two (B_peak, p) pairs:
@@ -352,10 +353,10 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16",
 
 
 def predict_step_pp(scheduled_requests, model_spec, hw_params,
-                    pp_size, intra_node_bw_gb_s, intra_latency_us=2.0,
+                    pp_size,
                     dtype="float16", use_cudagraph=False,
-                    inter_bw_gb_s=None, inter_latency_us=None,
-                    cross_node_hops=0, pipeline_depth=1):
+                    cross_node_hops=0, pipeline_depth=1,
+                    comm_lut_bytes=None, comm_lut_time_s=None):
     """Predict step time with pipeline parallelism.
 
     Splits model layers evenly across *pp_size* pipeline stages.
@@ -372,16 +373,13 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
 
     Args:
         pp_size: number of pipeline stages (GPUs in the PP dimension).
-        intra_node_bw_gb_s: intra-node bandwidth for inter-stage P2P (GB/s).
-        intra_latency_us: intra-node latency per P2P transfer (µs).
         dtype: precision string.
-        inter_bw_gb_s: inter-node bandwidth (GB/s).  When given, inter-stage
-            transfers that cross node boundaries use this slower link.
-        inter_latency_us: inter-node latency per P2P transfer (µs).
         cross_node_hops: number of inter-stage transitions that cross
-            node boundaries (0 = all transfers are intra-node).
+            node boundaries (all use the same LUT for now).
         pipeline_depth: how many sequential steps have had tokens in this
             pipeline (1 = cold start, pp_size = full pipeline).
+        comm_lut_bytes: LUT byte-size array for communication model.
+        comm_lut_time_s: LUT transfer-time array for communication model.
 
     Returns:
         step_time_s with PP overhead.
@@ -473,20 +471,11 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
 
     # ── Inter-stage communication: (pp_size - 1) transfers ──
     # Each transfer sends hidden states for all tokens: tokens × h × dt_bytes.
-    # latency + bandwidth model: real P2P has fixed per-transfer overhead
-    # that dominates for small messages (e.g. decode with 1 token).
-    # Transfers that cross node boundaries use the slower inter-node link.
+    # All hops use the same LUT (single GPU / single node setup).
     inter_stage_bytes = total_new_tokens * h * dt_bytes
-    intra_hops = (pp_size - 1) - cross_node_hops
-    inter_stage_comm = 0.0
-    if intra_hops > 0:
-        inter_stage_comm += intra_hops * (
-            inter_stage_bytes / (intra_node_bw_gb_s * 1e9) + intra_latency_us * 1e-6
-        )
-    if cross_node_hops > 0 and inter_bw_gb_s is not None and inter_latency_us is not None:
-        inter_stage_comm += cross_node_hops * (
-            inter_stage_bytes / (inter_bw_gb_s * 1e9) + inter_latency_us * 1e-6
-        )
+    total_hops = (pp_size - 1)
+    inter_stage_comm = total_hops * memcpy_time(
+        inter_stage_bytes, comm_lut_bytes, comm_lut_time_s)
 
     # ── Kernel launch overhead (CPU→GPU dispatch) ──
     # Per-stage kernel count (same per-layer logic as predict_step).
@@ -527,12 +516,11 @@ def predict_step_pp(scheduled_requests, model_spec, hw_params,
 
 
 def predict_step_tp(scheduled_requests, model_spec, hw_params,
-                    num_gpus, intra_node_bw_gb_s,
-                    intra_latency_us=2.0,
+                    num_gpus,
                     pp_size=1, dtype="float16", use_cudagraph=False,
-                    inter_bw_gb_s=None, inter_latency_us=None,
                     cross_node_hops=0,
-                    pipeline_depth=1):
+                    pipeline_depth=1,
+                    comm_lut_bytes=None, comm_lut_time_s=None):
     """Predict step time with tensor parallelism (and optional pipeline parallelism).
 
     When pp_size > 1, pipeline parallelism is applied first (splitting layers
@@ -545,14 +533,12 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
 
     Args:
         num_gpus: number of GPUs in the TP group.
-        intra_node_bw_gb_s: intra-node bandwidth for all-reduce (GB/s).
-        intra_latency_us: intra-node latency per all-reduce step (µs).
         pp_size: pipeline parallelism degree (1 = no PP).
         dtype: precision string.
         use_cudagraph: if True, use CUDA Graph-specific roofline params.
-        inter_bw_gb_s: inter-node bandwidth for cross-node PP transfers.
-        inter_latency_us: inter-node latency per cross-node PP transfer (µs).
         cross_node_hops: number of PP transitions that cross node boundaries.
+        comm_lut_bytes: LUT byte-size array for communication model.
+        comm_lut_time_s: LUT transfer-time array for communication model.
 
     Returns:
         dict with keys: total, proj, attn_prefill, attn_decode, elem,
@@ -560,12 +546,12 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     """
     if pp_size > 1:
         base = predict_step_pp(scheduled_requests, model_spec, hw_params,
-                               pp_size, intra_node_bw_gb_s, intra_latency_us, dtype,
+                               pp_size, dtype,
                                use_cudagraph=use_cudagraph,
-                               inter_bw_gb_s=inter_bw_gb_s,
-                               inter_latency_us=inter_latency_us,
                                cross_node_hops=cross_node_hops,
-                               pipeline_depth=pipeline_depth)
+                               pipeline_depth=pipeline_depth,
+                               comm_lut_bytes=comm_lut_bytes,
+                               comm_lut_time_s=comm_lut_time_s)
     else:
         base = predict_step(scheduled_requests, model_spec, hw_params, dtype,
                             use_cudagraph=use_cudagraph)
@@ -603,9 +589,12 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     # (no CUDA-stream overlap).  So total = compute + communicate.
     def _ar_time(ar_bytes):
         steps = 2 * (num_gpus - 1)
-        factor = steps / num_gpus          # = 2·(N−1)/N
-        return (ar_bytes * factor / (intra_node_bw_gb_s * 1e9)
-                + steps * intra_latency_us * 1e-6)
+        # Each ring step transfers ar_bytes / num_gpus bytes over one hop.
+        # Total time = steps × time_per_hop.
+        per_step_bytes = ar_bytes / num_gpus
+        hop_time = memcpy_time(per_step_bytes,
+                               comm_lut_bytes, comm_lut_time_s)
+        return steps * hop_time
 
     ar_bytes_per_layer = total_new_tokens * h * dt_bytes
     all_reduce_time = (2 * na + (nl - na)) * _ar_time(ar_bytes_per_layer)

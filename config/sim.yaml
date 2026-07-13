@@ -5,12 +5,9 @@ gpu: "3090"
 model: "Qwen/Qwen3-8B"
 dtype: "bfloat16"  # must match a dtype in the benchmark config
 
-communication:
-  intra_bw_gb_s: 9.7
-  intra_latency_us: 2.0  # intra-node latency per hop (NVLink ~1-2 µs)
-  inter_bw_gb_s: 9.7
-  inter_latency_us: 6.9
-  cpu_swap_bw_gb_s: 9.7
+# Communication is modelled via measured memcpy LUT from fitted_params.
+# Run --bench then --fit to generate the LUT.  The old BW+latency
+# model is removed; configure bench.yaml memcpy grid if more coverage is needed.
 
 simulation:
   block_size: 16

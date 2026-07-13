@@ -1,9 +1,40 @@
 """KV cache transfer model for disaggregated prefill→decode communication."""
 
+import numpy as np
+
 from sim.request import Request
 
 
 DTYPE_BYTES = 2  # fp16
+
+
+def _lut_lookup(bytes_val, lut_bytes, lut_time_s):
+    """Linear interpolation on a sorted (bytes, time) lookup table."""
+    if bytes_val <= lut_bytes[0]:
+        return lut_time_s[0]
+    if bytes_val >= lut_bytes[-1]:
+        slope = ((lut_time_s[-1] - lut_time_s[-2])
+                 / (lut_bytes[-1] - lut_bytes[-2]))
+        extra = bytes_val - lut_bytes[-1]
+        return lut_time_s[-1] + slope * extra
+    idx = int(np.searchsorted(lut_bytes, bytes_val))
+    if idx == 0:
+        return lut_time_s[0]
+    x0, x1 = lut_bytes[idx - 1], lut_bytes[idx]
+    t0, t1 = lut_time_s[idx - 1], lut_time_s[idx]
+    return t0 + (bytes_val - x0) * (t1 - t0) / (x1 - x0)
+
+
+def memcpy_time(bytes_val, lut_bytes, lut_time_s):
+    """Predicted transfer time for *bytes_val* across a PCIe/NVLink link.
+
+    Uses linear interpolation on the measured lookup table.
+    Raises ValueError if LUT is not available.
+    """
+    if lut_bytes is None or lut_time_s is None or len(lut_bytes) == 0:
+        raise ValueError("memcpy LUT not available — run --bench then --fit first")
+    return _lut_lookup(bytes_val, np.asarray(lut_bytes, dtype=np.float64),
+                       np.asarray(lut_time_s, dtype=np.float64))
 
 
 def kv_bytes_per_layer(kv_len, num_kv_heads, head_dim):
@@ -12,7 +43,7 @@ def kv_bytes_per_layer(kv_len, num_kv_heads, head_dim):
 
 
 def raw_transfer_time(kv_len, num_layers, num_kv_heads, head_dim,
-                      bandwidth_gb_s, latency_us):
+                      lut_bytes, lut_time_s):
     """Raw transfer time for all KV layers without overlap.
 
     Args:
@@ -20,26 +51,27 @@ def raw_transfer_time(kv_len, num_layers, num_kv_heads, head_dim,
         num_layers: number of attention layers.
         num_kv_heads: KV heads (accounting for GQA).
         head_dim: dimension per head.
-        bandwidth_gb_s: inter-node bandwidth in GB/s.
-        latency_us: fixed per-transfer latency in microseconds.
+        lut_bytes: LUT byte-size array.
+        lut_time_s: LUT transfer-time array.
 
     Returns:
         Transfer time in seconds.
     """
     per_layer = kv_bytes_per_layer(kv_len, num_kv_heads, head_dim)
     total_bytes = num_layers * per_layer
-    return total_bytes / (bandwidth_gb_s * 1e9) + latency_us * 1e-6
+    return memcpy_time(total_bytes, lut_bytes, lut_time_s)
 
 
 def effective_xfer_overhead(kv_len, num_layers, num_kv_heads, head_dim,
-                            bandwidth_gb_s, latency_us, prefill_step_time_s):
+                            prefill_step_time_s,
+                            lut_bytes, lut_time_s):
     """Effective overhead after overlap with prefill compute.
 
     KV saves start per-layer during prefill forward.
     Overlap ≈ prefill_time * (num_layers - 1) / num_layers
     """
     raw = raw_transfer_time(kv_len, num_layers, num_kv_heads, head_dim,
-                            bandwidth_gb_s, latency_us)
+                            lut_bytes, lut_time_s)
     if prefill_step_time_s <= 0 or num_layers <= 1:
         return raw
     overlap = prefill_step_time_s * (num_layers - 1) / num_layers
@@ -47,7 +79,7 @@ def effective_xfer_overhead(kv_len, num_layers, num_kv_heads, head_dim,
 
 
 def transfer_blocks(request: Request, pool_d, bytes_per_block: int,
-                    bandwidth_gb_s: float, latency_us: float,
+                    lut_bytes, lut_time_s,
                     block_size: int = 16) -> float:
     """Allocate D-side blocks for a request's KV cache and compute transfer time.
 
@@ -59,8 +91,8 @@ def transfer_blocks(request: Request, pool_d, bytes_per_block: int,
         request: Request with populated block_table and block_hashes.
         pool_d: Decode-side BlockPool.
         bytes_per_block: Bytes per KV cache block.
-        bandwidth_gb_s: Inter-node bandwidth (GB/s).
-        latency_us: Fixed per-transfer latency.
+        lut_bytes: LUT byte-size array.
+        lut_time_s: LUT transfer-time array.
         block_size: Number of tokens per block.
 
     Returns:
@@ -107,4 +139,4 @@ def transfer_blocks(request: Request, pool_d, bytes_per_block: int,
         return 0.0
 
     total_bytes = blocks_to_send * bytes_per_block
-    return total_bytes / (bandwidth_gb_s * 1e9) + latency_us * 1e-6
+    return memcpy_time(total_bytes, lut_bytes, lut_time_s)
