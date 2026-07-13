@@ -19,11 +19,24 @@ M_SPLIT = 256
 def _fit_subset(matmul_results, label, F_fixed=None, fit_overhead=False):
     flops = np.array([r["flops"] for r in matmul_results])
     bytes_moved = np.array([r["bytes"] for r in matmul_results])
-    times = np.array([r["time_ms"] for r in matmul_results]) / 1000.0
+    times_raw = np.array([r["time_ms"] for r in matmul_results]) / 1000.0
 
     if len(matmul_results) < 5:
         print(f"  {label}: too few points ({len(matmul_results)}), skipping")
         return {}
+
+    # ── Estimate kernel launch overhead from smallest-M points ──
+    matmul_overhead = 0.0
+    if fit_overhead:
+        small = [r for r in matmul_results if r["M"] <= 4]
+        if len(small) >= 3:
+            matmul_overhead = float(np.median(
+                [r["time_ms"] for r in small]
+            )) / 1000.0
+
+    # Subtract overhead so the roofline model only sees compute+memory time
+    times = times_raw - matmul_overhead
+    times = np.clip(times, 1e-9, None)  # avoid negative from noise
 
     if F_fixed is not None:
         # Fit only B and p, holding F_peak fixed
@@ -48,23 +61,6 @@ def _fit_subset(matmul_results, label, F_fixed=None, fit_overhead=False):
         F_max = F_obs * 1.05
         F_peak, B_peak, p, r2 = roofline_fit(flops, bytes_moved, times,
                                                F_max=F_max)
-
-    # ── Fit per-kernel launch overhead ──
-    # For small M (M <= 4), kernel launch overhead dominates the
-    # roofline time.  We estimate overhead as the residual after
-    # subtracting the roofline prediction.
-    matmul_overhead = 0.0
-    if fit_overhead:
-        small = [r for r in matmul_results if r["M"] <= 4]
-        if len(small) >= 3:
-            residuals = []
-            for r in small:
-                t_meas = r["time_ms"] / 1000.0
-                f, b = r["flops"], r["bytes"]
-                t_pred = (f / F_fixed + b / B_peak) ** (1 / p) if F_fixed is not None else \
-                         (f / F_peak + b / B_peak) ** (1 / p)
-                residuals.append(t_meas - t_pred)
-            matmul_overhead = float(np.median([r for r in residuals if r > 0]))
 
     print(f"  {label}: F={F_peak / 1e12:.1f} TF  B={B_peak / 1e12:.2f} TB  p={p:.3f}  "
           f"overhead={matmul_overhead * 1e6:.1f} us  R2={r2:.4f}")
