@@ -4,7 +4,7 @@ AI coding agent guidance for this repository. See [CLAUDE.md](CLAUDE.md) for ful
 
 ## Environment
 
-- **Python ≥ 3.14** — modern features (walrus, match/case, `pathlib.Path`) are fine
+- **Python ≥ 3.12** — modern features (walrus, match/case, `pathlib.Path`) are fine
 - **Package manager**: `uv` only — never `pip install` or `python -m pip`
 - **Package index**: `https://pypi.tuna.tsinghua.edu.cn/simple` (default). PyTorch from `https://download.pytorch.org/whl/cu128`
 - **GPU required**: All operations need a CUDA-capable NVIDIA GPU. Benchmarks need ≥6 GB VRAM.
@@ -12,17 +12,18 @@ AI coding agent guidance for this repository. See [CLAUDE.md](CLAUDE.md) for ful
 ## Key conventions
 
 - **`main.py` is the only CLI entry point** — subcommands: `bench`, `fit`, `search`, `sim`, `validate`
-- Config files by stage: `config/bench.yaml` (bench/fit), `config/search.yaml` (search), `config/sim.yaml` (sim)
+- Config files by stage: `config/bench.yaml` (bench/fit), `config/search.yaml` (search), `config/sim.yaml` (sim), `config/validate.yaml` (validate)
 - Results saved as CSV (`bench/results/<gpu>/`, `sim/output/`) or JSON (`fit/results/<gpu>.json`)
 - Use `pathlib.Path` for filesystem paths (some legacy uses of `os.path` exist in `main.py` and `bench/`)
 - Use `torch.cuda.Event` for GPU timing — see `CudaTimer`, `warmup()`, `benchmark()` in `bench/utils.py:8`
 - Call `check_memory()` before allocating large tensors to avoid OOM
 - Model specs loaded from **HuggingFace Hub** via `transformers.AutoConfig.from_pretrained()` — no local `config.json` files needed. Any HF model ID works in YAML configs.
-- Trace format: `sharegpt` (one JSONL line per request) or `agentic` (session chains with sub-requests, `tool_duration`)
+- Trace format: `sharegpt` (one JSONL line per request, optional `input_tok_ids`/`output_tok_ids`) or `agentic` (session chains with sub-requests, `tool_duration`)
+- Trace generation tools in `tools/`: `generate_agent_trace.py` (agentic format) and `generate_conversation_trace.py` (sharegpt format)
 
 ## External repos (standalone — not part of this project, do not modify or import)
 
-`InferSim/`, `LLMServingSim/`, `SimAI/`, `apex_plus/`, `vllm-0.19.0/`
+`LLMServingSim/`, `SimAI/`, `astra-sim/`, `DistServe/`, `Frontier/`, `vidur/`, `apex_plus/`, `vllm-0.19.0/`, `PDD/`
 
 ## Testing
 
@@ -39,13 +40,14 @@ Granular instruction files live in `.github/instructions/` — auto-attached whe
 
 | File | Applies To | What It Covers |
 |------|-----------|----------------|
-| `.github/instructions/bench.instructions.md` | `bench/**/*.py` | CUDA timing, checkpoint/resume, OOM handling, benchmark conventions |
-| `.github/instructions/fit.instructions.md` | `fit/**/*.py` | Roofline fitting, matmul prefill/decode split, elementwise proxy map |
+| `.github/instructions/bench.instructions.md` | `bench/**/*.py` | CUDA timing, checkpoint/resume, OOM handling, benchmark conventions (incl. memcpy) |
+| `.github/instructions/fit.instructions.md` | `fit/**/*.py` | Roofline fitting, matmul prefill/decode split, elementwise proxy map, memcpy LUT |
 | `.github/instructions/sim.instructions.md` | `sim/**/*.py` | Event-driven engine, scheduler, executor, memory pool, request lifecycle |
-| `.github/instructions/config.instructions.md` | `config/*.yaml` | Config schemas, model spec loading, common pitfalls |
+| `.github/instructions/config.instructions.md` | `config/*.yaml` | Config schemas, model spec loading, common pitfalls (communication via memcpy LUT) |
 | `.github/instructions/test.instructions.md` | `test/**/*.py` | Pytest conventions, fixtures, trace generation, sim test patterns |
 
 ## Design docs
 
 - `docs/vllm-simulator-gaps.md` — vLLM v0.19.0 vs simulator gap analysis (CUDA Graph, kernel launch overhead, async scheduling, etc.)
 - `docs/accuracy-improvements.md` — Simulation accuracy improvement tracking & regression log
+- `docs/foothold-competitive-analysis.md` — Full feature comparison matrix against 7 competing simulators
