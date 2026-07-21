@@ -18,7 +18,9 @@ test/
 .claude/
 
 # Agent files
-docs/superpowers
+docs/
+
+.superpowers/
 
 # Worktrees
 .worktrees/
