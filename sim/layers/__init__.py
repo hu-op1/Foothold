@@ -20,3 +20,17 @@ def register_ffn(name: str):
         FFN_REGISTRY[name] = fn
         return fn
     return decorator
+
+
+# Import builders so decorators fire at module load time.
+from sim.layers.common import (     # noqa: E402, F401
+    build_fused_residual_norm,
+    build_rmsnorm,
+    build_rope,
+    build_swiglu,
+)
+from sim.layers.standard_attention import build_standard_attention       # noqa: E402, F401
+from sim.layers.dense_ffn import build_dense_ffn                         # noqa: E402, F401
+from sim.layers.moe_ffn import build_moe_ffn                             # noqa: E402, F401
+from sim.layers.linear_attention import build_linear_attention           # noqa: E402, F401
+from sim.layers.head import build_lm_head                                # noqa: E402, F401
