@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from sim.request import Request, RequestStatus, FinishReason
 from sim.memory import BlockPool, compute_block_hashes
 from sim.scheduler import ColocatedScheduler
-from sim.executor import predict_step, predict_step_tp, predict_step_ep
+from sim.executor import predict_step_v1
 from sim.roofline import dtype_bytes
 from sim.communication import (
     effective_xfer_overhead,
@@ -82,13 +82,9 @@ class SimulationEngine:
                 "Run: uv run python main.py --bench && uv run python main.py --fit"
             )
 
-        # v1 graph loading (optional — falls back to old dispatch if model is HF ID)
-        self.graph = None
-        try:
-            from sim.config import load_model_graph
-            self.graph = load_model_graph(config["model"])
-        except Exception:
-            pass
+        # v1 graph loading
+        from sim.config import load_model_graph
+        self.graph = load_model_graph(config["model"])
 
         # Per-step time breakdown accumulator (reset in run())
         self.time_acc: dict[str, float] = {}
@@ -731,41 +727,16 @@ class SimulationEngine:
         ep_size = tp * getattr(self, "dp_size", 1)
 
         # v1: graph-based dispatch
-        if self.graph is not None:
-            from sim.config import pp_cross_node_hops
-            cross = pp_cross_node_hops(pp, tp, self.gpus_per_node) if self.gpus_per_node and pp > 1 else 0
-            from sim.executor import predict_step_v1
-            return predict_step_v1(
-                scheduled_requests, self.model, self.graph, self.hw,
-                tp=tp, pp=pp, ep=ep_size if self.enable_ep else 0, pp_stage=0,
-                cross_node_hops=cross,
-                dtype=self.dtype, use_cudagraph=use_cg,
-                comm_lut_bytes=self._comm_lut_bytes,
-                comm_lut_time_s=self._comm_lut_time_s,
-            )
-
-        # EP dispatch
-        if self.enable_ep:
-            return predict_step_ep(scheduled_requests, self.model, self.hw,
-                                   tp_size=tp, ep_size=ep_size,
-                                   dtype=self.dtype,
-                                   use_cudagraph=use_cg,
-                                   comm_lut_bytes=self._comm_lut_bytes,
-                                   comm_lut_time_s=self._comm_lut_time_s)
-
-        if tp > 1 or pp > 1:
-            from sim.config import pp_cross_node_hops
-            cross = pp_cross_node_hops(pp, tp, self.gpus_per_node)
-            return predict_step_tp(scheduled_requests, self.model, self.hw,
-                                   tp,
-                                   pp_size=pp, dtype=self.dtype,
-                                   use_cudagraph=use_cg,
-                                   cross_node_hops=cross,
-                                   pipeline_depth=new_depth,
-                                   comm_lut_bytes=self._comm_lut_bytes,
-                                   comm_lut_time_s=self._comm_lut_time_s)
-        return predict_step(scheduled_requests, self.model, self.hw, self.dtype,
-                            use_cudagraph=use_cg)
+        from sim.config import pp_cross_node_hops
+        cross = pp_cross_node_hops(pp, tp, self.gpus_per_node) if self.gpus_per_node and pp > 1 else 0
+        return predict_step(
+            scheduled_requests, self.model, self.graph, self.hw,
+            tp=tp, pp=pp, ep=ep_size if self.enable_ep else 0, pp_stage=0,
+            cross_node_hops=cross,
+            dtype=self.dtype, use_cudagraph=use_cg,
+            comm_lut_bytes=self._comm_lut_bytes,
+            comm_lut_time_s=self._comm_lut_time_s,
+        )
 
     def _compute_xfer(self, request: Request, prefill_time: float) -> float:
         """Compute KV transfer time for a completed prefill, accounting for overlap."""

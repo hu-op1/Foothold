@@ -169,9 +169,6 @@ def run_search(args):
         print("Config is missing `model` field.")
         return
     model = load_model_spec(model_sel)
-    if not model:
-        print(f"Model '{model_sel}' could not be loaded via AutoConfig")
-        return
 
     # Re-load config with model-aware KV cache default
     cfg = load_pd_config(args.config, model_spec=model)
@@ -217,9 +214,6 @@ def run_sim(args):
         print("Config is missing `model` field.")
         return
     model = load_model_spec(model_sel)
-    if not model:
-        print(f"Model '{model_sel}' could not be loaded via AutoConfig")
-        return
 
     cfg = load_pd_config(args.config, model_spec=model)
 
