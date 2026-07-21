@@ -516,3 +516,132 @@ def _compute_params_from_attrs(*, h, inter, nl, nh, nkv, hd, vocab, tied,
         total += moe_layers * (h * num_experts)
 
     return total
+
+
+# ── YAML-based model loading (v1) ────────────────────────────────────
+
+_MODELS_DIR = Path(__file__).parent.parent / "models"
+
+
+def _resolve_model_path(model_name: str) -> Path:
+    p = Path(model_name)
+    if p.exists() and p.suffix in (".yaml", ".yml"):
+        return p
+    q = _MODELS_DIR / f"{model_name}.yaml"
+    if q.exists():
+        return q
+    r = _MODELS_DIR / model_name / f"{model_name}.yaml"
+    if r.exists():
+        return r
+    raise FileNotFoundError(
+        f"Model YAML not found for '{model_name}'. "
+        f"Checked: {p}, {q}, {r}"
+    )
+
+
+def load_model_spec_yaml(model_name: str) -> dict:
+    """Load model spec from YAML file (v1)."""
+    path = _resolve_model_path(model_name)
+    with open(path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+
+    _validate_yaml(raw, str(path))
+    first_lt = next(iter(raw["layer_types"].values()))
+
+    # Normalize defaults for layer_type fields
+    for lt_name, lt in raw["layer_types"].items():
+        attn = lt.get("attention", "none")
+        if attn in ("standard_attention",):
+            if "num_kv_heads" not in lt:
+                lt["num_kv_heads"] = lt["num_q_heads"]
+            if "rope_dim" not in lt:
+                lt["rope_dim"] = lt["head_dim"]
+
+    spec = {
+        "name": raw["name"],
+        "hidden_dim": raw["hidden_dim"],
+        "num_layers": raw["num_layers"],
+        "vocab_size": raw["vocab_size"],
+        "max_model_len": raw.get("max_model_len", 8192),
+        "norm_type": raw.get("norm_type", "rmsnorm"),
+        "tie_word_embeddings": raw.get("tie_word_embeddings", False),
+        "total_params_b": raw["total_params_b"],
+        "layer_types": raw["layer_types"],
+        "layers": raw["layers"],
+        # Backward-compat fields
+        "num_heads": first_lt.get("num_q_heads", first_lt.get("num_qk_heads", 1)),
+        "num_kv_heads": first_lt.get("num_kv_heads", first_lt.get("num_q_heads", 1)),
+        "head_dim": first_lt["head_dim"],
+        "intermediate_dim": first_lt.get("intermediate_dim", raw["hidden_dim"] * 4),
+    }
+    return spec
+
+
+def load_model_graph(model_name: str):
+    """Parse model YAML, construct ModelGraph with layer builders."""
+    spec = load_model_spec_yaml(model_name)
+
+    from sim.graph import ModelGraph
+    from sim.layers import ATTENTION_REGISTRY, FFN_REGISTRY
+    from sim.layers.common import build_fused_residual_norm
+    from sim.layers.head import build_lm_head
+
+    layer_specs = []
+    repeat = 1
+    for entry in spec["layers"]:
+        if "repeat" in entry:
+            repeat = entry["repeat"]
+            continue
+        lt_name = entry["type"]
+        count = entry["count"]
+        lt = spec["layer_types"][lt_name]
+
+        # Merge hidden_dim into layer_type for builder access
+        lt_dict = dict(lt)
+        lt_dict["hidden_dim"] = spec["hidden_dim"]
+
+        attn_fn = ATTENTION_REGISTRY.get(lt["attention"])
+        ffn_fn = FFN_REGISTRY.get(lt["ffn"])
+        if attn_fn is None:
+            available = list(ATTENTION_REGISTRY.keys())
+            raise RuntimeError(
+                f"Unknown attention '{lt['attention']}' for layer type '{lt_name}'. "
+                f"Available: {available}"
+            )
+        if ffn_fn is None:
+            available = list(FFN_REGISTRY.keys())
+            raise RuntimeError(
+                f"Unknown ffn '{lt['ffn']}' for layer type '{lt_name}'. "
+                f"Available: {available}"
+            )
+
+        def _make(ltype=lt_dict, attn=attn_fn, ffn=ffn_fn, fspec=spec):
+            def builder(ctx, hw):
+                ops = []
+                ops += attn(ctx, ltype, hw)
+                ops += build_fused_residual_norm(ctx, fspec, hw)
+                ops += ffn(ctx, ltype, hw)
+                ops += build_fused_residual_norm(ctx, fspec, hw)
+                return ops
+            return builder
+
+        layer_specs.append((_make(), count))
+
+    return ModelGraph(
+        layer_specs=layer_specs,
+        head_builder=lambda ctx, hw: build_lm_head(ctx, spec, hw),
+    )
+
+
+def _validate_yaml(raw: dict, path: str):
+    required = ["name", "hidden_dim", "vocab_size", "num_layers",
+                "total_params_b", "layer_types", "layers"]
+    for key in required:
+        if key not in raw or raw[key] is None:
+            raise RuntimeError(f"Missing required field '{key}' in {path}")
+
+    for lt_name, lt in raw["layer_types"].items():
+        if "attention" not in lt or "ffn" not in lt:
+            raise RuntimeError(
+                f"layer_type '{lt_name}' in {path} must have 'attention' and 'ffn' fields"
+            )
