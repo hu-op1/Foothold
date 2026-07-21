@@ -811,3 +811,37 @@ def predict_step_tp(scheduled_requests, model_spec, hw_params,
     result["all_reduce"] = all_reduce_time
     result["total"] = compute_total + all_reduce_time
     return result
+
+
+# ── v1 thin entry point (graph-based) ────────────────────────────────
+
+from sim.graph import StepContext, ModelGraph, apply_tp, apply_ep, apply_pp
+
+
+def predict_step_v1(scheduled_requests, model_spec, graph, hw_params,
+                    tp=1, pp=1, ep=0, pp_stage=0, cross_node_hops=0,
+                    dtype="float16", use_cudagraph=False,
+                    comm_lut_bytes=None, comm_lut_time_s=None) -> dict:
+    """v1 entry point: precompute context -> transforms -> evaluate."""
+    if not scheduled_requests:
+        return {"total": 0.0}
+
+    ctx = StepContext.precompute(
+        scheduled_requests, model_spec, hw_params, dtype=dtype,
+        use_cudagraph=use_cudagraph,
+        comm_lut_bytes=comm_lut_bytes,
+        comm_lut_time_s=comm_lut_time_s,
+    )
+    ctx.tp_size = tp
+    ctx.ep_size = ep
+    ctx.pp_size = pp
+
+    g = graph
+    if tp > 1:
+        g = apply_tp(g, ctx, tp)
+    if ep > 1:
+        g = apply_ep(g, ctx, ep)
+    if pp > 1:
+        g = apply_pp(g, ctx, pp, pp_stage, cross_node_hops)
+
+    return g.evaluate(ctx, hw_params)

@@ -82,6 +82,14 @@ class SimulationEngine:
                 "Run: uv run python main.py --bench && uv run python main.py --fit"
             )
 
+        # v1 graph loading (optional — falls back to old dispatch if model is HF ID)
+        self.graph = None
+        try:
+            from sim.config import load_model_graph
+            self.graph = load_model_graph(config["model"])
+        except Exception:
+            pass
+
         # Per-step time breakdown accumulator (reset in run())
         self.time_acc: dict[str, float] = {}
 
@@ -526,7 +534,8 @@ class SimulationEngine:
                             f"clock={self.clock:.4f}. "
                             "Likely cause: max_num_seqs too high for the KV cache "
                             "block pool — reduce max_num_seqs or increase kv_cache_memory_gb."
-                        )
+            )
+
                     self.clock += 0.001
                 continue
 
@@ -719,9 +728,24 @@ class SimulationEngine:
             new_depth = 0
         self._pp_depths[group_id] = new_depth
 
+        ep_size = tp * getattr(self, "dp_size", 1)
+
+        # v1: graph-based dispatch
+        if self.graph is not None:
+            from sim.config import pp_cross_node_hops
+            cross = pp_cross_node_hops(pp, tp, self.gpus_per_node) if self.gpus_per_node and pp > 1 else 0
+            from sim.executor import predict_step_v1
+            return predict_step_v1(
+                scheduled_requests, self.model, self.graph, self.hw,
+                tp=tp, pp=pp, ep=ep_size if self.enable_ep else 0, pp_stage=0,
+                cross_node_hops=cross,
+                dtype=self.dtype, use_cudagraph=use_cg,
+                comm_lut_bytes=self._comm_lut_bytes,
+                comm_lut_time_s=self._comm_lut_time_s,
+            )
+
         # EP dispatch
         if self.enable_ep:
-            ep_size = tp * getattr(self, "dp_size", 1)
             return predict_step_ep(scheduled_requests, self.model, self.hw,
                                    tp_size=tp, ep_size=ep_size,
                                    dtype=self.dtype,
