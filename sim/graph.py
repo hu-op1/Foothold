@@ -140,6 +140,7 @@ class StepContext:
 
     comm_lut_bytes: list = field(default_factory=list)
     comm_lut_time_s: list = field(default_factory=list)
+    hidden_dim: int = 0
 
     @classmethod
     def precompute(cls, scheduled_requests, spec, hw_params, dtype="float16",
@@ -210,6 +211,7 @@ class StepContext:
             kernel_overhead_us=kernel_overhead_us,
             comm_lut_bytes=comm_lut_bytes,
             comm_lut_time_s=comm_lut_time_s,
+            hidden_dim=spec.get("hidden_dim", 0),
         )
 
 
