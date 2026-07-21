@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from sim.request import Request, RequestStatus, FinishReason
 from sim.memory import BlockPool, compute_block_hashes
 from sim.scheduler import ColocatedScheduler
-from sim.executor import predict_step_v1
+from sim.executor import predict_step
 from sim.roofline import dtype_bytes
 from sim.communication import (
     effective_xfer_overhead,
@@ -714,9 +714,7 @@ class SimulationEngine:
             pp = getattr(self, "pp_size", 1)
         use_cg = self.cfg.get("simulation", {}).get("use_cudagraph", False)
 
-        # Pipeline depth: how many active stages in this step.
-        # Incremented before calling predict_step_pp so the bubble
-        # formula uses the correct number of busy stages.
+        # Pipeline depth tracking
         new_depth = min(pp, self._pp_depths.get(group_id, 0))
         if len(scheduled_requests) > 0:
             new_depth = min(pp, new_depth + 1)

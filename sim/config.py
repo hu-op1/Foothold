@@ -297,17 +297,6 @@ def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256
     }
 
 
-# ── Model spec loading via transformers ───────────────────────────────
-
-def _first_of(obj, names: list[str]):
-    """Return the first attribute of *obj* that exists and is not None."""
-    for name in names:
-        val = getattr(obj, name, None)
-        if val is not None:
-            return val
-    return None
-
-
 
 
 # ── YAML-based model loading (v1) ────────────────────────────────────
