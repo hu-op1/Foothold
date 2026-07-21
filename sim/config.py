@@ -87,15 +87,38 @@ def total_vram_gb(gpu_name):
     return GPU_VRAM.get(gpu_name, 24)
 
 
-def model_weight_gb(model_spec):
-    """Model weight size in GB (fp16)."""
+def model_weight_gb(model_spec, tp=1, pp=1, ep=1):
+    """Model weight size in GB (fp16).
+
+    With EP: expert weights are sharded by EP, dense weights by TP×PP.
+    When EP is 1, falls back to the standard formula.
+    """
     params_b = model_spec.get("total_params_b", 0)
     if params_b == 0:
-        # Rough estimate: hidden² × layers × 12
         h = model_spec["hidden_dim"]
         nl = model_spec["num_layers"]
         params_b = 12 * h * h * nl
-    return params_b * 2 / 1e9  # fp16 = 2 bytes
+
+    if ep > 1 and model_spec.get("is_moe"):
+        num_experts = model_spec.get("num_experts", 0)
+        moe_inter = model_spec.get("moe_intermediate_size", 0)
+        decoder_sparse_step = model_spec.get("decoder_sparse_step", 1)
+        moe_layers = model_spec["num_layers"] // decoder_sparse_step
+        h = model_spec["hidden_dim"]
+
+        expert_params = moe_layers * num_experts * (3 * h * moe_inter)
+        router_params = moe_layers * (h * num_experts)
+        non_expert_params = params_b - expert_params - router_params
+
+        expert_per_gpu = expert_params / ep
+        non_expert_per_gpu = non_expert_params / (tp * pp)
+        router_per_gpu = router_params
+
+        weight_gb = (expert_per_gpu + non_expert_per_gpu + router_per_gpu) * 2 / 1e9
+    else:
+        weight_gb = params_b * 2 / 1e9 / (tp * pp)
+
+    return weight_gb
 
 
 def kv_cache_per_token_bytes(model_spec):
@@ -387,6 +410,18 @@ def load_model_spec(model_name: str) -> dict | None:
     # tie_word_embeddings — safe to default to False
     tied = getattr(text_cfg, "tie_word_embeddings", False)
 
+    # ── MoE detection ──
+    is_moe = False
+    num_experts = _first_of(text_cfg, ["num_experts", "num_local_experts"])
+    moe_inter = None
+    decoder_sparse_step = 1
+    num_experts_per_tok = 1
+    if num_experts is not None and num_experts > 1:
+        is_moe = True
+        moe_inter = _first_of(text_cfg, ["moe_intermediate_size"]) or inter // 4
+        decoder_sparse_step = getattr(text_cfg, "decoder_sparse_step", 1)
+        num_experts_per_tok = _first_of(text_cfg, ["num_experts_per_tok", "num_experts_per_token"]) or 1
+
     # ── Fail if any required field could not be resolved ──
     if missing:
         print(f"WARNING: cannot determine architecture for '{model_name}' (config.json missing keywords):")
@@ -406,10 +441,27 @@ def load_model_spec(model_name: str) -> dict | None:
         "intermediate_dim": inter,
         "max_model_len": max_len,
         "total_params_b": _compute_params_from_attrs(
-            h=h, inter=inter, nl=nl, nh=nh, nkv=nh_kv, hd=hd, vocab=vocab, tied=tied
+            h=h, inter=inter, nl=nl, nh=nh, nkv=nh_kv, hd=hd, vocab=vocab, tied=tied,
+            is_moe=is_moe,
+            num_experts=num_experts or 0,
+            moe_inter=moe_inter or 0,
+            decoder_sparse_step=decoder_sparse_step,
         ),
         "norm_type": norm_type,
     }
+    if is_moe:
+        spec["is_moe"] = True
+        spec["num_experts"] = num_experts
+        spec["num_experts_per_tok"] = num_experts_per_tok
+        spec["moe_intermediate_size"] = moe_inter
+        spec["decoder_sparse_step"] = decoder_sparse_step
+        spec["shared_expert_intermediate_size"] = inter
+        norm_topk = getattr(text_cfg, "norm_topk_prob", False)
+        if norm_topk:
+            spec["norm_topk_prob"] = True
+        mlp_only = getattr(text_cfg, "mlp_only_layers", None)
+        if mlp_only:
+            spec["mlp_only_layers"] = mlp_only
 
     if nh_kv < nh:
         spec["num_kv_heads"] = nh_kv
@@ -424,7 +476,9 @@ def load_model_spec(model_name: str) -> dict | None:
     return spec
 
 
-def _compute_params_from_attrs(*, h, inter, nl, nh, nkv, hd, vocab, tied):
+def _compute_params_from_attrs(*, h, inter, nl, nh, nkv, hd, vocab, tied,
+                                is_moe=False, num_experts=0, moe_inter=0,
+                                decoder_sparse_step=1):
     """Compute total parameter count (fp16) from architecture dimensions.
 
     Uses the standard Llama/Qwen decoder-only formula.
@@ -450,4 +504,15 @@ def _compute_params_from_attrs(*, h, inter, nl, nh, nkv, hd, vocab, tied):
     lm_head = 0 if tied else vocab * h
     final_norm = h
 
-    return embed + nl * per_layer + lm_head + final_norm
+    total = embed + nl * per_layer + lm_head + final_norm
+
+    # MoE expert weights (per layer with MoE)
+    if is_moe and num_experts > 0 and moe_inter > 0:
+        moe_layers = nl // decoder_sparse_step
+        # Each expert: gate(h×moe_inter) + up(h×moe_inter) + down(moe_inter×h)
+        expert_params = num_experts * (3 * h * moe_inter)
+        total += moe_layers * expert_params
+        # Router: h × num_experts per MoE layer
+        total += moe_layers * (h * num_experts)
+
+    return total

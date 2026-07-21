@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from sim.request import Request, RequestStatus, FinishReason
 from sim.memory import BlockPool, compute_block_hashes
 from sim.scheduler import ColocatedScheduler
-from sim.executor import predict_step, predict_step_tp
+from sim.executor import predict_step, predict_step_tp, predict_step_ep
 from sim.roofline import dtype_bytes
 from sim.communication import (
     effective_xfer_overhead,
@@ -70,6 +70,8 @@ class SimulationEngine:
         self.gpus_per_node = config.get("strategy", {}).get("gpus_per_node")
         # Prefix caching
         self.enable_cache = config["simulation"].get("enable_prefix_caching", True)
+        # Expert parallelism
+        self.enable_ep = config.get("simulation", {}).get("enable_expert_parallel", False)
 
         # Memcpy LUT from fitted params (REQUIRED — must run --bench then --fit first)
         self._comm_lut_bytes = hw_params.get("memcpy_d2h_bytes")
@@ -86,10 +88,12 @@ class SimulationEngine:
     @staticmethod
     def _zero_step_dict() -> dict[str, float]:
         return {"total": 0.0, "attn_proj": 0.0, "ffn_proj": 0.0,
+                "expert_proj": 0.0, "shared_ffn_proj": 0.0,
+                "router_proj": 0.0,
                 "attn_prefill": 0.0, "attn_decode": 0.0,
                 "fused_add_norm": 0.0, "swiglu": 0.0, "rope": 0.0,
                 "lm_head": 0.0,
-                "all_reduce": 0.0, "inter_stage_comm": 0.0}
+                "all_reduce": 0.0, "all_to_all": 0.0, "inter_stage_comm": 0.0}
 
     def _compute_num_blocks(self):
         kv_mem_gb = self.cfg["simulation"]["kv_cache_memory_gb"]
@@ -98,6 +102,7 @@ class SimulationEngine:
     def run(self, requests: list[Request], mode="colocated",
             chunk_size=None, pd_ratio=None, tp_size=1, d_tp_size=1, dp=1,
             pp_size=1, d_pp_size=1,
+            enable_ep=False,
             recorder=None):
         """Run simulation over a list of requests.
 
@@ -120,6 +125,17 @@ class SimulationEngine:
         self.d_tp_size = d_tp_size
         self.pp_size = pp_size
         self.d_pp_size = d_pp_size
+        self.enable_ep = enable_ep
+        self.dp_size = dp
+
+        # ── Validate GPU count ──
+        total_gpus = self.cfg.get("strategy", {}).get("total_gpus", 1)
+        expected = dp * tp_size * pp_size
+        if mode == "colocated" and total_gpus != expected:
+            raise ValueError(
+                f"total_gpus ({total_gpus}) != dp × tp × pp "
+                f"({dp} × {tp_size} × {pp_size} = {expected})"
+            )
 
         # ── TP/PP-aware KV cache correction ──
         # load_config() computes kv_cache_memory_gb assuming the FULL model
@@ -136,6 +152,24 @@ class SimulationEngine:
                 extra_kv_gb = weight_gb * (eff_parallel - 1) / eff_parallel
                 extra_blocks = int(extra_kv_gb * 1024**3) // self.bytes_per_block
                 self.num_blocks += max(0, extra_blocks)
+        # ── EP-aware KV cache correction ──
+        # EP shards expert weights, freeing additional VRAM for KV cache.
+        if enable_ep and self.model.get("is_moe"):
+            total_params = self.model.get("total_params_b", 0)
+            if total_params > 0:
+                num_experts = self.model.get("num_experts", 0)
+                moe_inter = self.model.get("moe_intermediate_size", 0)
+                h = self.model["hidden_dim"]
+                decoder_sparse_step = self.model.get("decoder_sparse_step", 1)
+                moe_layers = self.model["num_layers"] // decoder_sparse_step
+                expert_params = moe_layers * num_experts * (3 * h * moe_inter)
+                ep_size = tp_size * dp
+                if ep_size > 1:
+                    freed_params = expert_params * (ep_size - 1) / ep_size
+                    extra_kv_gb = freed_params * 2 / 1e9
+                    extra_blocks = int(extra_kv_gb * 1024**3) // self.bytes_per_block
+                    self.num_blocks += max(0, extra_blocks)
+
         # Reset request state for fresh simulation run
         for r in requests:
             r.num_computed_tokens = 0
@@ -154,10 +188,13 @@ class SimulationEngine:
 
         # Reset time breakdown accumulator
         self.time_acc = {"attn_proj": 0.0, "ffn_proj": 0.0,
+                         "expert_proj": 0.0, "shared_ffn_proj": 0.0,
+                         "router_proj": 0.0,
                          "attn_prefill": 0.0, "attn_decode": 0.0,
                          "fused_add_norm": 0.0, "swiglu": 0.0, "rope": 0.0,
                          "lm_head": 0.0, "launch_overhead": 0.0,
-                         "all_reduce": 0.0, "inter_stage_comm": 0.0,
+                         "all_reduce": 0.0, "all_to_all": 0.0,
+                         "inter_stage_comm": 0.0,
                          "kv_transfer": 0.0, "swap": 0.0}
 
         # Safety iteration limit scales with workload (worst case: 1 token/step)
@@ -681,6 +718,16 @@ class SimulationEngine:
         else:
             new_depth = 0
         self._pp_depths[group_id] = new_depth
+
+        # EP dispatch
+        if self.enable_ep:
+            ep_size = tp * getattr(self, "dp_size", 1)
+            return predict_step_ep(scheduled_requests, self.model, self.hw,
+                                   tp_size=tp, ep_size=ep_size,
+                                   dtype=self.dtype,
+                                   use_cudagraph=use_cg,
+                                   comm_lut_bytes=self._comm_lut_bytes,
+                                   comm_lut_time_s=self._comm_lut_time_s)
 
         if tp > 1 or pp > 1:
             from sim.config import pp_cross_node_hops

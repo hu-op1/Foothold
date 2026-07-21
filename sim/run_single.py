@@ -95,13 +95,23 @@ def run_single(
         total_gpus = strat.get("total_gpus", 1)
         _validate_tp(tp_size, "colocated")
         _validate_pp(pp_size, "colocated")
-        if total_gpus % (tp_size * pp_size) != 0:
-            raise ValueError(
-                f"total_gpus ({total_gpus}) not divisible by tp×pp "
-                f"({tp_size}×{pp_size}={tp_size * pp_size})")
-        dp = total_gpus // (tp_size * pp_size)
+
+        dp = strat.get("dp_size")
+        if dp is not None:
+            if total_gpus != dp * tp_size * pp_size:
+                raise ValueError(
+                    f"total_gpus ({total_gpus}) != dp × tp × pp "
+                    f"({dp} × {tp_size} × {pp_size} = {dp * tp_size * pp_size})")
+        else:
+            if total_gpus % (tp_size * pp_size) != 0:
+                raise ValueError(
+                    f"total_gpus ({total_gpus}) not divisible by tp×pp "
+                    f"({tp_size}×{pp_size}={tp_size * pp_size})")
+            dp = total_gpus // (tp_size * pp_size)
+        enable_ep = cfg.get("simulation", {}).get("enable_expert_parallel", False)
         metrics = engine.run(list(requests), mode="colocated",
                              tp_size=tp_size, dp=dp, pp_size=pp_size,
+                             enable_ep=enable_ep,
                              recorder=recorder)
     else:
         pd_ratio = strat.get("pd_ratio", [1, 1])

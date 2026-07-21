@@ -25,6 +25,35 @@ def _lut_lookup(bytes_val, lut_bytes, lut_time_s):
     return t0 + (bytes_val - x0) * (t1 - t0) / (x1 - x0)
 
 
+def all_to_all_time(total_bytes: float, lut_bytes, lut_time_s,
+                    ep_size: int = 1) -> float:
+    """Predicted all-to-all communication time for MoE token dispatch/combine.
+
+    In EP, each GPU sends tokens to all other GPUs in the EP group.
+    For uniform routing, each GPU sends total_bytes / ep_size bytes
+    to each other GPU.  The total transfer for one GPU is
+    total_bytes * (ep_size - 1) / ep_size (one hop each).
+
+    When ep_size <= 1, returns 0.0.
+
+    Uses the memcpy LUT as an approximation for GPU-to-GPU transfer.
+    """
+    if ep_size <= 1:
+        return 0.0
+    if lut_bytes is None or lut_time_s is None or len(lut_bytes) == 0:
+        return 0.0
+
+    per_gpu_bytes = total_bytes * (ep_size - 1) / ep_size
+
+    if per_gpu_bytes <= 0:
+        return 0.0
+
+    import numpy as np
+    return _lut_lookup(per_gpu_bytes,
+                       np.asarray(lut_bytes, dtype=np.float64),
+                       np.asarray(lut_time_s, dtype=np.float64))
+
+
 def memcpy_time(bytes_val, lut_bytes, lut_time_s):
     """Predicted transfer time for *bytes_val* across a PCIe/NVLink link.
 

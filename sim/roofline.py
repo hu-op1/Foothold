@@ -115,6 +115,22 @@ def attn_projections(M, h, F, B, p, nh=None, nh_kv=None, hd=None, dt_bytes=None,
     return t
 
 
+def moe_expert_projections(M, h, moe_inter, F, B, p, dt_bytes=None, overhead=0.0):
+    """MoE expert FFN projections: gate(h→moe_inter) + up(h→moe_inter) + down(moe_inter→h).
+
+    Each expert computes: [M, h] × [h, moe_inter] for gate and up (2 matmuls),
+    then [M, moe_inter] × [moe_inter, h] for down (1 matmul).
+    """
+    t = 2 * matmul_time(M, h, moe_inter, F, B, p, dt_bytes, overhead)
+    t += matmul_time(M, moe_inter, h, F, B, p, dt_bytes, overhead)
+    return t
+
+
+def moe_router_time(M, h, num_experts, F, B, p, dt_bytes=None, overhead=0.0):
+    """Router projection: [M, h] × [h, num_experts] — selects top-k experts."""
+    return matmul_time(M, h, num_experts, F, B, p, dt_bytes, overhead)
+
+
 def ffn_projections(M, h, inter, F, B, p, dt_bytes=None, overhead=0.0):
     """FFN projections: gate/up (2×) + down."""
     t = 2 * matmul_time(M, h, inter, F, B, p, dt_bytes, overhead)

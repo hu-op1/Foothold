@@ -2,7 +2,7 @@
 # Structure mirrors search.yaml but with scalar strategy values (no grid search).
 
 gpu: "3090"
-model: "Qwen/Qwen3-8B"
+model: "Qwen/Qwen3-30B-A3B"
 dtype: "bfloat16"  # must match a dtype in the benchmark config
 
 # Communication is modelled via measured memcpy LUT from fitted_params.
@@ -23,6 +23,7 @@ simulation:
   use_cudagraph: true  # set true after running cudagraph bench+fit
   async_scheduling: true  # enable schedule/execute overlap (auto-enabled for PP>1)
   scheduler_reserve_full_isl: true  # gate: full prompt must fit KV cache before first chunk
+  enable_expert_parallel: true  # enable Expert Parallelism for MoE models (EP_SIZE = TP × DP)
 
 strategy:
   mode: colocated       # colocated or disaggregated
@@ -33,6 +34,8 @@ strategy:
   # colocated:
   tp_size: 4
   pp_size: 1
+  dp_size: 1              # data-parallel replicas (explicit — total_gpus = dp × tp × pp)
+  enable_ep: true        # enable EP for MoE models
 
   # disaggregated:
   pd_ratio: [1, 1]          # [num_prefill_gpus, num_decode_gpus]

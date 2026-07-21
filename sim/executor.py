@@ -13,8 +13,10 @@ from sim.roofline import (
     fused_residual_norm_ops,
     roofline_time,
     dtype_bytes,
+    moe_expert_projections,
+    moe_router_time,
 )
-from sim.communication import memcpy_time
+from sim.communication import memcpy_time, all_to_all_time
 
 # ── Roofline param selection ──────────────────────────────────────────────
 # The smooth-roofline fit produces two (B_peak, p) pairs:
@@ -348,6 +350,194 @@ def predict_step(scheduled_requests, model_spec, hw_params, dtype="float16",
         "swiglu": swiglu_time,
         "rope": rope_time,
         "lm_head": lm_head_time,
+        "launch_overhead": launch_overhead_time,
+    }
+
+
+def predict_step_ep(scheduled_requests, model_spec, hw_params,
+                    tp_size=1, ep_size=1,
+                    dtype="float16", use_cudagraph=False,
+                    comm_lut_bytes=None, comm_lut_time_s=None):
+    """Predict step time with Expert Parallelism (and optional Tensor Parallelism).
+
+    EP distributes experts across GPUs.  Each MoE layer:
+      1. Router: small matmul [T, h] × [h, num_experts] — replicated
+      2. All-to-all dispatch: send tokens to GPUs holding their experts
+      3. Per-expert GEMM: each GPU runs its share of experts
+      4. Shared FFN: standard dense FFN (handled by TP if tp>1)
+      5. All-to-all combine: return results
+
+    The key difference from predict_step_tp():
+      - Expert GEMM uses per-expert M (T × K / E / EP)
+      - All-to-all replaces all-reduce for expert communication
+      - Shared FFN and attention use TP (if tp>1) — all-reduce between TP ranks
+
+    Args:
+        tp_size: tensor parallelism degree (for attention + shared FFN)
+        ep_size: expert parallelism degree (EP_SIZE = TP_SIZE × DP_SIZE)
+
+    Returns:
+        Dict with time components.
+    """
+    if not scheduled_requests:
+        return {"total": 0.0, "attn_proj": 0.0, "expert_proj": 0.0,
+                "shared_ffn_proj": 0.0, "router_proj": 0.0,
+                "attn_prefill": 0.0, "attn_decode": 0.0,
+                "fused_add_norm": 0.0, "swiglu": 0.0, "rope": 0.0,
+                "lm_head": 0.0,
+                "all_to_all": 0.0, "all_reduce": 0.0}
+
+    if ep_size <= 1 or not model_spec.get("is_moe"):
+        return predict_step_tp(scheduled_requests, model_spec, hw_params,
+                               tp_size, pp_size=1, dtype=dtype,
+                               use_cudagraph=use_cudagraph,
+                               comm_lut_bytes=comm_lut_bytes,
+                               comm_lut_time_s=comm_lut_time_s)
+
+    hw = _select_dtype_params(hw_params, dtype)
+    dt_bytes = dtype_bytes(dtype)
+
+    h = model_spec["hidden_dim"]
+    inter = model_spec.get("intermediate_dim", h * 4)
+    moe_inter = model_spec.get("moe_intermediate_size", inter // 4)
+    nh = model_spec["num_heads"]
+    nh_kv = model_spec.get("num_kv_heads", nh)
+    hd = model_spec["head_dim"]
+    vs = model_spec["vocab_size"]
+    nl = model_spec["num_layers"]
+    na = model_spec.get("attn_layers", nl)
+    num_experts = model_spec.get("num_experts", 0)
+    num_experts_per_tok = model_spec.get("num_experts_per_tok", 1)
+    decoder_sparse_step = model_spec.get("decoder_sparse_step", 1)
+
+    b_effs = hw.get("elem_b_effs_cudagraph", hw["elem_b_effs"]) if use_cudagraph else hw["elem_b_effs"]
+    overheads = hw.get("elem_overheads_cudagraph", hw["elem_overheads"]) if use_cudagraph else hw["elem_overheads"]
+
+    total_new_tokens = sum(nt for _, nt in scheduled_requests)
+
+    # Roofline params
+    tokens_per_expert = total_new_tokens * num_experts_per_tok / num_experts
+    M_expert = max(1, int(tokens_per_expert))
+
+    params_batch = _select_roofline_params(total_new_tokens, hw, use_cudagraph=use_cudagraph)
+    F_b, B_b, p_b = params_batch["F"], params_batch["B"], params_batch["p"]
+    matmul_ov_b = params_batch.get("overhead", 0.0)
+
+    params_expert = _select_roofline_params(M_expert, hw, use_cudagraph=use_cudagraph)
+    F_e, B_e, p_e = params_expert["F"], params_expert["B"], params_expert["p"]
+    matmul_ov_e = params_expert.get("overhead", 0.0)
+
+    moe_layers = nl // decoder_sparse_step
+
+    # Router (replicated on all GPUs)
+    router_time = moe_layers * moe_router_time(
+        total_new_tokens, h, num_experts, F_b, B_b, p_b, dt_bytes, matmul_ov_b)
+
+    # Expert GEMM (per-expert M, each GPU runs its share of experts)
+    experts_per_gpu = num_experts // ep_size
+    expert_proj_time = (moe_layers * experts_per_gpu *
+                         moe_expert_projections(M_expert, h, moe_inter,
+                                                F_e, B_e, p_e, dt_bytes, matmul_ov_e))
+
+    # Shared FFN (all layers, dense)
+    shared_ffn_proj_time = nl * ffn_projections(
+        total_new_tokens, h, inter, F_b, B_b, p_b, dt_bytes, matmul_ov_b)
+
+    # Attention projections (all layers)
+    attn_proj_time = nl * attn_projections(
+        total_new_tokens, h, F_b, B_b, p_b, nh, nh_kv, hd, dt_bytes, matmul_ov_b)
+
+    # Attention (FlashAttention fused)
+    n_prefill = sum(1 for req, _ in scheduled_requests if req.is_prefill_chunk)
+    n_decode = sum(1 for req, _ in scheduled_requests if not req.is_prefill_chunk)
+
+    fa_d = _select_fa_params(n_decode, "decode", hw, nh, use_cudagraph=use_cudagraph)
+    fa_p = _select_fa_params(n_prefill, "prefill", hw, nh, use_cudagraph=use_cudagraph)
+    F_d, B_d, p_d = fa_d["F"], fa_d["B"], fa_d["p"]
+    F_p, B_p, p_p = fa_p["F"], fa_p["B"], fa_p["p"]
+
+    prefill_flops = 0.0
+    prefill_bytes = 0.0
+    decode_flops = 0.0
+    decode_bytes = 0.0
+
+    for req, num_new in scheduled_requests:
+        kv_len_after = req.num_computed_tokens
+        if kv_len_after <= 0:
+            continue
+        f = 4 * nh * num_new * kv_len_after * hd
+        b = hd * dt_bytes * (2 * nh * num_new + 2 * nh_kv * kv_len_after)
+        if req.is_prefill_chunk:
+            prefill_flops += f
+            prefill_bytes += b
+        else:
+            decode_flops += f
+            decode_bytes += b
+
+    attn_prefill_time = na * roofline_time(prefill_flops, prefill_bytes, F_p, B_p, p_p) if n_prefill > 0 else 0.0
+    attn_decode_time = na * roofline_time(decode_flops, decode_bytes, F_d, B_d, p_d) if n_decode > 0 else 0.0
+
+    # Elementwise ops
+    fused_add_norm_time = nl * fused_residual_norm_ops(1, total_new_tokens, h, b_effs, overheads, dt_bytes)
+    swiglu_time = nl * swiglu_op(1, total_new_tokens, inter, b_effs, overheads, dt_bytes)
+    rope_time = nl * rope_op(1, total_new_tokens, nh, nh_kv, hd, b_effs, overheads, dt_bytes)
+
+    # LM head
+    lm_head_time = matmul_time(total_new_tokens, h, vs, F_b, B_b, p_b, dt_bytes, matmul_ov_b)
+
+    # Kernel launch overhead
+    kernel_overhead_us = hw.get("kernel_launch_overhead_us", 0.0)
+    if use_cudagraph:
+        launch_overhead_time = 0.0
+    elif kernel_overhead_us > 0:
+        num_kernels = nl * 11 + 1
+        launch_overhead_time = num_kernels * kernel_overhead_us * 1e-6
+    else:
+        launch_overhead_time = 0.0
+
+    # All-to-all communication
+    a2a_bytes = total_new_tokens * num_experts_per_tok * h * dt_bytes
+    a2a_time = 2 * moe_layers * all_to_all_time(
+        a2a_bytes, comm_lut_bytes, comm_lut_time_s, ep_size)
+
+    # TP all-reduce (for attention + shared FFN, if tp>1)
+    all_reduce_time = 0.0
+    if tp_size > 1:
+        def _ar_time(ar_bytes):
+            steps = 2 * (tp_size - 1)
+            per_step_bytes = ar_bytes / tp_size
+            hop_time = memcpy_time(per_step_bytes, comm_lut_bytes, comm_lut_time_s)
+            return steps * hop_time
+
+        ar_bytes_per_layer = total_new_tokens * h * dt_bytes
+        all_reduce_time = (2 * na + (nl - na)) * _ar_time(ar_bytes_per_layer)
+        attn_proj_time /= tp_size
+        shared_ffn_proj_time /= tp_size
+        attn_prefill_time /= tp_size
+        attn_decode_time /= tp_size
+        swiglu_time /= tp_size
+        rope_time /= tp_size
+        lm_head_time /= tp_size
+
+    total = (attn_proj_time + shared_ffn_proj_time + expert_proj_time
+             + router_time + attn_prefill_time + attn_decode_time
+             + fused_add_norm_time + swiglu_time + rope_time
+             + lm_head_time + a2a_time + all_reduce_time + launch_overhead_time)
+
+    return {
+        "total": total,
+        "attn_proj": attn_proj_time,
+        "expert_proj": expert_proj_time,
+        "shared_ffn_proj": shared_ffn_proj_time,
+        "router_proj": router_time,
+        "attn_prefill": attn_prefill_time,
+        "attn_decode": attn_decode_time,
+        "fused_add_norm": fused_add_norm_time,
+        "swiglu": swiglu_time,
+        "rope": rope_time,
+        "lm_head": lm_head_time,
+        "all_to_all": a2a_time,
+        "all_reduce": all_reduce_time,
         "launch_overhead": launch_overhead_time,
     }
 

@@ -90,6 +90,7 @@ def _load_results_from_csv(csv_path: str) -> list[dict]:
                     "rope_pct": float(row.get("rope_pct", 0)),
                     "lm_head_pct": float(row.get("lm_head_pct", 0)),
                     "all_reduce_pct": float(row.get("all_reduce_pct", 0)),
+                    "all_to_all_pct": float(row.get("all_to_all_pct", 0)),
                     "inter_stage_comm_pct": float(row.get("inter_stage_comm_pct", 0)),
                     "kv_transfer_pct": float(row.get("kv_transfer_pct", 0)),
                     "swap_pct": float(row.get("swap_pct", 0)),
@@ -246,6 +247,7 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
     enable_tp = search_cfg.get("tp", True)
     enable_pp = search_cfg.get("pp", True)
     enable_dp = search_cfg.get("dp", True)
+    enable_ep = cfg.get("simulation", {}).get("enable_expert_parallel", False)
 
     # Auto-generate PD ratios: all (p, d) where p + d = total_gpus, p>=1, d>=1
     pd_ratios = [[p, total_gpus - p] for p in range(1, total_gpus)]
@@ -276,7 +278,11 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
                             and total_gpus % replica_gpus == 0
                             and (enable_dp or total_gpus // replica_gpus == 1)):
                         dp = total_gpus // replica_gpus
-                        label = f"Colo PP{pp} TP{tp} DP{dp} (batch={max_tokens}, thr={threshold})"
+                        if enable_ep:
+                            ep_size = tp * dp
+                            label = f"Colo PP{pp} TP{tp} DP{dp} EP{ep_size} (batch={max_tokens}, thr={threshold})"
+                        else:
+                            label = f"Colo PP{pp} TP{tp} DP{dp} (batch={max_tokens}, thr={threshold})"
                         local_cfg = _deep_copy_config(cfg)
                         local_cfg["strategy"]["total_gpus"] = total_gpus
                         local_cfg["simulation"]["max_num_batched_tokens"] = max_tokens
@@ -284,6 +290,8 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
                         tasks.append({
                             "label": label, "cfg": local_cfg, "mode": "colocated",
                             "tp": tp, "dp": dp, "pp": pp, "total_gpus": total_gpus,
+                            "enable_ep": enable_ep,
+                            "ep": tp * dp if enable_ep else 1,
                             "mode_label": "colocated",
                         })
 
@@ -383,8 +391,9 @@ def _run_one(task: dict, requests: list, model_spec: dict, hw_params: dict,
 
     if mode == "colocated":
         dp = task.get("dp", 1)
+        enable_ep = task.get("enable_ep", False)
         metrics = engine.run(local_requests, mode=mode, tp_size=tp, dp=dp,
-                             pp_size=pp)
+                             pp_size=pp, enable_ep=enable_ep)
     else:
         d_tp = task.get("d_tp", 1)
         d_pp = task.get("d_pp", 1)
