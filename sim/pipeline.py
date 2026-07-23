@@ -67,10 +67,6 @@ class ScheduleExecutePipeline:
         # stage's schedule overlaps with the previous stage's execution.
         return clock + gpu_time_s
 
-    def reset(self):
-        """Reset pipeline state for a new simulation run."""
-
-
 def estimate_schedule_time(num_running: int, num_waiting: int,
                            base_us: float = 100.0,
                            per_running_us: float = 5.0,

@@ -200,7 +200,6 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
 
             del x, y
 
-    total_new_or_done = len(done_keys)  # includes both new and pre-existing
     if skip_count:
         print(f"  [resume] skipped {skip_count} completed, {new_count} new → {output_path}")
     elif output_path and new_count > 0:

@@ -4,14 +4,6 @@ import os
 import numpy as np
 
 
-def _get(d, *keys):
-    for k in keys:
-        v = d.get(k)
-        if v is not None:
-            return v
-    return None
-
-
 def _coerce_value(v):
     """Convert a CSV string to int/float if possible, else keep as-is."""
     if not isinstance(v, str):
@@ -48,11 +40,6 @@ def save_fitted_params(params, path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(params, f, indent=2)
     print(f"Fitted params saved to: {path}")
-
-
-def load_fitted_params(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 # ── roofline model ──────────────────────────────────────────────────────

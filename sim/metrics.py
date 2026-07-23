@@ -151,15 +151,3 @@ class MetricsCollector:
         if total == 0:
             return {}
         return {f"{k}_pct": v / total * 100 for k, v in self.time_breakdown.items()}
-
-    def _scale_throughput(self, factor: int, scale_ttft: bool = True) -> None:
-        """Scale throughput by factor (for DP / multi-instance scaling).
-        Modifies records to reflect multi-instance deployment."""
-        for r in self.records:
-            if scale_ttft:
-                r["ttft"] = r["ttft"] / factor
-            r["total_latency"] = r["total_latency"] / factor
-            r["tpot"] = r["tpot"] / factor
-            r["completion_time"] = r["arrival_time"] + (
-                r["completion_time"] - r["arrival_time"]
-            ) / factor

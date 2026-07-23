@@ -13,8 +13,6 @@ from dataclasses import dataclass
 from sim.communication import memcpy_time
 
 
-DTYPE_BYTES = 2  # fp16
-
 # ── Chain-hash sentinel ──────────────────────────────────────────────────
 # Root of the hash chain for the first block in a sequence.
 NONE_HASH: bytes = hashlib.sha256(b"vllm-none-hash").digest()
@@ -155,19 +153,6 @@ class FreeKVCacheBlockQueue:
         self._remove_real(block)
         return block
 
-    def popleft_n(self, n: int) -> list[KVCacheBlock]:
-        """Remove and return *n* blocks from the head."""
-        if n > self.num_free_blocks:
-            raise ValueError(
-                f"Cannot pop {n} blocks, only {self.num_free_blocks} free"
-            )
-        out: list[KVCacheBlock] = []
-        for _ in range(n):
-            block = self._head.next_free_block
-            self._remove_real(block)
-            out.append(block)
-        return out
-
     def remove(self, block: KVCacheBlock) -> None:
         """Remove *block* from the middle of the queue.
 
@@ -211,16 +196,6 @@ class FreeKVCacheBlockQueue:
         self._tail.prev_free_block = last
 
         self.num_free_blocks += len(blocks)
-
-    def get_all_free_blocks(self) -> list[KVCacheBlock]:
-        """Return all real blocks in the queue (for testing)."""
-        out: list[KVCacheBlock] = []
-        cur = self._head.next_free_block
-        while cur is not self._tail:
-            out.append(cur)
-            cur = cur.next_free_block
-        return out
-
 
 class BlockHashToBlockMap:
     """Multi-block-aware prefix cache map (vLLM 0.19.0).

@@ -140,7 +140,6 @@ class StepContext:
 
     comm_lut_bytes: list = field(default_factory=list)
     comm_lut_time_s: list = field(default_factory=list)
-    hidden_dim: int = 0
 
     @classmethod
     def precompute(cls, scheduled_requests, spec, hw_params, dtype="float16",
@@ -211,7 +210,6 @@ class StepContext:
             kernel_overhead_us=kernel_overhead_us,
             comm_lut_bytes=comm_lut_bytes,
             comm_lut_time_s=comm_lut_time_s,
-            hidden_dim=spec.get("hidden_dim", 0),
         )
 
 
@@ -376,7 +374,7 @@ def apply_tp(graph: ModelGraph, ctx: StepContext, tp: int) -> ModelGraph:
     if tp <= 1:
         return graph
 
-    def _transform(ops, ctx_builder, hw_builder):
+    def _transform(ops, _ctx, _hw):
         result = []
         for op in ops:
             if op.category == "matmul" and "projection" in op.tags:
@@ -408,7 +406,7 @@ def apply_ep(graph: ModelGraph, ctx: StepContext, ep: int) -> ModelGraph:
     if ep <= 1:
         return graph
 
-    def _transform(ops, ctx_builder, hw_builder):
+    def _transform(ops, _ctx, _hw):
         result = []
         for op in ops:
             if op.category == "matmul" and "expert" in op.tags:

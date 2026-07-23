@@ -5,9 +5,6 @@ import numpy as np
 from sim.request import Request
 
 
-DTYPE_BYTES = 2  # fp16
-
-
 def _lut_lookup(bytes_val, lut_bytes, lut_time_s):
     """Linear interpolation on a sorted (bytes, time) lookup table."""
     if bytes_val <= lut_bytes[0]:
@@ -64,47 +61,6 @@ def memcpy_time(bytes_val, lut_bytes, lut_time_s):
         raise ValueError("memcpy LUT not available — run --bench then --fit first")
     return _lut_lookup(bytes_val, np.asarray(lut_bytes, dtype=np.float64),
                        np.asarray(lut_time_s, dtype=np.float64))
-
-
-def kv_bytes_per_layer(kv_len, num_kv_heads, head_dim):
-    """Bytes for one layer's KV cache at a given sequence length."""
-    return 2 * kv_len * num_kv_heads * head_dim * DTYPE_BYTES
-
-
-def raw_transfer_time(kv_len, num_layers, num_kv_heads, head_dim,
-                      lut_bytes, lut_time_s):
-    """Raw transfer time for all KV layers without overlap.
-
-    Args:
-        kv_len: sequence length of KV cache to transfer.
-        num_layers: number of attention layers.
-        num_kv_heads: KV heads (accounting for GQA).
-        head_dim: dimension per head.
-        lut_bytes: LUT byte-size array.
-        lut_time_s: LUT transfer-time array.
-
-    Returns:
-        Transfer time in seconds.
-    """
-    per_layer = kv_bytes_per_layer(kv_len, num_kv_heads, head_dim)
-    total_bytes = num_layers * per_layer
-    return memcpy_time(total_bytes, lut_bytes, lut_time_s)
-
-
-def effective_xfer_overhead(kv_len, num_layers, num_kv_heads, head_dim,
-                            prefill_step_time_s,
-                            lut_bytes, lut_time_s):
-    """Effective overhead after overlap with prefill compute.
-
-    KV saves start per-layer during prefill forward.
-    Overlap ≈ prefill_time * (num_layers - 1) / num_layers
-    """
-    raw = raw_transfer_time(kv_len, num_layers, num_kv_heads, head_dim,
-                            lut_bytes, lut_time_s)
-    if prefill_step_time_s <= 0 or num_layers <= 1:
-        return raw
-    overlap = prefill_step_time_s * (num_layers - 1) / num_layers
-    return max(0.0, raw - overlap)
 
 
 def transfer_blocks(request: Request, pool_d, bytes_per_block: int,

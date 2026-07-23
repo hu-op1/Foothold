@@ -10,16 +10,13 @@ from sim.scheduler import ColocatedScheduler
 from sim.executor import predict_step
 from sim.roofline import dtype_bytes
 from sim.communication import (
-    effective_xfer_overhead,
     transfer_blocks,
-    memcpy_time,
 )
 from sim.pipeline import ScheduleExecutePipeline, estimate_schedule_time
 
 
 class EventType(Enum):
     ARRIVAL = auto()
-    KV_TRANSFER_DONE = auto()
 
 
 @dataclass(order=True)
@@ -105,7 +102,7 @@ class SimulationEngine:
         return max(1, int(kv_mem_gb * 1024**3) // self.bytes_per_block)
 
     def run(self, requests: list[Request], mode="colocated",
-            chunk_size=None, pd_ratio=None, tp_size=1, d_tp_size=1, dp=1,
+            pd_ratio=None, tp_size=1, d_tp_size=1, dp=1,
             pp_size=1, d_pp_size=1,
             enable_ep=False,
             recorder=None):
@@ -723,16 +720,6 @@ class SimulationEngine:
             comm_lut_bytes=self._comm_lut_bytes,
             comm_lut_time_s=self._comm_lut_time_s,
         )
-
-    def _compute_xfer(self, request: Request, prefill_time: float) -> float:
-        """Compute KV transfer time for a completed prefill, accounting for overlap."""
-        return effective_xfer_overhead(
-            request.prompt_len, self.num_attn_layers, self.nh_kv, self.hd,
-            prefill_time,
-            self._comm_lut_bytes,
-            self._comm_lut_time_s,
-        )
-
 
 def _deep_copy_config(cfg: dict) -> dict:
     """Simple deep copy via JSON round-trip."""

@@ -108,14 +108,6 @@ GPU_VRAM = {
 }
 
 
-def _default_vram(gpu_name):
-    """Return 80% of known GPU VRAM in GB."""
-    gb = GPU_VRAM.get(gpu_name)
-    if gb is None:
-        raise KeyError(f"Unknown GPU '{gpu_name}'. Add it to GPU_VRAM in sim/config.py.")
-    return int(gb * 0.8)
-
-
 def total_vram_gb(gpu_name):
     """Return total GPU VRAM in GB."""
     gb = GPU_VRAM.get(gpu_name)
@@ -308,38 +300,6 @@ def valid_tp_sizes(model_spec, gpu_name, kv_cache_gb, num_gpus,
             valid.append(tp)
 
     return valid if valid else [1]
-
-
-def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256,
-                  gpu_memory_utilization=0.85, max_batch_tokens=8192,
-                  pp=1):
-    """Print a memory breakdown for a given config.
-
-    When pp > 1, weights and KV cache are split across pipeline stages.
-    """
-    usable_vram = total_vram_gb(gpu_name) * gpu_memory_utilization
-    weight_gb = model_weight_gb(model_spec)
-    kv_per_tok = kv_cache_per_token_bytes(model_spec)
-    act_gb = activation_memory_gb(model_spec, max_batch_tokens, tp, pp)
-
-    w_gpu = weight_gb / (tp * pp)
-    kv_seq_gb = (kv_per_tok * max_model_len) / 1e9 / (pp * tp)  # per-GPU for one seq
-    kv_total_gb = kv_seq_gb * max_num_seqs
-    used = w_gpu + kv_total_gb + act_gb
-    free = usable_vram - used
-
-    return {
-        "vram": usable_vram,
-        "weight_per_gpu": w_gpu,
-        "kv_per_seq": kv_seq_gb,
-        "kv_total": kv_total_gb,
-        "activation": act_gb,
-        "used": used,
-        "free": free,
-        "fits": used < usable_vram,
-    }
-
-
 
 
 # ── Per-model .py loading ─────────────────────────────────────────────

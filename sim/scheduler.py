@@ -44,11 +44,6 @@ class RequestQueue:
     def __iter__(self):
         return iter(list(self._queue))
 
-    def pop_all(self) -> list[Request]:
-        items = list(self._queue)
-        self._queue.clear()
-        return items
-
 
 class SchedulerOutput:
     """Result of one schedule() call."""

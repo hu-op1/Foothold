@@ -24,6 +24,7 @@ linux = [
 ]
 dev = [
     "pytest>=8.0",
+    "vulture>=2.11",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -42,3 +43,8 @@ explicit = true
 name = "tsinghua"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[tool.vulture]
+exclude = ["reference/", ".venv/", "__pycache__/", ".git/", ".github/", ".superpowers/", ".pytest_cache/", ".claude/"]
+min_confidence = 60
+paths = ["bench/", "fit/", "sim/", "models/", "tools/", "main.py"]

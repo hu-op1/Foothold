@@ -9,9 +9,8 @@ class RequestStatus(enum.IntEnum):
     WAITING_FOR_REMOTE_KVS = 1
     RUNNING = 2
     PREEMPTED = 3
-    FINISHED_STOPPED = 4
-    FINISHED_LENGTH_CAPPED = 5
-    FINISHED_ABORTED = 6
+    FINISHED_LENGTH_CAPPED = 4
+    FINISHED_ABORTED = 5
 
     @staticmethod
     def is_finished(status: "RequestStatus") -> bool:
@@ -19,7 +18,6 @@ class RequestStatus(enum.IntEnum):
 
 
 class FinishReason(enum.Enum):
-    STOP = "stop"
     LENGTH = "length"
     ABORT = "abort"
 
@@ -82,5 +80,4 @@ class Request:
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 
-    def has_prompt_remaining(self) -> bool:
-        return self.num_computed_tokens < self.num_prompt_tokens
+

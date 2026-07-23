@@ -94,28 +94,9 @@ def auto_warmup_iters(fn, min_time_ms, max_iters, calib_iters, ratio=0.1):
     return max(1, int(total_est * ratio))
 
 
-def save_csv(results, path):
-    """Save list of dicts to csv. Creates parent directories if needed."""
-    if not results:
-        print(f"  [skip] No results to save for {path}")
-        return
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fieldnames = list(dict.fromkeys(k for r in results for k in r))
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(results)
-    print(f"  Saved {len(results)} rows → {path}")
-
-
-def estimate_memory_gb(b, s, h, dtype_size=2):
-    """Estimate GPU memory (GiB) for a [b, s, h] fp16 tensor."""
-    return (b * s * h * dtype_size) / (1024**3)
-
-
 def check_memory(required_gb, max_gb=7.5):
     """Check if required_gb fits in available and allowed memory."""
-    free_gb, total_gb = torch.cuda.mem_get_info()
+    free_gb, _ = torch.cuda.mem_get_info()
     free_gb = free_gb / (1024**3)
     return required_gb < free_gb and required_gb <= max_gb
 
