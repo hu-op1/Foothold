@@ -52,12 +52,13 @@ class SimulationEngine:
         self.nh_kv = model_spec.get("num_kv_heads", model_spec["num_heads"])
         self.hd = model_spec["head_dim"]
         self.nl = model_spec["num_layers"]
+        self.num_attn_layers = model_spec.get("num_attn_layers", self.nl)
         self.block_size = config["simulation"]["block_size"]
 
         # Bytes per KV cache block (all layers — used for KV transfer).
         dt_b = dtype_bytes(self.dtype)
         self.bytes_per_block = (
-            2 * self.nl * self.nh_kv * self.hd
+            2 * self.num_attn_layers * self.nh_kv * self.hd
             * self.block_size * dt_b
         )
         # Base num_blocks (pp=1).  Callers should scale by pp_size when
@@ -726,7 +727,7 @@ class SimulationEngine:
     def _compute_xfer(self, request: Request, prefill_time: float) -> float:
         """Compute KV transfer time for a completed prefill, accounting for overlap."""
         return effective_xfer_overhead(
-            request.prompt_len, self.nl, self.nh_kv, self.hd,
+            request.prompt_len, self.num_attn_layers, self.nh_kv, self.hd,
             prefill_time,
             self._comm_lut_bytes,
             self._comm_lut_time_s,

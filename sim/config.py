@@ -167,7 +167,7 @@ def kv_cache_per_token_bytes(model_spec):
     """KV cache bytes per token (all layers, fp16)."""
     nh_kv = model_spec.get("num_kv_heads", model_spec["num_heads"])
     hd = model_spec["head_dim"]
-    nl = model_spec["num_layers"]
+    nl = model_spec.get("num_attn_layers", model_spec["num_layers"])
     return 2 * nl * nh_kv * hd * 2  # 2 (K+V) × layers × heads × dim × 2 bytes
 
 

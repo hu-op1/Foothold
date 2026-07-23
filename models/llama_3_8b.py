@@ -12,6 +12,7 @@ SPEC = {
     "norm_type": "rmsnorm",
     "tie_word_embeddings": False,
     "num_layers": 32,
+    "num_attn_layers": 32,
     "num_heads": 32,
     "num_q_heads": 32,
     "num_kv_heads": 8,
