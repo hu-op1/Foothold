@@ -366,12 +366,10 @@ class SimulationEngine:
                 _total_h = sum(p._cache_hits for p in pools)
                 ch = _total_h / _total_q * 100 if _total_q > 0 else 0.0
                 kv_usage = sum(p.get_usage() for p in pools) / len(pools) if pools else 0.0
-                kv_total_gb = (self.num_blocks * self.bytes_per_block) / 1e9
-                kv_used_gb = kv_usage * kv_total_gb
                 print(f"[{self.clock:.1f}s] prompt={p_tput:.1f} gen={g_tput:.1f} tok/s "
                       f"| running={total_running} waiting={total_waiting} "
                       f"| cache={ch:.1f}% ({_total_h}/{_total_q}) "
-                      f"| mem={kv_used_gb:.1f}/{kv_total_gb:.1f} GiB "
+                      f"| mem={kv_usage * 100:.1f}% "
                       f"| done={metrics.num_requests}/{_total_reqs}")
                 _last_print = self.clock
                 _last_cum_prompt = _cum_prompt
@@ -676,12 +674,10 @@ class SimulationEngine:
                 _total_h = sum(p._cache_hits for p in all_pools)
                 ch = _total_h / _total_q * 100 if _total_q > 0 else 0.0
                 kv_usage = sum(p.get_usage() for p in all_pools) / len(all_pools) if all_pools else 0.0
-                kv_total_gb = (self.num_blocks * self.bytes_per_block) / 1e9
-                kv_used_gb = kv_usage * kv_total_gb
                 print(f"[{self.clock:.1f}s] prompt={p_tput:.1f} gen={g_tput:.1f} tok/s "
                       f"| running={p_running + d_running} waiting={p_waiting + d_waiting} "
                       f"| cache={ch:.1f}% ({_total_h}/{_total_q}) "
-                      f"| mem={kv_used_gb:.1f}/{kv_total_gb:.1f} GiB "
+                      f"| mem={kv_usage * 100:.1f}% "
                       f"| done={metrics.num_requests}/{_total_reqs}")
                 _last_print = self.clock
                 _last_cum_prompt = _cum_prompt
