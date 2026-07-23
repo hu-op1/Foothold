@@ -22,6 +22,17 @@ from typing import Any
 META_SCHEMA_VERSION = 1
 
 
+def _json_default(o):
+    """Fallback serializer for numpy types that Python's json can't handle."""
+    name = type(o).__name__
+    if name in ("bool", "bool_"):
+        return bool(o)
+    if name in ("float64", "float32", "float16", "int64", "int32", "int16", "int8",
+                "uint64", "uint32", "uint16", "uint8", "ndarray"):
+        return o.item()
+    raise TypeError(f"Object of type {name} is not JSON serializable")
+
+
 class SimRecorder:
     """Records per-tick + per-request data for one simulation run."""
 
@@ -163,12 +174,12 @@ class SimRecorder:
         }
         if extra_meta:
             payload.update(extra_meta)
-        (out / "meta.json").write_text(json.dumps(payload, indent=2))
+        (out / "meta.json").write_text(json.dumps(payload, indent=2, default=_json_default))
 
     def _write_requests(self, out: Path) -> None:
         with (out / "requests.jsonl").open("w") as f:
             for r in self._request_records:
-                f.write(json.dumps(r) + "\n")
+                f.write(json.dumps(r, default=_json_default) + "\n")
 
     def _write_timeseries(self, out: Path) -> None:
         header = [

@@ -190,16 +190,7 @@ class SimulationEngine:
             r.kv_transfer_end = None
             r.scheduled_ts = None
 
-        # Reset time breakdown accumulator
-        self.time_acc = {"attn_proj": 0.0, "ffn_proj": 0.0,
-                         "expert_proj": 0.0, "shared_ffn_proj": 0.0,
-                         "router_proj": 0.0,
-                         "attn_prefill": 0.0, "attn_decode": 0.0,
-                         "fused_add_norm": 0.0, "swiglu": 0.0, "rope": 0.0,
-                         "lm_head": 0.0, "launch_overhead": 0.0,
-                         "all_reduce": 0.0, "all_to_all": 0.0,
-                         "inter_stage_comm": 0.0,
-                         "kv_transfer": 0.0, "swap": 0.0}
+        self.time_acc: dict[str, float] = {}
 
         # Safety iteration limit scales with workload (worst case: 1 token/step)
         total_decode_tokens = sum(r.max_output_len for r in requests)
@@ -317,8 +308,13 @@ class SimulationEngine:
                     max_step = max(max_step, step["total"])
                     # Accumulate time breakdown components
                     for k, v in step.items():
-                        if k != "total":
-                            self.time_acc[k] += v
+                        if k == "total":
+                            continue
+                        if isinstance(v, dict):
+                            for bk, bv in v.items():
+                                self.time_acc[bk] = self.time_acc.get(bk, 0.0) + bv
+                        else:
+                            self.time_acc[k] = self.time_acc.get(k, 0.0) + v
                     # Count prefill vs decode tokens for this step
                     for req, num_new, _ in output.scheduled_requests:
                         pre_step = req.num_computed_tokens - num_new
@@ -373,7 +369,7 @@ class SimulationEngine:
                 kv_total_gb = (self.num_blocks * self.bytes_per_block) / 1e9
                 kv_used_gb = kv_usage * kv_total_gb
                 print(f"[{self.clock:.1f}s] prompt={p_tput:.1f} gen={g_tput:.1f} tok/s "
-                      f"| run={total_running} wait={total_waiting} "
+                      f"| running={total_running} waiting={total_waiting} "
                       f"| cache={ch:.1f}% ({_total_h}/{_total_q}) "
                       f"| mem={kv_used_gb:.1f}/{kv_total_gb:.1f} GiB "
                       f"| done={metrics.num_requests}/{_total_reqs}")
@@ -556,8 +552,13 @@ class SimulationEngine:
             p_time_val = p_step["total"]
             # Accumulate P-side time breakdown
             for k, v in p_step.items():
-                if k != "total":
-                    self.time_acc[k] += v
+                if k == "total":
+                    continue
+                if isinstance(v, dict):
+                    for bk, bv in v.items():
+                        self.time_acc[bk] = self.time_acc.get(bk, 0.0) + bv
+                else:
+                    self.time_acc[k] = self.time_acc.get(k, 0.0) + v
             # P-side update: sets scheduled_ts for newly admitted requests
             if p_total > 0:
                 p_sched.update_from_output(p_out, self.clock + p_time_val)
@@ -577,8 +578,13 @@ class SimulationEngine:
                     d_times.append(d_step["total"])
                     # Accumulate D-side time breakdown
                     for k, v in d_step.items():
-                        if k != "total":
-                            self.time_acc[k] += v
+                        if k == "total":
+                            continue
+                        if isinstance(v, dict):
+                            for bk, bv in v.items():
+                                self.time_acc[bk] = self.time_acc.get(bk, 0.0) + bv
+                        else:
+                            self.time_acc[k] = self.time_acc.get(k, 0.0) + v
                     # D-side tokens are decode (gen)
                     step_gen += sum(nt for _, nt, _ in o.scheduled_requests)
                 else:
@@ -622,12 +628,12 @@ class SimulationEngine:
             # Accumulate KV transfer time for successfully admitted requests
             for req in p_done:
                 if req.kv_transfer_end is not None and req.kv_transfer_start is not None:
-                    self.time_acc["kv_transfer"] += req.kv_transfer_end - req.kv_transfer_start
+                    self.time_acc["kv_transfer"] = self.time_acc.get("kv_transfer", 0.0) + req.kv_transfer_end - req.kv_transfer_start
 
             max_d_time = max(d_times) if d_times else 0.0
             step_time = max(p_time_val, max_d_time)
             total_swap = p_out.swap_time + sum(o.swap_time for o in d_outs)
-            self.time_acc["swap"] += total_swap
+            self.time_acc["swap"] = self.time_acc.get("swap", 0.0) + total_swap
             if step_time == 0 and total_swap == 0:
                 step_time = 0.001
             # ── Advance clock with schedule/execute pipeline ──
@@ -673,7 +679,7 @@ class SimulationEngine:
                 kv_total_gb = (self.num_blocks * self.bytes_per_block) / 1e9
                 kv_used_gb = kv_usage * kv_total_gb
                 print(f"[{self.clock:.1f}s] prompt={p_tput:.1f} gen={g_tput:.1f} tok/s "
-                      f"| run={p_running + d_running} wait={p_waiting + d_waiting} "
+                      f"| running={p_running + d_running} waiting={p_waiting + d_waiting} "
                       f"| cache={ch:.1f}% ({_total_h}/{_total_q}) "
                       f"| mem={kv_used_gb:.1f}/{kv_total_gb:.1f} GiB "
                       f"| done={metrics.num_requests}/{_total_reqs}")
