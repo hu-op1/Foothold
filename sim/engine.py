@@ -141,21 +141,6 @@ class SimulationEngine:
                 f"({dp} × {tp_size} × {pp_size} = {expected})"
             )
 
-        # ── TP/PP-aware KV cache correction ──
-        # load_config() computes kv_cache_memory_gb assuming the FULL model
-        # on one GPU.  With TP>1 or PP>1, each GPU only holds a fraction of
-        # the weights (1/tp for TP, nl/pp for PP), freeing VRAM for KV cache.
-        # The existing tp_size × pp multiplier in blocks_per_pool already
-        # accounts for smaller block sizes (fewer heads / fewer layers).
-        # Here we add the VRAM freed by weight reduction.
-        eff_parallel = max(tp_size * pp_size, d_tp_size * d_pp_size)
-        if eff_parallel > 1:
-            total_params = self.model.get("total_params_b", 0)
-            if total_params > 0:
-                weight_gb = total_params * 2  # total_params_b is in billions, ×2 = GB in bf16
-                extra_kv_gb = weight_gb * (eff_parallel - 1) / eff_parallel
-                extra_blocks = int(extra_kv_gb * 1024**3) // self.bytes_per_block
-                self.num_blocks += max(0, extra_blocks)
         # ── EP-aware KV cache correction ──
         # EP shards expert weights, freeing additional VRAM for KV cache.
         if enable_ep and self.model.get("is_moe"):
