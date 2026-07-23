@@ -299,135 +299,81 @@ def memory_report(model_spec, gpu_name, tp, max_model_len=8192, max_num_seqs=256
 
 
 
-# ── YAML-based model loading (v1) ────────────────────────────────────
+# ── Per-model .py loading ─────────────────────────────────────────────
+
+from importlib.util import spec_from_file_location, module_from_spec
 
 _MODELS_DIR = Path(__file__).parent.parent / "models"
 
+_SPEC_REQUIRED = [
+    "name", "hidden_dim", "vocab_size", "max_model_len",
+    "num_layers", "num_heads", "num_kv_heads", "head_dim",
+    "intermediate_dim", "total_params_b",
+]
+
 
 def _resolve_model_path(model_name: str) -> Path:
+    """Resolve a model name to a .py file in models/."""
     p = Path(model_name)
-    if p.exists() and p.suffix in (".yaml", ".yml"):
+    if p.exists() and p.suffix == ".py":
         return p
-    q = _MODELS_DIR / f"{model_name}.yaml"
+    # Short name (e.g. "qwen3_4b")
+    q = _MODELS_DIR / f"{model_name}.py"
     if q.exists():
         return q
-    # Try lowercased version (e.g. "Qwen/Qwen3-4B" -> "qwen3-4b")
-    short = model_name.split("/")[-1].lower().replace(".", "-").replace("_", "-")
-    r = _MODELS_DIR / f"{short}.yaml"
+    # Full HF ID (e.g. "Qwen/Qwen3-4B") → short name
+    short = model_name.split("/")[-1].lower().replace(".", "-").replace("_", "-").replace("-", "_")
+    r = _MODELS_DIR / f"{short}.py"
     if r.exists():
         return r
-    d = _MODELS_DIR / model_name / f"{model_name}.yaml"
+    # Also try stripping first underscore (e.g. "llama_3_8b" → "llama3_8b")
+    r2 = _MODELS_DIR / f"{short.replace('_', '', 1)}.py"
+    if r2.exists():
+        return r2
+    # Loose glob match — handle naming variations like llama3_8b vs llama_3_8b
+    from glob import glob
+    pattern = _MODELS_DIR / f"*{short.split('_')[0]}*{'_'.join(short.split('_')[1:])}.py"
+    for cand in sorted(glob(str(pattern))):
+        return Path(cand)
+    d = _MODELS_DIR / model_name / f"{model_name}.py"
     if d.exists():
         return d
     raise FileNotFoundError(
-        f"Model YAML not found for '{model_name}'. "
-        f"Checked: {p}, {q}, {r}, {d}"
+        f"Model .py not found for '{model_name}'. "
+        f"Checked: {p}, {q}, {r}, {r2}, {d}"
     )
+
+
+def _import_module(model_name: str):
+    """Import a per-model .py file and return the module object."""
+    path = _resolve_model_path(model_name)
+    spec = spec_from_file_location(path.stem, str(path))
+    mod = module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def load_model_spec(model_name: str) -> dict:
-    """Load model spec from YAML file (v1)."""
-    path = _resolve_model_path(model_name)
-    with open(path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
-
-    _validate_yaml(raw, str(path))
-    first_lt = next(iter(raw["layer_types"].values()))
-
-    # Normalize defaults for layer_type fields
-    for lt_name, lt in raw["layer_types"].items():
-        attn = lt.get("attention", "none")
-        if attn in ("standard_attention",):
-            if "num_kv_heads" not in lt:
-                lt["num_kv_heads"] = lt["num_q_heads"]
-            if "rope_dim" not in lt:
-                lt["rope_dim"] = lt["head_dim"]
-
-    spec = {
-        "name": raw["name"],
-        "hidden_dim": raw["hidden_dim"],
-        "num_layers": raw["num_layers"],
-        "vocab_size": raw["vocab_size"],
-        "max_model_len": raw.get("max_model_len", 8192),
-        "norm_type": raw.get("norm_type", "rmsnorm"),
-        "tie_word_embeddings": raw.get("tie_word_embeddings", False),
-        "total_params_b": raw["total_params_b"],
-        "layer_types": raw["layer_types"],
-        "layers": raw["layers"],
-        # Backward-compat fields
-        "num_heads": first_lt.get("num_q_heads", first_lt.get("num_qk_heads", 1)),
-        "num_kv_heads": first_lt.get("num_kv_heads", first_lt.get("num_q_heads", 1)),
-        "head_dim": first_lt["head_dim"],
-        "intermediate_dim": first_lt.get("intermediate_dim", raw["hidden_dim"] * 4),
-    }
-    return spec
+    """Load model SPEC dict from per-model .py file."""
+    mod = _import_module(model_name)
+    spec = getattr(mod, "SPEC", None)
+    if spec is None:
+        raise RuntimeError(f"Model file for '{model_name}' must define SPEC dict")
+    for key in _SPEC_REQUIRED:
+        if key not in spec:
+            raise RuntimeError(
+                f"SPEC for '{model_name}' missing required field '{key}'"
+            )
+    return dict(spec)
 
 
 def load_model_graph(model_name: str):
-    """Parse model YAML, construct ModelGraph with layer builders."""
+    """Load model graph by calling the per-model file's build_graph()."""
     spec = load_model_spec(model_name)
-
-    from sim.graph import ModelGraph
-    from sim.layers import ATTENTION_REGISTRY, FFN_REGISTRY
-    from sim.layers.common import build_fused_residual_norm
-    from sim.layers.head import build_lm_head
-
-    layer_specs = []
-    repeat = 1
-    for entry in spec["layers"]:
-        if "repeat" in entry:
-            repeat = entry["repeat"]
-            continue
-        lt_name = entry["type"]
-        count = entry["count"]
-        lt = spec["layer_types"][lt_name]
-
-        # Merge hidden_dim into layer_type for builder access
-        lt_dict = dict(lt)
-        lt_dict["hidden_dim"] = spec["hidden_dim"]
-
-        attn_fn = ATTENTION_REGISTRY.get(lt["attention"])
-        ffn_fn = FFN_REGISTRY.get(lt["ffn"])
-        if attn_fn is None:
-            available = list(ATTENTION_REGISTRY.keys())
-            raise RuntimeError(
-                f"Unknown attention '{lt['attention']}' for layer type '{lt_name}'. "
-                f"Available: {available}"
-            )
-        if ffn_fn is None:
-            available = list(FFN_REGISTRY.keys())
-            raise RuntimeError(
-                f"Unknown ffn '{lt['ffn']}' for layer type '{lt_name}'. "
-                f"Available: {available}"
-            )
-
-        def _make(ltype=lt_dict, attn=attn_fn, ffn=ffn_fn, fspec=spec):
-            def builder(ctx, hw):
-                ops = []
-                ops += attn(ctx, ltype, hw)
-                ops += build_fused_residual_norm(ctx, fspec, hw)
-                ops += ffn(ctx, ltype, hw)
-                ops += build_fused_residual_norm(ctx, fspec, hw)
-                return ops
-            return builder
-
-        layer_specs.append((_make(), count))
-
-    return ModelGraph(
-        layer_specs=layer_specs,
-        head_builder=lambda ctx, hw: build_lm_head(ctx, spec, hw),
-    )
-
-
-def _validate_yaml(raw: dict, path: str):
-    required = ["name", "hidden_dim", "vocab_size", "num_layers",
-                "total_params_b", "layer_types", "layers"]
-    for key in required:
-        if key not in raw or raw[key] is None:
-            raise RuntimeError(f"Missing required field '{key}' in {path}")
-
-    for lt_name, lt in raw["layer_types"].items():
-        if "attention" not in lt or "ffn" not in lt:
-            raise RuntimeError(
-                f"layer_type '{lt_name}' in {path} must have 'attention' and 'ffn' fields"
-            )
+    mod = _import_module(model_name)
+    build = getattr(mod, "build_graph", None)
+    if build is None:
+        raise RuntimeError(
+            f"Model file for '{model_name}' must define build_graph(spec) function"
+        )
+    return build(spec)
