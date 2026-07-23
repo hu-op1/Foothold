@@ -36,18 +36,28 @@ def _fit_subset(matmul_results, label, F_fixed=None, fit_overhead=False):
 
     # Subtract overhead so the roofline model only sees compute+memory time
     times = times_raw - matmul_overhead
+    if fit_overhead:
+        valid = times > 0
+        flops = flops[valid]
+        bytes_moved = bytes_moved[valid]
+        times = times[valid]
     times = np.clip(times, 1e-9, None)  # avoid negative from noise
 
     if F_fixed is not None:
         # Fit only B and p, holding F_peak fixed
         from scipy.optimize import curve_fit
+
+        B_bounds = (1e8, 1e13)
+        p_bounds = (1.0, 10.0)
+
         def model(X, B, p):
             f, b_arr = X
             return (f / F_fixed + b_arr / B) ** (1 / p)
         B0 = float(np.median(bytes_moved / times))
+        B0 = float(np.clip(B0 * 0.5, *B_bounds))
         popt, _ = curve_fit(model, (flops, bytes_moved), times,
-                            p0=[B0 * 0.5, 2.0],
-                            bounds=([1e8, 1.0], [1e13, 10.0]),
+                            p0=[B0, 2.0],
+                            bounds=([B_bounds[0], p_bounds[0]], [B_bounds[1], p_bounds[1]]),
                             maxfev=20000)
         B_peak, p = popt
         F_peak = F_fixed
