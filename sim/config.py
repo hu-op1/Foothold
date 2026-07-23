@@ -16,41 +16,73 @@ def load_config(path=None, model_spec=None):
     if model_spec:
         cfg.setdefault("max_model_len", model_spec.get("max_model_len", 8192))
 
+    # Strip whitespace from model name (common copy-paste error)
+    if "model" in cfg and isinstance(cfg["model"], str):
+        cfg["model"] = cfg["model"].strip()
+
     # Defaults for null fields
     sim = cfg.setdefault("simulation", {})
     # max_num_seqs is a user-configured scheduling parameter.
     # It must be set explicitly in search.yaml; no auto-estimation.
 
     mem_util = sim.get("gpu_memory_utilization", 0.85)
-    # Activation memory: null → auto-compute, number → override
-    act_conf = sim.get("activation_memory_gb")
-    if act_conf is None and model_spec:
-        max_tokens = sim.get("max_num_batched_tokens", 8192)
-        act_conf = activation_memory_gb(model_spec, max_tokens)
-    elif act_conf is None:
-        act_conf = 2.0
+    gpu_name = cfg.get("gpu", "3090")
 
-    if sim.get("kv_cache_memory_gb") is None:
-        if model_spec:
-            weight_gb = model_weight_gb(model_spec)
-            eff_vram = total_vram_gb(cfg.get("gpu", "3090")) * mem_util
-            sim["kv_cache_memory_gb"] = max(1.0, eff_vram - weight_gb - act_conf)
-        else:
-            sim["kv_cache_memory_gb"] = _default_vram(cfg.get("gpu", "3090")) * mem_util
-
-    # Store resolved activation for downstream consumers
-    sim["activation_memory_gb"] = act_conf
-
+    # ── Strategy: parse early so tp/pp are available for memory checks ──
     strat = cfg.setdefault("strategy", {})
     strat.setdefault("mode", "both")
 
-    # ── Node topology: derive total_gpus from nodes × gpus_per_node ──
+    # Node topology: derive total_gpus from nodes × gpus_per_node
     nodes = strat.get("nodes")
     gpus_per_node = strat.get("gpus_per_node")
     if nodes is not None and gpus_per_node is not None:
         strat["total_gpus"] = int(nodes) * int(gpus_per_node)
     else:
         strat.setdefault("total_gpus", 1)
+
+    tp = strat.get("tp_size", 1)
+    pp = strat.get("pp_size", 1)
+
+    # Activation memory: null → auto-compute, number → override
+    act_conf = sim.get("activation_memory_gb")
+    if act_conf is None and model_spec:
+        max_tokens = sim.get("max_num_batched_tokens", 8192)
+        act_conf = activation_memory_gb(model_spec, max_tokens, tp, pp)
+    elif act_conf is None:
+        act_conf = 2.0
+
+    usable_vram = total_vram_gb(gpu_name) * mem_util
+
+    # ── Memory validation: fail fast if model doesn't fit ──
+    if model_spec:
+        weight_per_gpu = model_weight_gb(model_spec, tp=tp, pp=pp)
+        required = weight_per_gpu + act_conf
+        if required >= usable_vram:
+            total_params_b = model_spec.get("total_params_b", 0)
+            raise RuntimeError(
+                f"Model '{cfg.get('model', 'unknown')}' "
+                f"({total_params_b:.1f}B params, {cfg.get('dtype', 'bf16')}) "
+                f"does not fit on {gpu_name} ({total_vram_gb(gpu_name)} GB) "
+                f"with TP={tp}, PP={pp}.\n"
+                f"  Weight per GPU:  {weight_per_gpu:.1f} GB\n"
+                f"  Activation:      {act_conf:.1f} GB\n"
+                f"  Required:        {required:.1f} GB\n"
+                f"  VRAM usable:     {usable_vram:.1f} GB "
+                f"({(1 - mem_util) * 100:.0f}% reserved)\n"
+                f"  Shortfall:       {required - usable_vram:.1f} GB\n"
+                f"\n"
+                f"Options: use more GPUs (increase gpus_per_node or nodes),\n"
+                f"enable pipeline parallelism (PP), or choose a smaller model."
+            )
+
+        if sim.get("kv_cache_memory_gb") is None:
+            sim["kv_cache_memory_gb"] = max(1.0, usable_vram - weight_per_gpu - act_conf)
+    else:
+        if sim.get("kv_cache_memory_gb") is None:
+            sim["kv_cache_memory_gb"] = max(1.0, usable_vram - act_conf)
+
+    # Store resolved activation for downstream consumers
+    sim["activation_memory_gb"] = act_conf
 
     # Use search list first value as simulation default
     search = strat.setdefault("search", {})
@@ -72,18 +104,24 @@ def load_config(path=None, model_spec=None):
 GPU_VRAM = {
     "3090": 24, "4090": 24, "A100": 80, "A100-80GB": 80,
     "H100": 80, "H200": 141, "A6000": 48, "L40S": 48,
+    "3080": 10,
 }
 
 
 def _default_vram(gpu_name):
     """Return 80% of known GPU VRAM in GB."""
-    gb = GPU_VRAM.get(gpu_name, 24)
+    gb = GPU_VRAM.get(gpu_name)
+    if gb is None:
+        raise KeyError(f"Unknown GPU '{gpu_name}'. Add it to GPU_VRAM in sim/config.py.")
     return int(gb * 0.8)
 
 
 def total_vram_gb(gpu_name):
     """Return total GPU VRAM in GB."""
-    return GPU_VRAM.get(gpu_name, 24)
+    gb = GPU_VRAM.get(gpu_name)
+    if gb is None:
+        raise KeyError(f"Unknown GPU '{gpu_name}'. Add it to GPU_VRAM in sim/config.py.")
+    return gb
 
 
 def model_weight_gb(model_spec, tp=1, pp=1, ep=1):
@@ -91,12 +129,17 @@ def model_weight_gb(model_spec, tp=1, pp=1, ep=1):
 
     With EP: expert weights are sharded by EP, dense weights by TP×PP.
     When EP is 1, falls back to the standard formula.
+
+    total_params_b is in billions (e.g. 27.0 = 27B params); the fallback
+    formula produces raw counts.
     """
     params_b = model_spec.get("total_params_b", 0)
     if params_b == 0:
         h = model_spec["hidden_dim"]
         nl = model_spec["num_layers"]
-        params_b = 12 * h * h * nl
+        params_raw = 12 * h * h * nl
+    else:
+        params_raw = params_b * 1e9
 
     if ep > 1 and model_spec.get("is_moe"):
         num_experts = model_spec.get("num_experts", 0)
@@ -107,7 +150,7 @@ def model_weight_gb(model_spec, tp=1, pp=1, ep=1):
 
         expert_params = moe_layers * num_experts * (3 * h * moe_inter)
         router_params = moe_layers * (h * num_experts)
-        non_expert_params = params_b - expert_params - router_params
+        non_expert_params = params_raw - expert_params - router_params
 
         expert_per_gpu = expert_params / ep
         non_expert_per_gpu = non_expert_params / (tp * pp)
@@ -115,7 +158,7 @@ def model_weight_gb(model_spec, tp=1, pp=1, ep=1):
 
         weight_gb = (expert_per_gpu + non_expert_per_gpu + router_per_gpu) * 2 / 1e9
     else:
-        weight_gb = params_b * 2 / 1e9 / (tp * pp)
+        weight_gb = params_raw * 2 / 1e9 / (tp * pp)
 
     return weight_gb
 

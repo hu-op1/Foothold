@@ -152,7 +152,7 @@ class SimulationEngine:
         if eff_parallel > 1:
             total_params = self.model.get("total_params_b", 0)
             if total_params > 0:
-                weight_gb = total_params * 2 / 1e9  # float16
+                weight_gb = total_params * 2  # total_params_b is in billions, ×2 = GB in bf16
                 extra_kv_gb = weight_gb * (eff_parallel - 1) / eff_parallel
                 extra_blocks = int(extra_kv_gb * 1024**3) // self.bytes_per_block
                 self.num_blocks += max(0, extra_blocks)

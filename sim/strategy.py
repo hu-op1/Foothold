@@ -333,7 +333,7 @@ def _search_one(total_gpus: int, mode, search_cfg, slo, model_spec,
     skipped = len(tasks) - len(pending)
 
     total = len(tasks)
-    print(f"  Model={model_spec['name']} ({model_spec['total_params_b']/1e9:.1f}B params)")
+    print(f"  Model={model_spec['name']} ({model_spec['total_params_b']:.1f}B params)")
     print(f"  GPU={gpu_name} x{total_gpus} ({total_vram_gb(gpu_name)}GB each)")
     print(f"  Valid P-TP sizes: {p_tp_sizes}")
     if skipped:
