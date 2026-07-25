@@ -209,8 +209,8 @@ async def _send_all(
 
 
 async def _send_one(req, client, model, messages, semaphore):
+    t_start = time.perf_counter()
     async with semaphore:
-        t_start = time.perf_counter()
         first_ts = None
         n_out = req.max_output_len
 
