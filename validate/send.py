@@ -120,26 +120,29 @@ async def _send_all(requests, client, model, tokenizer, max_concurrency, trace_f
     return records
 
 
-async def _send_one(req, client, model, messages, semaphore):
+async     def _send_one(req, client, model, messages, semaphore):
     async with semaphore:
         t_start = time.perf_counter()
         first_ts = None
-        output_tokens = 0
+        n_out = req.max_output_len
 
         try:
             stream = await client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=req.max_output_len,
+                max_tokens=n_out,
                 stream=True,
                 stream_options={"include_usage": True},
+                extra_body={
+                    "min_tokens": n_out,
+                    "ignore_eos": True,
+                },
             )
 
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     if first_ts is None:
                         first_ts = time.perf_counter()
-                    output_tokens += 1
 
             t_end = time.perf_counter()
 
@@ -148,7 +151,7 @@ async def _send_one(req, client, model, messages, semaphore):
                 "status": "ok",
                 "ttft": first_ts - t_start if first_ts is not None else None,
                 "latency": t_end - t_start,
-                "output_tokens": output_tokens,
+                "output_tokens": n_out,
             }
 
         except Exception as e:
