@@ -124,7 +124,6 @@ class StepContext:
     matmul_F: float = 0.0
     matmul_B: float = 0.0
     matmul_p: float = 0.0
-    matmul_overhead: float = 0.0
 
     fa_decode_params: dict = field(default_factory=dict)
     fa_prefill_params: dict = field(default_factory=dict)
@@ -202,7 +201,6 @@ class StepContext:
             matmul_F=mp["F"],
             matmul_B=mp["B"],
             matmul_p=mp["p"],
-            matmul_overhead=mp.get("overhead", 0.0),
             fa_decode_params=fa_d,
             fa_prefill_params=fa_p,
             b_effs=b_effs,
@@ -271,10 +269,21 @@ def _has_cudagraph_params(hw):
 
 
 def _select_dtype_params(hw_params, dtype):
-    per_dtype = hw_params.get("per_dtype", {})
-    if dtype in per_dtype:
-        return {**hw_params, **per_dtype[dtype]}
-    return dict(hw_params)
+    """Select dtype-specific roofline params by stripping _{dtype} suffix.
+
+    When multiple dtypes are fitted, keys are stored with a suffix
+    (e.g. F_peak_decode_float16).  This strips the suffix so downstream
+    code can use the same key names regardless of dtype.
+    Falls back to unsuffixed keys for single-dtype fits.
+    """
+    suffix = f"_{dtype}"
+    result = dict(hw_params)
+    for key, val in hw_params.items():
+        if key.endswith(suffix):
+            base = key[:-len(suffix)]
+            if base:
+                result[base] = val
+    return result
 
 
 def _interp_roofline(M_total, hw, use_cudagraph=False):
@@ -284,29 +293,23 @@ def _interp_roofline(M_total, hw, use_cudagraph=False):
             "F_d": "F_peak_decode_cudagraph", "B_d": "B_peak_decode_cudagraph",
             "p_d": "p_decode_cudagraph", "F_p": "F_peak_prefill_cudagraph",
             "B_p": "B_peak_prefill_cudagraph", "p_p": "p_prefill_cudagraph",
-            "ov_d": "matmul_overhead_decode_cudagraph",
-            "ov_p": "matmul_overhead_prefill_cudagraph",
         }
     else:
         keys = {
             "F_d": "F_peak_decode", "B_d": "B_peak_decode", "p_d": "p_decode",
             "F_p": "F_peak_prefill", "B_p": "B_peak_prefill", "p_p": "p_prefill",
-            "ov_d": "matmul_overhead_decode", "ov_p": "matmul_overhead_prefill",
         }
 
     if M_total <= _M_LO:
-        return {"F": hw[keys["F_d"]], "B": hw[keys["B_d"]], "p": hw[keys["p_d"]],
-                "overhead": hw.get(keys["ov_d"], 0.0)}
+        return {"F": hw[keys["F_d"]], "B": hw[keys["B_d"]], "p": hw[keys["p_d"]]}
     if M_total >= _M_HI:
-        return {"F": hw[keys["F_p"]], "B": hw[keys["B_p"]], "p": hw[keys["p_p"]],
-                "overhead": hw.get(keys["ov_p"], hw.get(keys["ov_d"], 0.0))}
+        return {"F": hw[keys["F_p"]], "B": hw[keys["B_p"]], "p": hw[keys["p_p"]]}
 
     w = (log2(M_total) - log2(_M_LO)) / _LOG_RANGE
     log_B = log(hw[keys["B_d"]]) + w * (log(hw[keys["B_p"]]) - log(hw[keys["B_d"]]))
     B = exp(log_B)
     p = hw[keys["p_d"]] + w * (hw[keys["p_p"]] - hw[keys["p_d"]])
-    return {"F": hw[keys["F_p"]], "B": B, "p": p,
-            "overhead": hw.get(keys["ov_d"], 0.0)}
+    return {"F": hw[keys["F_p"]], "B": B, "p": p}
 
 
 def _select_fa_params(n_requests, regime, hw_params, nh_model=None, use_cudagraph=False):

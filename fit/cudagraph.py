@@ -58,28 +58,11 @@ def _fit_cg_matmul_subset(matmul_results, label, F_fixed=None):
                                                F_max=F_max)
 
     # Under CUDA Graph, per-kernel launch overhead is zero.
-    # We still estimate a small residual from the smallest-M points
-    # but it should be much lower than the eager-fit value.
-    matmul_overhead = 0.0
-    if F_fixed is not None:
-        small = [r for r in matmul_results if r["M"] <= 4]
-        if len(small) >= 3:
-            residuals = []
-            for r in small:
-                t_meas = r["time_ms"] / 1000.0
-                f, b = r["flops"], r["bytes"]
-                t_pred = (f / F_fixed + b / B_peak) ** (1 / p)
-                residuals.append(t_meas - t_pred)
-            matmul_overhead = float(np.median([r for r in residuals if r > 0]))
-            # Under graph replay, overhead should be near zero.  Clamp negative values.
-            matmul_overhead = max(0.0, matmul_overhead)
 
     print(f"  {label}: F={F_peak / 1e12:.1f} TF  B={B_peak / 1e12:.2f} TB  p={p:.3f}  "
-          f"overhead={matmul_overhead * 1e6:.1f} us  R2={r2:.4f}")
-    result = {"F_peak": float(F_peak), "B_peak": float(B_peak),
-              "p": float(p), "r2": float(r2)}
-    result["matmul_overhead"] = matmul_overhead
-    return result
+          f"R2={r2:.4f}")
+    return {"F_peak": float(F_peak), "B_peak": float(B_peak),
+            "p": float(p), "r2": float(r2)}
 
 
 def _fit_cg_matmul_dtype(matmul_results, label_suffix=""):
@@ -94,8 +77,6 @@ def _fit_cg_matmul_dtype(matmul_results, label_suffix=""):
     params = {}
     params.update({f"{k}_decode_cudagraph{label_suffix}": v for k, v in p_small.items()})
     params.update({f"{k}_prefill_cudagraph{label_suffix}": v for k, v in p_large.items()})
-    if "matmul_overhead" in p_small:
-        params[f"matmul_overhead_prefill_cudagraph{label_suffix}"] = p_small["matmul_overhead"]
     return params
 
 
@@ -119,7 +100,6 @@ def fit_cudagraph_matmul(results):
         for dt in dtypes:
             subset = [r for r in matmul_results if r.get("dtype", "float16") == dt]
             params.update(_fit_cg_matmul_dtype(subset, label_suffix=f"_{dt}"))
-        params.update(_fit_cg_matmul_dtype(matmul_results))
     return params
 
 
@@ -194,7 +174,6 @@ def fit_cudagraph_elementwise(results):
         for dt in dtypes:
             subset = [r for r in elem_results if r.get("dtype", "float16") == dt]
             params.update(_fit_cg_elem_dtype(subset, label_suffix=f"_{dt}"))
-        params.update(_fit_cg_elem_dtype(elem_results))
     return params
 
 
@@ -317,8 +296,6 @@ def fit_cudagraph_flashattn(results):
             subset = [r for r in fa_results if r.get("dtype", "float16") == dt]
             print(f"\n  ── {dt} ──")
             params.update(_fit_cg_fa_dtype(subset, label_suffix=f"_{dt}"))
-        print(f"\n  ── unified (all dtypes) ──")
-        params.update(_fit_cg_fa_dtype(fa_results))
     return params
 
 

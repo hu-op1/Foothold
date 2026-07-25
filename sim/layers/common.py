@@ -16,7 +16,7 @@ def build_qkv_proj(ctx, h, nh, nh_kv, hd, hw) -> list[OpSpec]:
         tags=frozenset({"projection"}),
         M=ctx.total_tokens, K=h, N=dim_q + 2 * dim_kv,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -27,7 +27,7 @@ def build_o_proj(ctx, h, nh, hd, hw) -> list[OpSpec]:
         tags=frozenset({"projection"}),
         M=ctx.total_tokens, K=dim_q, N=h,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -76,7 +76,7 @@ def build_qk_proj(ctx, h, nh, nh_kv, hd, hw) -> list[OpSpec]:
         tags=frozenset({"projection"}),
         M=ctx.total_tokens, K=h, N=2 * dim_qk,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -87,7 +87,7 @@ def build_v_proj(ctx, h, nh_v, hd, hw) -> list[OpSpec]:
         tags=frozenset({"projection"}),
         M=ctx.total_tokens, K=h, N=dim_v,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -98,7 +98,7 @@ def build_linear_scan(ctx, h, hw) -> list[OpSpec]:
         tags=frozenset({"projection"}),
         M=ctx.total_tokens, K=h, N=h,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -110,7 +110,7 @@ def build_linear_out_proj(ctx, h, nh_v, hd, hw) -> list[OpSpec]:
         tags=frozenset({"projection"}),
         M=ctx.total_tokens, K=dim_v, N=h,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -120,7 +120,7 @@ def build_gate_up_proj(ctx, h, inter, hw) -> list[OpSpec]:
         tags=frozenset({"projection"}),
         M=ctx.total_tokens, K=h, N=2 * inter,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -130,7 +130,7 @@ def build_down_proj(ctx, h, inter, hw) -> list[OpSpec]:
         tags=frozenset({"projection"}),
         M=ctx.total_tokens, K=inter, N=h,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -201,7 +201,7 @@ def build_lm_head_matmul(ctx, h, vocab_size, hw) -> list[OpSpec]:
         tags=frozenset({"projection"}),
         M=ctx.total_tokens, K=h, N=vocab_size,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -211,7 +211,7 @@ def build_router(ctx, h, num_experts, hw) -> list[OpSpec]:
         tags=frozenset({"expert_router"}),
         M=ctx.total_tokens, K=h, N=num_experts,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -221,7 +221,7 @@ def build_expert_gate_up(ctx, expert_M, h, moe_inter, hw) -> list[OpSpec]:
         tags=frozenset({"expert"}),
         M=expert_M, K=h, N=2 * moe_inter,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 
@@ -231,7 +231,7 @@ def build_expert_down(ctx, expert_M, h, moe_inter, hw) -> list[OpSpec]:
         tags=frozenset({"expert"}),
         M=expert_M, K=moe_inter, N=h,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+        p=ctx.matmul_p,
     )]
 
 

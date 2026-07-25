@@ -16,31 +16,15 @@ from fit.utils import roofline_fit
 M_SPLIT = 256
 
 
-def _fit_subset(matmul_results, label, F_fixed=None, fit_overhead=False):
+def _fit_subset(matmul_results, label, F_fixed=None):
     flops = np.array([r["flops"] for r in matmul_results])
     bytes_moved = np.array([r["bytes"] for r in matmul_results])
-    times_raw = np.array([r["time_ms"] for r in matmul_results]) / 1000.0
+    times = np.array([r["time_ms"] for r in matmul_results]) / 1000.0
 
     if len(matmul_results) < 5:
         print(f"  {label}: too few points ({len(matmul_results)}), skipping")
         return {}
 
-    # ── Estimate kernel launch overhead from smallest-M points ──
-    matmul_overhead = 0.0
-    if fit_overhead:
-        small = [r for r in matmul_results if r["M"] <= 4]
-        if len(small) >= 3:
-            matmul_overhead = float(np.median(
-                [r["time_ms"] for r in small]
-            )) / 1000.0
-
-    # Subtract overhead so the roofline model only sees compute+memory time
-    times = times_raw - matmul_overhead
-    if fit_overhead:
-        valid = times > 0
-        flops = flops[valid]
-        bytes_moved = bytes_moved[valid]
-        times = times[valid]
     times = np.clip(times, 1e-9, None)  # avoid negative from noise
 
     if F_fixed is not None:
@@ -73,12 +57,9 @@ def _fit_subset(matmul_results, label, F_fixed=None, fit_overhead=False):
                                                F_max=F_max)
 
     print(f"  {label}: F={F_peak / 1e12:.1f} TF  B={B_peak / 1e12:.2f} TB  p={p:.3f}  "
-          f"overhead={matmul_overhead * 1e6:.1f} us  R2={r2:.4f}")
-    result = {"F_peak": float(F_peak), "B_peak": float(B_peak),
-              "p": float(p), "r2": float(r2)}
-    if fit_overhead:
-        result["matmul_overhead"] = matmul_overhead
-    return result
+          f"R2={r2:.4f}")
+    return {"F_peak": float(F_peak), "B_peak": float(B_peak),
+            "p": float(p), "r2": float(r2)}
 
 
 def _fit_matmul_dtype(matmul_results, dtypes, label_suffix=""):
@@ -89,14 +70,11 @@ def _fit_matmul_dtype(matmul_results, dtypes, label_suffix=""):
     p_large = _fit_subset(large, f"prefill (M>={M_SPLIT}){label_suffix}")
     F_shared = p_large.get("F_peak", 1e13)
     p_small = _fit_subset(small, f"decode (M<={M_SPLIT}){label_suffix}",
-                          F_fixed=F_shared, fit_overhead=True)
+                          F_fixed=F_shared)
 
     params = {}
     params.update({f"{k}_decode{label_suffix}": v for k, v in p_small.items()})
     params.update({f"{k}_prefill{label_suffix}": v for k, v in p_large.items()})
-    # Copy overhead from decode to prefill (same hardware, same launch cost)
-    if "matmul_overhead" in p_small:
-        params[f"matmul_overhead_prefill{label_suffix}"] = p_small["matmul_overhead"]
     return params
 
 
@@ -117,14 +95,12 @@ def fit_matmul(results):
     params = {}
 
     if len(dtypes) <= 1:
-        # Single dtype — fit directly (no suffix, backward compat)
+        # Single dtype — fit directly (no suffix)
         params.update(_fit_matmul_dtype(matmul_results, dtypes))
     else:
-        # Per-dtype fitting
+        # Per-dtype fitting with suffix (e.g. _float16, _bfloat16)
         for dt in dtypes:
             subset = [r for r in matmul_results if r.get("dtype", "float16") == dt]
             params.update(_fit_matmul_dtype(subset, [dt], label_suffix=f"_{dt}"))
-        # Unified (all dtypes) for backward compat
-        params.update(_fit_matmul_dtype(matmul_results, dtypes))
 
     return params

@@ -179,8 +179,5 @@ def fit_flashattn(results):
             subset = [r for r in fa_results if r.get("dtype", "float16") == dt]
             print(f"\n  ── {dt} ──")
             params.update(_fit_flashattn_dtype(subset, label_suffix=f"_{dt}"))
-        # Unified (all dtypes) for backward compat
-        print(f"\n  ── unified (all dtypes) ──")
-        params.update(_fit_flashattn_dtype(fa_results))
 
     return params

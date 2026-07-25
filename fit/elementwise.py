@@ -114,9 +114,6 @@ def fit_elementwise(results):
             subset = [r for r in results if r.get("dtype", "float16") == dt]
             print(f"\n  ── {dt} ──")
             params.update(_fit_elementwise_dtype(subset, label_suffix=f"_{dt}"))
-        # Unified (all dtypes) for backward compat
-        print(f"\n  ── unified (all dtypes) ──")
-        params.update(_fit_elementwise_dtype(results))
 
     params["type"] = "elementwise"
     return params
