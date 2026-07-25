@@ -1,8 +1,29 @@
-# Validate visualization config for --validate.
-# Used by: uv run python main.py --validate
+# Validate config for --validate.
+# Used by: uv run python main.py --validate [--vllm] [--compare]
 
-output_dir: sim\output\qwen3-4b-tp4-conversation          # Required: path to a finished sim run (timeseries.csv, requests.jsonl)
-sim_csv: sim\output\qwen3-4b-tp4-conversation\qwen3-4b-tp4-conversation.csv             # Optional: LLMServingSim sim.csv for side-by-side comparison
-sim_log: sim\output\qwen3-4b-tp4-conversation\qwen3-4b-tp4-conversation.log             # Optional: LLMServingSim sim.log for side-by-side comparison
-title: "qwen3-4b-tp4-conversation"    # Plot title suffix
-prefix: "tp4"                # Output filename prefix
+# ── Sim output (required) ──
+sim_dir: sim\output\qwen3-4b-tp4-conversation
+
+# ── Comparison data (optional, used by --compare) ──
+# If null, that source is excluded from comparison.
+sim_csv: null                                          # LLMServingSim sim.csv
+sim_log: null                                          # LLMServingSim sim.log
+vllm_dir: null                                         # vLLM send output dir
+compare_dir: null                                      # Comparison output dir (default: sim_dir)
+
+title: "qwen3-4b-tp4-conversation"                     # Plot title suffix
+prefix: "tp4"                                          # Output filename prefix
+
+# ── vLLM send (--validate --vllm) ──
+vllm:
+  endpoint: "http://localhost:8000/v1"                 # OpenAI-compatible API base URL
+  model: null                                          # Required: model name served by vLLM
+  api_key: null                                        # Auto from OPENAI_API_KEY env if null
+  timeout: 600                                         # Per-request timeout seconds
+  max_concurrency: 32                                  # Max concurrent in-flight requests
+  trace_path: null                                     # Required: path to JSONL trace file
+  trace_format: sharegpt                               # "sharegpt" or "agentic"
+  max_requests: null                                   # Cap on trace requests
+  tokenizer: null                                      # Tokenizer HF ID (defaults to model)
+  output_dir: vllm\output                              # Output directory for vLLM results
+  tick_seconds: 0.5                                    # Timeseries bucket size

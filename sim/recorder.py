@@ -7,7 +7,7 @@ during a simulation run, then writes the three standard artifacts::
     <output_dir>/requests.jsonl
     <output_dir>/timeseries.csv
 
-Schema matches LLMServingSim's bench output so the same validate.py
+Schema matches LLMServingSim's bench output so the validate module
 can compare the two without translation.
 """
 

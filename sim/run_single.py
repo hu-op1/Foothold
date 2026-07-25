@@ -1,7 +1,7 @@
 """Run a single simulation with full time-series recording.
 
-Produces the three artifacts that :file:`LLMServingSim/bench/validate.sh`
-expects for side-by-side comparison::
+Produces the three artifacts used by the validate module
+for side-by-side comparison::
 
     <output_dir>/meta.json
     <output_dir>/requests.jsonl

@@ -6,7 +6,7 @@ Usage:
     uv run python main.py --fit                     # Roofline model fitting
     uv run python main.py --search                  # PD disaggregation strategy search
     uv run python main.py --sim                     # Single simulation
-    uv run python main.py --validate                # Visualize sim output
+    uv run python main.py --validate                # Visualize sim / send to vLLM / compare
 """
 
 import argparse
@@ -237,21 +237,11 @@ def run_sim(args):
 
 
 def run_validate(args):
-    """Visualize a sim run (optionally vs LLMServingSim)."""
-    from sim.validate import run as validate_run
+    """Dispatch validate sub-commands: visualize, vLLM send, or compare."""
+    from validate import dispatch
 
     cfg = load_config(args.config)
-    output_dir = cfg.get("output_dir")
-    if not output_dir:
-        print("validate requires `output_dir` in", args.config)
-        return
-    validate_run(
-        output_dir,
-        sim_csv=cfg.get("sim_csv"),
-        sim_log=cfg.get("sim_log"),
-        title=cfg.get("title", "foothold sim"),
-        prefix=cfg.get("prefix", ""),
-    )
+    dispatch(cfg, vllm=args.vllm, compare=args.compare)
 
 
 def main():
@@ -264,7 +254,10 @@ def main():
                "  uv run python main.py --search\n"
                "  uv run python main.py --sim\n"
                "  uv run python main.py --validate\n"
-               "  uv run python main.py --validate --config path/to/validate.yaml",
+               "  uv run python main.py --validate --config path/to/validate.yaml\n"
+               "  uv run python main.py --validate --vllm\n"
+               "  uv run python main.py --validate --compare\n"
+               "  uv run python main.py --validate --vllm --compare",
     )
 
     # ── Mode flags ──
@@ -277,7 +270,11 @@ def main():
     parser.add_argument("--sim", action="store_true", dest="sim",
                         help="Run a single simulation with time-series output")
     parser.add_argument("--validate", action="store_true", dest="validate",
-                        help="Visualize sim output (optionally vs LLMServingSim)")
+                        help="Validate sim: visualize, send to vLLM, or compare")
+    parser.add_argument("--vllm", action="store_true", dest="vllm",
+                        help="Send trace requests to vLLM (requires --validate)")
+    parser.add_argument("--compare", action="store_true", dest="compare",
+                        help="Compare sim output vs vLLM output (requires --validate)")
 
     # ── Shared options ──
     parser.add_argument("--config", default=None, dest="config",
@@ -291,6 +288,11 @@ def main():
     args = parser.parse_args()
 
     # Count how many mode flags are set
+    if (args.vllm or args.compare) and not args.validate:
+        parser.print_help()
+        print("\nError: --vllm and --compare require --validate", file=sys.stderr)
+        sys.exit(1)
+
     mode_flags = [args.bench, args.fit is not None, args.search, args.sim, args.validate]
     if sum(mode_flags) != 1:
         parser.print_help()
