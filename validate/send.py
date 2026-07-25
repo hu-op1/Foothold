@@ -36,7 +36,7 @@ def run_send(config: dict) -> None:
     max_requests = vllm_cfg.get("max_requests")
     output_dir = vllm_cfg.get("output_dir", "vllm/output")
     tick_seconds = vllm_cfg.get("tick_seconds", 0.5)
-    tokenizer_id = vllm_cfg.get("tokenizer", model)
+    tokenizer_id = vllm_cfg.get("tokenizer") or model
 
     if not model:
         print("vllm.model is required in config")
@@ -74,6 +74,8 @@ def run_send(config: dict) -> None:
 
 
 async def _send_all(requests, client, model, tokenizer, max_concurrency, trace_format):
+    # Limits concurrent in-flight API calls. Requests still respect trace timestamps
+    # for arrival time; the semaphore only gates how many run at once in vLLM.
     semaphore = asyncio.Semaphore(max_concurrency)
     records: list[dict] = []
 

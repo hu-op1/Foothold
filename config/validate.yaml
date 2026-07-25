@@ -2,7 +2,7 @@
 # Used by: uv run python main.py --validate [--vllm] [--compare]
 
 # ── Sim output (required) ──
-sim_dir: sim\output\qwen3-4b-tp4-conversation
+sim_dir: sim\output\llama-2-7b-tp2-sharegpt
 
 # ── Comparison data (optional, used by --compare) ──
 # If null, that source is excluded from comparison.
@@ -16,14 +16,26 @@ prefix: "tp4"                                          # Output filename prefix
 
 # ── vLLM send (--validate --vllm) ──
 vllm:
-  endpoint: "http://localhost:8000/v1"                 # OpenAI-compatible API base URL
-  model: null                                          # Required: model name served by vLLM
-  api_key: null                                        # Auto from OPENAI_API_KEY env if null
-  timeout: 600                                         # Per-request timeout seconds
-  max_concurrency: 32                                  # Max concurrent in-flight requests
-  trace_path: null                                     # Required: path to JSONL trace file
-  trace_format: sharegpt                               # "sharegpt" or "agentic"
-  max_requests: null                                   # Cap on trace requests
-  tokenizer: null                                      # Tokenizer HF ID (defaults to model)
-  output_dir: vllm\output                              # Output directory for vLLM results
-  tick_seconds: 0.5                                    # Timeseries bucket size
+  # OpenAI-compatible API base URL
+  endpoint: "http://localhost:8000/v1"
+  # Required: model name served by vLLM
+  model: meta-llama/Llama-2-7b-chat-hf
+  # Auto from OPENAI_API_KEY env if null
+  api_key: dummy
+  # Per-request timeout seconds
+  timeout: 600
+  # Max concurrent in-flight API calls
+  # Trace timestamps control when, this controls how many at once.
+  max_concurrency: 128
+  # Required: path to JSONL trace file
+  trace_path: traces/myllama-2-7b-heavy.jsonl
+  # "sharegpt" or "agentic"
+  trace_format: sharegpt
+  # Cap on trace requests (null = all)
+  max_requests: null
+  # Tokenizer HF ID (defaults to model if null)
+  tokenizer: null
+  # Output directory for vLLM results
+  output_dir: sim/output/llama-2-7b-tp2-sharegpt
+  # Timeseries bucket size (seconds)
+  tick_seconds: 0.5
