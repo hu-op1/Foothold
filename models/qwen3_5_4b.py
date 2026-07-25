@@ -80,7 +80,7 @@ def build_graph(spec):
                         tags=frozenset({"projection"}),
                         M=ctx.total_tokens, K=_h, N=_h,
                         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-                        p=ctx.matmul_p, overhead=ctx.matmul_overhead,
+                        p=ctx.matmul_p,
                     ))
                     b_effs = ctx.b_effs
                     overheads = ctx.overheads
