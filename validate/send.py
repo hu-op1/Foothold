@@ -378,6 +378,8 @@ def run_send_embedded(config: dict) -> None:
     engine_args = AsyncEngineArgs(
         model=model,
         tensor_parallel_size=tp,
+        pipeline_parallel_size=engine_cfg.get("pipeline_parallel_size", 1),
+        data_parallel_size=engine_cfg.get("data_parallel_size", 1),
         max_num_seqs=engine_cfg.get("max_num_seqs", 128),
         max_num_batched_tokens=engine_cfg.get("max_num_batched_tokens", 2048),
         max_model_len=engine_cfg.get("max_model_len"),
@@ -385,6 +387,9 @@ def run_send_embedded(config: dict) -> None:
         kv_cache_dtype=engine_cfg.get("kv_cache_dtype", "auto"),
         seed=engine_cfg.get("seed", 42),
         enable_prefix_caching=engine_cfg.get("enable_prefix_caching", True),
+        load_format=engine_cfg.get("load_format", "auto"),
+        enforce_eager=engine_cfg.get("enforce_eager", False),
+        gpu_memory_utilization=engine_cfg.get("gpu_memory_utilization", 0.9),
     )
 
     BenchStatLogger.reset()

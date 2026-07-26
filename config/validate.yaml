@@ -2,7 +2,7 @@
 # Used by: uv run python main.py --validate [--vllm] [--compare]
 
 # ── Sim output (required) ──
-sim_dir: sim\output\llama-2-7b-tp2-sharegpt
+sim_dir: sim/output/llama-2-7b-tp2-sharegpt
 
 # ── Comparison data (optional, used by --compare) ──
 # If null, that source is excluded from comparison.
@@ -20,7 +20,7 @@ vllm:
   # with custom StatLoggerBase for per-iteration stats (accurate
   # throughput, no /metrics polling).  Requires dedicated GPUs —
   # cannot coexist with a running vLLM server.
-  embedded: false
+  embedded: true
   # OpenAI-compatible API base URL (ignored when embedded: true)
   endpoint: "http://localhost:8000/v1"
   # Required: model name served by vLLM
@@ -31,7 +31,7 @@ vllm:
   timeout: 600
   # Max concurrent in-flight API calls
   # Trace timestamps control when, this controls how many at once.
-  max_concurrency: 128
+  max_concurrency: 256
   # Required: path to JSONL trace file
   trace_path: traces/myllama-2-7b-heavy.jsonl
   # "sharegpt" or "agentic"
@@ -47,11 +47,16 @@ vllm:
 
   # ── Embedded engine args (only used when embedded: true) ──
   engine_args:
-    tensor_parallel_size: 1
-    max_num_seqs: 128
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 1
+    data_parallel_size: 1
+    max_num_seqs: 256
     max_num_batched_tokens: 2048
     max_model_len: null         # null = model default
-    dtype: bfloat16
+    dtype: float16
     kv_cache_dtype: auto
     seed: 42
     enable_prefix_caching: true
+    load_format: dummy
+    enforce_eager: false
+    gpu_memory_utilization: 0.89
