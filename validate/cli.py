@@ -20,7 +20,7 @@ from validate.plot import (
     plot_latency_cdfs,
     write_summary,
 )
-from validate.send import run_send
+from validate.send import run_send, run_send_embedded
 from validate.compare import run_compare
 
 
@@ -65,12 +65,21 @@ def _run_visualize(config: dict) -> None:
 
 
 def dispatch(config: dict, *, vllm: bool = False, compare: bool = False) -> None:
+    vllm_cfg = config.get("vllm", {})
+    embedded = vllm_cfg.get("embedded", False)
+
     if vllm and compare:
-        run_send(config)
-        vllm_dir = config.get("vllm", {}).get("output_dir", "")
+        if embedded:
+            run_send_embedded(config)
+        else:
+            run_send(config)
+        vllm_dir = vllm_cfg.get("output_dir", "")
         run_compare(config, vllm_dir_override=vllm_dir)
     elif vllm:
-        run_send(config)
+        if embedded:
+            run_send_embedded(config)
+        else:
+            run_send(config)
     elif compare:
         run_compare(config)
     else:

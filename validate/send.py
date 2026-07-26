@@ -308,15 +308,15 @@ def _write_requests(out, records):
             }) + "\n")
 
 def _write_timeseries(out, samples, tick_seconds):
-    if len(samples) < 2:
-        return
-
     header = ["t", "prompt_throughput", "gen_throughput",
               "running", "waiting", "kv_cache_pct"]
 
     with (out / "timeseries.csv").open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
+
+        if len(samples) < 2:
+            return
 
         prev = samples[0]
         w.writerow([
@@ -339,3 +339,201 @@ def _write_timeseries(out, samples, tick_seconds):
                 round(s.kv_cache_pct, 3),
             ])
             prev = s
+
+
+# ── Embedded mode (in-process vLLM, no HTTP) ───────────────────────────
+
+
+def run_send_embedded(config: dict) -> None:
+    """Run benchmark by embedding vLLM's AsyncLLM directly in-process.
+
+    Uses ``BenchStatLogger`` (a ``StatLoggerBase`` subclass) to capture
+    per-iteration scheduler stats.  vLLM calls ``record()`` on every
+    scheduling step with exact per-iteration token counts — no cumulative
+    counter desync, no polling gaps.
+    """
+    from vllm import AsyncEngineArgs
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    from validate.stat_logger import BenchStatLogger
+
+    vllm_cfg = config.get("vllm", {})
+    engine_cfg = vllm_cfg.get("engine_args", {})
+
+    model = vllm_cfg["model"]
+    trace_path = vllm_cfg["trace_path"]
+    trace_format = vllm_cfg.get("trace_format", "sharegpt")
+    max_requests = vllm_cfg.get("max_requests")
+    output_dir = Path(vllm_cfg["output_dir"])
+    tick_seconds = vllm_cfg.get("tick_seconds", 0.5)
+
+    requests = load_trace(trace_path, max_requests=max_requests, format=trace_format)
+    print(f"Loaded {len(requests)} requests from {trace_path} (format={trace_format})")
+
+    tp = engine_cfg.get("tensor_parallel_size", 1)
+    print(f"Model: {model}  TP={tp}")
+
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+
+    engine_args = AsyncEngineArgs(
+        model=model,
+        tensor_parallel_size=tp,
+        max_num_seqs=engine_cfg.get("max_num_seqs", 128),
+        max_num_batched_tokens=engine_cfg.get("max_num_batched_tokens", 2048),
+        max_model_len=engine_cfg.get("max_model_len"),
+        dtype=engine_cfg.get("dtype", "bfloat16"),
+        kv_cache_dtype=engine_cfg.get("kv_cache_dtype", "auto"),
+        seed=engine_cfg.get("seed", 42),
+        enable_prefix_caching=engine_cfg.get("enable_prefix_caching", True),
+    )
+
+    BenchStatLogger.reset()
+    print("Booting AsyncLLM (embedded mode)...")
+    engine = AsyncLLM.from_engine_args(
+        engine_args, stat_loggers=[BenchStatLogger],
+    )
+
+    records = asyncio.run(_send_all_embedded(
+        engine, requests, trace_format,
+        max_model_len=engine_args.max_model_len,
+    ))
+
+    finished_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_meta(output_dir, model, trace_path, started_at, finished_at, len(records))
+    _write_requests_embedded(output_dir, records)
+    header, rows = BenchStatLogger.downsample_to_csv_rows(tick_seconds)
+    _write_timeseries_embedded(output_dir, header, rows)
+
+    print("Shutting down...")
+    engine.shutdown()
+    print(f"Done -> {output_dir}")
+
+
+async def _send_all_embedded(engine, requests, trace_format, *, max_model_len=None):
+    """Schedule requests by arrival time, collect per-request metrics."""
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    records: list[dict] = []
+
+    if trace_format == "agentic":
+        roots = [r for r in requests if r.sub_request_index == 0]
+    else:
+        roots = list(requests)
+
+    roots.sort(key=lambda r: r.arrival_time)
+
+    loop = asyncio.get_event_loop()
+    t0 = loop.time()
+
+    session_data: dict[object, tuple[list, list[asyncio.Event]]] = {}
+    if trace_format == "agentic":
+        sessions: dict[object, list] = {}
+        for r in requests:
+            sid = getattr(r, "session_id", None) or getattr(r, "request_id", None)
+            sessions.setdefault(sid, []).append(r)
+        for sid, reqs_in_session in sessions.items():
+            reqs_in_session.sort(key=lambda r: r.sub_request_index)
+            session_data[sid] = (
+                reqs_in_session,
+                [asyncio.Event() for _ in reqs_in_session],
+            )
+
+    total = len(roots)
+    counter = [0]
+
+    async def _one(req):
+        i = counter[0]; counter[0] += 1
+
+        if trace_format == "agentic":
+            sid = getattr(req, "session_id", None) or getattr(req, "request_id", None)
+            sub_idx = getattr(req, "sub_request_index", 0)
+            if sub_idx > 0:
+                _, events = session_data[sid]
+                await events[sub_idx - 1].wait()
+                if getattr(req, "tool_duration", 0) > 0:
+                    await asyncio.sleep(req.tool_duration)
+        else:
+            delay = (t0 + req.arrival_time) - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+        n_out = req.max_output_len
+        tok_ids = list(req.prompt_token_ids)
+        if max_model_len and len(tok_ids) + n_out > max_model_len:
+            keep = max(1, max_model_len - n_out)
+            tok_ids = tok_ids[-keep:]
+
+        sp = SamplingParams(
+            min_tokens=n_out,
+            max_tokens=n_out,
+            ignore_eos=True,
+            temperature=0.0,
+        )
+        prompt = TokensPrompt(prompt_token_ids=tok_ids)
+        request_id = f"bench-{i}"
+
+        last_metrics = None
+        async for output in engine.generate(prompt, sp, request_id):
+            if output.metrics is not None:
+                last_metrics = output.metrics
+
+        if trace_format == "agentic":
+            _, events = session_data[sid]
+            if sub_idx < len(events):
+                events[sub_idx].set()
+
+        if last_metrics is not None:
+            records.append({
+                "request_id": f"bench-{i}",
+                "input_toks": len(req.prompt_token_ids),
+                "output_toks": n_out,
+                "arrival_time": getattr(last_metrics, "arrival_time", None),
+                "queued_ts": getattr(last_metrics, "queued_ts", None),
+                "scheduled_ts": getattr(last_metrics, "scheduled_ts", None),
+                "first_token_ts": getattr(last_metrics, "first_token_ts", None),
+                "last_token_ts": getattr(last_metrics, "last_token_ts", None),
+            })
+        else:
+            records.append({
+                "request_id": f"bench-{i}",
+                "input_toks": len(req.prompt_token_ids),
+                "output_toks": n_out,
+                "arrival_time": None,
+                "queued_ts": None,
+                "scheduled_ts": None,
+                "first_token_ts": None,
+                "last_token_ts": None,
+            })
+
+        if i % 100 == 0:
+            print(f"  {i}/{total} requests done")
+
+    tasks = [asyncio.create_task(_one(r)) for r in roots]
+    await asyncio.gather(*tasks)
+    return records
+
+
+def _write_requests_embedded(out, records):
+    """Write requests.jsonl with absolute timestamps from vLLM metrics."""
+    with (out / "requests.jsonl").open("w") as f:
+        for r in records:
+            f.write(json.dumps({
+                "request_id": r["request_id"],
+                "input_toks": r.get("input_toks", 0),
+                "output_toks": r.get("output_toks", 0),
+                "arrival_time": r.get("arrival_time"),
+                "queued_ts": r.get("queued_ts"),
+                "scheduled_ts": r.get("scheduled_ts"),
+                "first_token_ts": r.get("first_token_ts"),
+                "last_token_ts": r.get("last_token_ts"),
+            }) + "\n")
+
+
+def _write_timeseries_embedded(out, header, rows):
+    with (out / "timeseries.csv").open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)

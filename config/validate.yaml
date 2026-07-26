@@ -16,7 +16,12 @@ prefix: "tp4"                                          # Output filename prefix
 
 # ── vLLM send (--validate --vllm) ──
 vllm:
-  # OpenAI-compatible API base URL
+  # Set to true for embedded mode: spawns vLLM AsyncLLM in-process
+  # with custom StatLoggerBase for per-iteration stats (accurate
+  # throughput, no /metrics polling).  Requires dedicated GPUs —
+  # cannot coexist with a running vLLM server.
+  embedded: false
+  # OpenAI-compatible API base URL (ignored when embedded: true)
   endpoint: "http://localhost:8000/v1"
   # Required: model name served by vLLM
   model: meta-llama/Llama-2-7b-chat-hf
@@ -39,3 +44,14 @@ vllm:
   output_dir: sim/output/llama-2-7b-tp2-sharegpt
   # Timeseries bucket size (seconds)
   tick_seconds: 0.5
+
+  # ── Embedded engine args (only used when embedded: true) ──
+  engine_args:
+    tensor_parallel_size: 1
+    max_num_seqs: 128
+    max_num_batched_tokens: 2048
+    max_model_len: null         # null = model default
+    dtype: bfloat16
+    kv_cache_dtype: auto
+    seed: 42
+    enable_prefix_caching: true

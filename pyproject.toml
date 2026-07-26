@@ -23,6 +23,12 @@ dependencies = [
 linux = [
     "flash-attn>=2.7.0",
 ]
+# Embedded vLLM benchmark (validate/send.py embedded mode).
+# Linux-only — no vLLM pre-built wheels for Windows.
+# Install with: uv sync --extra vllm
+vllm = [
+    "vllm>=0.19.0",
+]
 dev = [
     "pytest>=8.0",
     "vulture>=2.11",
