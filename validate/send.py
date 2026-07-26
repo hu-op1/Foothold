@@ -32,7 +32,6 @@ from transformers import AutoTokenizer
 
 from sim.trace import load_trace
 
-
 @dataclass
 class _MetricsSample:
     t: float
@@ -42,7 +41,6 @@ class _MetricsSample:
     gen_tokens_cumulative: float
     kv_cache_pct: float
 
-
 _METRIC_RE = re.compile(
     r"^vllm:(num_requests_running|num_requests_waiting|prompt_tokens_total|"
     r"generation_tokens_total|kv_cache_usage_perc)"
@@ -50,18 +48,39 @@ _METRIC_RE = re.compile(
     re.MULTILINE,
 )
 
+# Metrics that should be summed across engines (counters and gauge counts).
+_SUM_METRICS = frozenset({
+    "num_requests_running",
+    "num_requests_waiting",
+    "prompt_tokens_total",
+    "generation_tokens_total",
+})
+
+# Metrics that should take the maximum across engines.
+_MAX_METRICS = frozenset({"kv_cache_usage_perc"})
 
 def _parse_metrics(text: str) -> dict[str, float]:
-    result: dict[str, float] = {}
-    for m in _METRIC_RE.finditer(text):
-        result[m.group(1)] = float(m.group(2))
-    return result
+    """Parse vLLM /metrics output, aggregating across engines.
 
+    vLLM v1 exposes per-engine entries differentiated by the ``engine`` label,
+    e.g. two engines produce two lines for the same metric name.  Counters
+    and running/waiting-gauge counts are summed; KV cache usage takes the max.
+    """
+    accum: dict[str, float] = {}
+    for m in _METRIC_RE.finditer(text):
+        name = m.group(1)
+        value = float(m.group(2))
+        if name in _SUM_METRICS:
+            accum[name] = accum.get(name, 0.0) + value
+        elif name in _MAX_METRICS:
+            accum[name] = max(accum.get(name, 0.0), value)
+        else:
+            accum[name] = value  # last-write (shouldn't happen for known keys)
+    return accum
 
 def _metrics_base_url(endpoint: str) -> str:
     p = urlparse(endpoint)
     return f"{p.scheme}://{p.netloc}"
-
 
 async def _poll_metrics(
     metrics_url: str,
@@ -70,11 +89,13 @@ async def _poll_metrics(
     stop: asyncio.Event,
 ) -> None:
     t0 = time.perf_counter()
+    consecutive_errors = 0
     async with httpx.AsyncClient(timeout=5.0) as client:
         while not stop.is_set():
             t = round(time.perf_counter() - t0, 3)
             try:
                 resp = await client.get(metrics_url)
+                resp.raise_for_status()
                 m = _parse_metrics(resp.text)
                 samples.append(_MetricsSample(
                     t=t,
@@ -84,10 +105,16 @@ async def _poll_metrics(
                     gen_tokens_cumulative=m.get("generation_tokens_total", 0.0),
                     kv_cache_pct=m.get("kv_cache_usage_perc", 0.0),
                 ))
-            except Exception:
-                pass
+                if consecutive_errors:
+                    print(f"[metrics] recovered after {consecutive_errors} failures at t={t:.1f}s")
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                if consecutive_errors == 1:
+                    print(f"[metrics] WARNING: poll failed ({e}), metrics data will be incomplete")
+                elif consecutive_errors % 20 == 0:
+                    print(f"[metrics] still failing after {consecutive_errors} attempts ({e})")
             await asyncio.sleep(tick_seconds)
-
 
 def run_send(config: dict) -> None:
     vllm_cfg = config.get("vllm", {})
@@ -140,7 +167,6 @@ def run_send(config: dict) -> None:
     _write_timeseries(output_dir, metric_samples, tick_seconds)
 
     print(f"Done → {output_dir}")
-
 
 async def _send_all(
     requests,
@@ -207,10 +233,9 @@ async def _send_all(
 
     return records, metric_samples
 
-
 async def _send_one(req, client, model, messages, semaphore):
-    t_start = time.perf_counter()
     async with semaphore:
+        t_start = time.perf_counter()
         first_ts = None
         n_out = req.max_output_len
 
@@ -252,7 +277,6 @@ async def _send_one(req, client, model, messages, semaphore):
                 "output_tokens": 0,
             }
 
-
 def _write_meta(out, model, trace_path, started_at, finished_at, num_requests):
     payload = {
         "schema_version": 1,
@@ -264,7 +288,6 @@ def _write_meta(out, model, trace_path, started_at, finished_at, num_requests):
         "num_requests": num_requests,
     }
     (out / "meta.json").write_text(json.dumps(payload, indent=2))
-
 
 def _write_requests(out, records):
     with (out / "requests.jsonl").open("w") as f:
@@ -283,7 +306,6 @@ def _write_requests(out, records):
                 "first_token_ts": arr + ttft if ttft is not None else None,
                 "last_token_ts": arr + latency,
             }) + "\n")
-
 
 def _write_timeseries(out, samples, tick_seconds):
     if len(samples) < 2:
