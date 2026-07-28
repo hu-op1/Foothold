@@ -13,6 +13,7 @@ from sim.communication import (
     transfer_blocks,
 )
 from sim.pipeline import ScheduleExecutePipeline, estimate_schedule_time
+from sim.config import model_weight_gb, activation_memory_gb, total_vram_gb
 
 
 class EventType(Enum):
@@ -52,15 +53,12 @@ class SimulationEngine:
         self.num_attn_layers = model_spec.get("num_attn_layers", self.nl)
         self.block_size = config["simulation"]["block_size"]
 
-        # Bytes per KV cache block (all layers — used for KV transfer).
+        # Bytes per KV cache block (all layers, all heads — for KV transfer sizing).
         dt_b = dtype_bytes(self.dtype)
         self.bytes_per_block = (
             2 * self.num_attn_layers * self.nh_kv * self.hd
             * self.block_size * dt_b
         )
-        # Base num_blocks (pp=1).  Callers should scale by pp_size when
-        # creating pools because each GPU stores KV for only nl/pp layers.
-        self.num_blocks = self._compute_num_blocks()
 
         # Network / communication — all modelled via measured memcpy LUT.
         # The old BW+latency config values are retained for reference but
@@ -101,6 +99,69 @@ class SimulationEngine:
         kv_mem_gb = self.cfg["simulation"]["kv_cache_memory_gb"]
         return max(1, int(kv_mem_gb * 1024**3) // self.bytes_per_block)
 
+    def _compute_per_gpu_kv_cache_gb(self, tp: int, pp: int, stage: int | None = None) -> float:
+        """Compute per-GPU KV cache budget from GPU VRAM, model weights, and activation.
+
+        vLLM v0 profiles actual weight and activation memory per GPU, then
+        subtracts from usable VRAM.  This method replicates that logic:
+        usable_vram - weight_per_gpu - activation - cuda_overhead.
+
+        When *stage* is not None and pp > 1, activation accounts for the
+        correct number of inter-stage hidden-state buffers for that stage
+        (edge stages hold 1, middle stages hold 2 concurrently).
+        """
+        gpu_name = self.cfg.get("gpu", "3090")
+        mem_util = self.cfg.get("simulation", {}).get("gpu_memory_utilization", 0.85)
+        usable_vram = total_vram_gb(gpu_name) * mem_util
+        max_batch_tokens = self.cfg["simulation"].get("max_num_batched_tokens", 8192)
+
+        weight_gb = model_weight_gb(self.model, tp=tp, pp=pp)
+        act_gb = activation_memory_gb(self.model, max_batch_tokens, tp=tp, pp=pp, stage=stage)
+
+        kv_gb = usable_vram - weight_gb - act_gb
+
+        if self.enable_ep and self.model.get("is_moe"):
+            num_experts = self.model.get("num_experts", 0)
+            moe_inter = self.model.get("moe_intermediate_size", 0)
+            h = self.model["hidden_dim"]
+            decoder_sparse_step = self.model.get("decoder_sparse_step", 1)
+            moe_layers = self.model["num_layers"] // decoder_sparse_step
+            expert_params = moe_layers * num_experts * (3 * h * moe_inter)
+            ep_size = tp * self.dp_size
+            if ep_size > 1:
+                freed_params = expert_params * (ep_size - 1) / ep_size
+                extra_kv_gb = freed_params * 2 / 1e9
+                kv_gb += extra_kv_gb
+
+        return max(1.0, kv_gb)
+
+    def _compute_blocks_per_gpu(self, tp: int, pp: int) -> int:
+        """Compute per-GPU KV cache block count, accounting for TP/PP sharding.
+
+        bytes_per_block is adjusted for per-GPU head count (nh_kv/tp) and
+        layer count (nl/pp).  No global pool multiplier needed.
+
+        When pp > 1, the tightest (most activation-heavy) PP stage determines
+        the pool capacity since all GPUs in the group must fit the same blocks.
+        """
+        kv_gb = self._compute_per_gpu_kv_cache_gb(tp, pp)
+        dt_b = dtype_bytes(self.dtype)
+        bytes_per_block_gpu = (
+            2 * (self.num_attn_layers // pp) * (self.nh_kv // tp) * self.hd
+            * self.block_size * dt_b
+        )
+        blocks = max(1, int(kv_gb * 1024**3) // bytes_per_block_gpu)
+
+        # For PP > 1, middle stages have more activation → less KV cache.
+        # Use the minimum blocks across all stages as the pool capacity.
+        if pp > 2:
+            for stage in range(1, pp - 1):
+                kv_s = self._compute_per_gpu_kv_cache_gb(tp, pp, stage=stage)
+                blk_s = max(1, int(kv_s * 1024**3) // bytes_per_block_gpu)
+                blocks = min(blocks, blk_s)
+
+        return blocks
+
     def run(self, requests: list[Request], mode="colocated",
             pd_ratio=None, tp_size=1, d_tp_size=1, dp=1,
             pp_size=1, d_pp_size=1,
@@ -130,6 +191,12 @@ class SimulationEngine:
         self.enable_ep = enable_ep
         self.dp_size = dp
 
+        # Compute per-GPU KV cache block count from actual GPU specs.
+        # Blocks per GPU accounts for TP head sharding and PP layer
+        # partitioning — no extra pool multipliers needed downstream.
+        self._p_blocks_per_gpu = self._compute_blocks_per_gpu(tp=tp_size, pp=pp_size)
+        self._d_blocks_per_gpu = self._compute_blocks_per_gpu(tp=d_tp_size, pp=d_pp_size)
+
         # ── Validate GPU count ──
         total_gpus = self.cfg.get("strategy", {}).get("total_gpus", 1)
         expected = dp * tp_size * pp_size
@@ -138,24 +205,6 @@ class SimulationEngine:
                 f"total_gpus ({total_gpus}) != dp × tp × pp "
                 f"({dp} × {tp_size} × {pp_size} = {expected})"
             )
-
-        # ── EP-aware KV cache correction ──
-        # EP shards expert weights, freeing additional VRAM for KV cache.
-        if enable_ep and self.model.get("is_moe"):
-            total_params = self.model.get("total_params_b", 0)
-            if total_params > 0:
-                num_experts = self.model.get("num_experts", 0)
-                moe_inter = self.model.get("moe_intermediate_size", 0)
-                h = self.model["hidden_dim"]
-                decoder_sparse_step = self.model.get("decoder_sparse_step", 1)
-                moe_layers = self.model["num_layers"] // decoder_sparse_step
-                expert_params = moe_layers * num_experts * (3 * h * moe_inter)
-                ep_size = tp_size * dp
-                if ep_size > 1:
-                    freed_params = expert_params * (ep_size - 1) / ep_size
-                    extra_kv_gb = freed_params * 2 / 1e9
-                    extra_blocks = int(extra_kv_gb * 1024**3) // self.bytes_per_block
-                    self.num_blocks += max(0, extra_blocks)
 
         # Reset request state for fresh simulation run
         for r in requests:
@@ -208,11 +257,11 @@ class SimulationEngine:
         """
         from sim.metrics import MetricsCollector
 
-        # num_blocks is for a single GPU with pp=1.
-        # PP: nl/pp layers → pp× more blocks per GPU.
-        # TP: nh_kv/tp heads → tp× more blocks per GPU.
-        # Each DP rank pool = num_blocks × tp_size × pp_size.
-        blocks_per_pool = self.num_blocks * self.tp_size * pp
+        # Each DP rank is a TP×PP group; all GPUs in the group share
+        # the same blocks (different head/layer shards).  Pool capacity
+        # equals per-GPU block count — no extra scaling needed because
+        # _compute_blocks_per_gpu already accounts for TP/PP.
+        blocks_per_pool = self._p_blocks_per_gpu
         pools = [BlockPool(blocks_per_pool,
                            enable_caching=self.enable_cache) for _ in range(dp)]
         for p in pools:
@@ -390,9 +439,16 @@ class SimulationEngine:
         num_p, num_d = pd_ratio
 
         # P side: pooled GPUs with larger batch budget.
-        # Each P GPU gets num_blocks × pp (nl/pp layers → pp× more blocks).
-        # num_p GPUs total → pool sized for all of them.
-        pool_p = BlockPool(self.num_blocks * num_p * pp, enable_caching=self.enable_cache)
+        # Each P GPU has _p_blocks_per_gpu blocks; all GPUs in a TP×PP
+        # replica share the same blocks, so pool = replicas × per_gpu.
+        p_replica = self.tp_size * pp
+        if num_p % p_replica != 0:
+            raise ValueError(
+                f"num_p ({num_p}) must be divisible by tp×pp "
+                f"({self.tp_size}×{pp}={p_replica})")
+        p_dp = num_p // p_replica
+        pool_p = BlockPool(self._p_blocks_per_gpu * p_dp,
+                            enable_caching=self.enable_cache)
         pool_p.bytes_per_block = self.bytes_per_block
         p_cfg = _deep_copy_config(self.cfg)
         p_cfg["simulation"]["max_num_batched_tokens"] = (
@@ -401,8 +457,8 @@ class SimulationEngine:
         p_sched = ColocatedScheduler(pool_p, p_cfg)
 
         # D side: num_d GPUs grouped into (d_tp × d_pp) groups per replica.
-        # Each TP×PP group is one ColocatedScheduler with a pool of
-        # d_tp × num_blocks blocks. num_d_groups = DP degree on D side.
+        # Each replica is one ColocatedScheduler with a pool of
+        # _d_blocks_per_gpu blocks. num_d_groups = DP degree on D side.
         d_tp = getattr(self, "d_tp_size", 1)
         d_pp_size = d_pp
         per_replica_gpus = d_tp * d_pp_size
@@ -413,7 +469,7 @@ class SimulationEngine:
         num_d_groups = num_d // per_replica_gpus
 
         d_cfg = _deep_copy_config(self.cfg)
-        d_pools = [BlockPool(self.num_blocks * d_tp * d_pp_size,
+        d_pools = [BlockPool(self._d_blocks_per_gpu,
                              enable_caching=self.enable_cache,
                              comm_lut_bytes=list(self._comm_lut_bytes),
                              comm_lut_time_s=list(self._comm_lut_time_s))

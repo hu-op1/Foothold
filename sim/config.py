@@ -163,7 +163,7 @@ def kv_cache_per_token_bytes(model_spec):
     return 2 * nl * nh_kv * hd * 2  # 2 (K+V) × layers × heads × dim × 2 bytes
 
 
-def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1, pp=1):
+def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1, pp=1, stage=None):
     """Estimate peak activation memory during inference (GB).
 
     Peak HBM activation = the moment during a layer's FFN block when the
@@ -176,9 +176,14 @@ def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1, pp=1):
 
     Simultaneously alive: 2×h + 3×inter elements (fp16).
 
-    With PP > 2, middle pipeline stages (ranks 1..pp-2) hold an extra
-    inter-stage hidden state buffer for simultaneous send/receive:
-    + max_batch_tokens × h elements (fp16).
+    With PP > 1 (async pipeline), each stage holds inter-stage hidden state
+    buffers for the send/recv ring:
+
+        pp_stage 0 (first):   1× send buffer
+        pp_stage 1..pp-2:     2× (recv + send, simultaneous)
+        pp_stage pp-1 (last): 1× recv buffer
+
+    When *stage* is None, the worst-case middle-stage value is used.
 
     Plus a fixed ~0.5 GB for CUDA context / allocator overhead.
 
@@ -197,10 +202,16 @@ def activation_memory_gb(model_spec, max_batch_tokens=8192, tp=1, pp=1):
     per_token_elems = 2 * h + 3 * inter  # residual, norm, gate, up, silu_result
     peak_bytes = max_batch_tokens * per_token_elems * 2  # fp16
 
-    # Middle pipeline stages (pp > 2): extra inter-stage hidden state buffer
-    # for simultaneous async send to next stage + receive from previous.
-    if pp > 2:
-        peak_bytes += max_batch_tokens * h * 2  # fp16
+    # PP inter-stage hidden state buffers (async pipeline ring).
+    if pp > 1:
+        if stage is None:
+            # Worst case: middle stages hold both recv and send simultaneously.
+            num_buffers = 2 if pp > 2 else 1
+        elif stage == 0 or stage == pp - 1:
+            num_buffers = 1   # edge stage: send-only or recv-only
+        else:
+            num_buffers = 2   # middle stage: recv + send
+        peak_bytes += num_buffers * max_batch_tokens * h * 2  # fp16
 
     # CUDA context, allocator overhead, workspace buffers (~0.5 GB)
     cuda_overhead = 0.5 * 1024 ** 3
