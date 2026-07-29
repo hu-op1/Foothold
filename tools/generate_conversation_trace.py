@@ -47,7 +47,7 @@ def parse(example):
     return None
 
 
-def make_turns(msgs, tok):
+def make_turns(msgs, tok, max_model_len=0):
     """Turn messages into list of (input_ids, output_ids) with context."""
     msgs = [m for m in msgs if m[0] in ("user", "assistant")]
     if not msgs or msgs[0][0] != "user":
@@ -69,6 +69,11 @@ def make_turns(msgs, tok):
                 out_ids = tok.encode(msgs[i + 1][1])
                 if hasattr(out_ids, "tolist"):
                     out_ids = out_ids.tolist()
+
+                total = len(ids) + len(out_ids)
+                if max_model_len > 0 and total > max_model_len:
+                    break
+
                 out.append((list(ids), out_ids))
                 ctx.append({"role": "assistant", "content": msgs[i + 1][1]})
             i = j
@@ -86,6 +91,7 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--thinking-time", type=float, default=5, help="max thinking sec")
     p.add_argument("--max-kv-toks", type=int, default=40960, help="max input+output tokens")
+    p.add_argument("--max-model-len", type=int, default=0, help="max total seq len per turn; truncate conversation when exceeded")
     p.add_argument("--output", default="")
     p.add_argument("--split", default="train")
     p.add_argument("--no-stream", action="store_true")
@@ -109,7 +115,7 @@ def main():
         msgs = parse(ex)
         if not msgs:
             continue
-        trs = make_turns(msgs, tok)
+        trs = make_turns(msgs, tok, max_model_len=args.max_model_len)
         if not trs:
             continue
         if args.max_kv_toks:
