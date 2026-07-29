@@ -2,7 +2,7 @@
 # Used by: uv run python main.py --validate [--vllm] [--compare]
 
 # ── Sim output (required) ──
-sim_dir: sim/output/llama-2-7b-tp2-sharegpt
+sim_dir: sim/output/try
 
 # ── Comparison data (optional, used by --compare) ──
 # If null, that source is excluded from comparison.
@@ -30,7 +30,7 @@ vllm:
   # OpenAI-compatible API base URL (ignored when embedded: true)
   endpoint: "http://localhost:8000/v1"
   # Required: model name served by vLLM
-  model: meta-llama/Llama-2-7b-chat-hf
+  model: Qwen/Qwen3-4B
   # Auto from OPENAI_API_KEY env if null
   api_key: dummy
   # Per-request timeout seconds
@@ -39,15 +39,15 @@ vllm:
   # Trace timestamps control when, this controls how many at once.
   max_concurrency: 256
   # Required: path to JSONL trace file
-  trace_path: traces/myllama-2-7b-heavy.jsonl
+  trace_path: traces/qwen3-4b-agentic.jsonl
   # "sharegpt" or "agentic"
-  trace_format: sharegpt
+  trace_format: agentic
   # Cap on trace requests (null = all)
   max_requests: null
   # Tokenizer HF ID (defaults to model if null)
   tokenizer: null
   # Output directory for vLLM results
-  output_dir: sim/output/llama-2-7b-tp2-sharegpt
+  output_dir: sim/output/try
   # Timeseries bucket size (seconds)
   tick_seconds: 0.5
 

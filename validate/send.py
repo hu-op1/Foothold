@@ -527,8 +527,7 @@ async def _send_all_embedded(engine, requests, trace_format, *, max_model_len=No
                 "last_token_ts": None,
             })
 
-        if i % 100 == 0:
-            print(f"  {i}/{total} requests done")
+        print(f"  {i + 1}/{total} requests done")
 
     tasks = [asyncio.create_task(_one(r)) for r in roots]
     await asyncio.gather(*tasks)
