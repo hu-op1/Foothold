@@ -13,7 +13,7 @@ def build_qkv_proj(ctx, h, nh, nh_kv, hd, hw) -> list[OpSpec]:
     dim_kv = nh_kv * hd
     return [OpSpec(
         name="qkv_proj", category="matmul",
-        tags=frozenset({"projection"}),
+        tags=frozenset({"projection", "col_parallel"}),
         M=ctx.total_tokens, K=h, N=dim_q + 2 * dim_kv,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
         p=ctx.matmul_p,
@@ -24,7 +24,7 @@ def build_o_proj(ctx, h, nh, hd, hw) -> list[OpSpec]:
     dim_q = nh * hd
     return [OpSpec(
         name="o_proj", category="matmul",
-        tags=frozenset({"projection"}),
+        tags=frozenset({"projection", "row_parallel"}),
         M=ctx.total_tokens, K=dim_q, N=h,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
         p=ctx.matmul_p,
@@ -73,7 +73,7 @@ def build_qk_proj(ctx, h, nh, nh_kv, hd, hw) -> list[OpSpec]:
     dim_qk = nh * hd
     return [OpSpec(
         name="qk_proj", category="matmul",
-        tags=frozenset({"projection"}),
+        tags=frozenset({"projection", "col_parallel"}),
         M=ctx.total_tokens, K=h, N=2 * dim_qk,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
         p=ctx.matmul_p,
@@ -84,7 +84,7 @@ def build_v_proj(ctx, h, nh_v, hd, hw) -> list[OpSpec]:
     dim_v = nh_v * hd
     return [OpSpec(
         name="v_proj", category="matmul",
-        tags=frozenset({"projection"}),
+        tags=frozenset({"projection", "col_parallel"}),
         M=ctx.total_tokens, K=h, N=dim_v,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
         p=ctx.matmul_p,
@@ -95,7 +95,7 @@ def build_linear_scan(ctx, h, hw) -> list[OpSpec]:
     """Linear scan projection (matmul approximation)."""
     return [OpSpec(
         name="linear_scan", category="matmul",
-        tags=frozenset({"projection"}),
+        tags=frozenset({"projection", "col_parallel"}),
         M=ctx.total_tokens, K=h, N=h,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
         p=ctx.matmul_p,
@@ -107,7 +107,7 @@ def build_linear_out_proj(ctx, h, nh_v, hd, hw) -> list[OpSpec]:
     dim_v = nh_v * hd
     return [OpSpec(
         name="out_proj", category="matmul",
-        tags=frozenset({"projection"}),
+        tags=frozenset({"projection", "row_parallel"}),
         M=ctx.total_tokens, K=dim_v, N=h,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
         p=ctx.matmul_p,
@@ -117,7 +117,7 @@ def build_linear_out_proj(ctx, h, nh_v, hd, hw) -> list[OpSpec]:
 def build_gate_up_proj(ctx, h, inter, hw) -> list[OpSpec]:
     return [OpSpec(
         name="gate_up_proj", category="matmul",
-        tags=frozenset({"projection"}),
+        tags=frozenset({"projection", "col_parallel"}),
         M=ctx.total_tokens, K=h, N=2 * inter,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
         p=ctx.matmul_p,
@@ -127,7 +127,7 @@ def build_gate_up_proj(ctx, h, inter, hw) -> list[OpSpec]:
 def build_down_proj(ctx, h, inter, hw) -> list[OpSpec]:
     return [OpSpec(
         name="down_proj", category="matmul",
-        tags=frozenset({"projection"}),
+        tags=frozenset({"projection", "row_parallel"}),
         M=ctx.total_tokens, K=inter, N=h,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
         p=ctx.matmul_p,
@@ -198,7 +198,7 @@ def build_residual_add(ctx, h, hw) -> list[OpSpec]:
 def build_lm_head_matmul(ctx, h, vocab_size, hw) -> list[OpSpec]:
     return [OpSpec(
         name="lm_head", category="matmul",
-        tags=frozenset({"projection"}),
+        tags=frozenset({"projection", "col_parallel"}),
         M=ctx.total_tokens, K=h, N=vocab_size,
         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
         p=ctx.matmul_p,

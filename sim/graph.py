@@ -272,6 +272,8 @@ class ModelGraph:
         """Return new ModelGraph with each layer's builder wrapped by fn.
 
         fn: (ops: list[OpSpec], ctx: StepContext, hw: dict) -> list[OpSpec]
+
+        Also applies fn to head_builder when present.
         """
         new_specs = []
         for builder, count in self.layer_specs:
@@ -281,7 +283,17 @@ class ModelGraph:
                     return f(ops, ctx, hw)
                 return _inner
             new_specs.append((_wrapped(), count))
-        return ModelGraph(layer_specs=new_specs, head_builder=self.head_builder)
+
+        new_head = None
+        if self.head_builder is not None:
+            def _wrapped_head(h=self.head_builder, f=fn):
+                def _inner(ctx, hw):
+                    ops = h(ctx, hw)
+                    return f(ops, ctx, hw)
+                return _inner
+            new_head = _wrapped_head()
+
+        return ModelGraph(layer_specs=new_specs, head_builder=new_head)
 
 
 # ── Internal helpers (migrated from executor.py) ─────────────────────
@@ -394,11 +406,21 @@ def _select_fa_params(n_requests, regime, hw_params, nh_model=None, use_cudagrap
 # ── Graph Transforms ─────────────────────────────────────────────────
 
 def apply_tp(graph: ModelGraph, ctx: StepContext, tp: int) -> ModelGraph:
-    """Shard projection matmuls by tp, insert all_reduce communication.
+    """Shard ops by tensor-parallel degree, insert all_reduce where needed.
 
-    For each OpSpec with category=="matmul" and "projection" in tags:
-    - N <- N // tp
-    - Insert all_reduce after
+    ColumnParallelLinear (QKV, gate_up, etc. — tag "col_parallel"):
+        Each GPU holds a column-wise shard of weights.
+        Output is local — no all_reduce needed.
+        N dimension sharded by tp.
+
+    RowParallelLinear (O_proj, down_proj — tag "row_parallel"):
+        Each GPU computes a partial sum.
+        Needs all_reduce to combine results.
+        K dimension sharded by tp.
+
+    Attention / SwiGLU / RoPE:
+        With TP, each GPU handles a fraction of heads / intermediate size.
+        Compute scaled by 1/tp.
     """
     if tp <= 1:
         return graph
@@ -406,18 +428,42 @@ def apply_tp(graph: ModelGraph, ctx: StepContext, tp: int) -> ModelGraph:
     def _transform(ops, _ctx, _hw):
         result = []
         for op in ops:
-            if op.category == "matmul" and "projection" in op.tags:
+            if op.category == "matmul" and "col_parallel" in op.tags:
                 sharded = copy.copy(op)
                 sharded.N = max(sharded.N // tp, 1)
+                result.append(sharded)
+
+            elif op.category == "matmul" and "row_parallel" in op.tags:
+                sharded = copy.copy(op)
+                sharded.K = max(sharded.K // tp, 1)
                 result.append(sharded)
                 result.append(OpSpec(
                     name="all_reduce", category="comm",
                     tags=frozenset({"sync"}),
-                    comm_bytes=sharded.N * ctx.dt_bytes,
+                    comm_bytes=op.M * op.N * ctx.dt_bytes / tp,
                     comm_type="all_reduce",
                     comm_lut_bytes=ctx.comm_lut_bytes,
                     comm_lut_time_s=ctx.comm_lut_time_s,
                 ))
+
+            elif op.category == "attention":
+                scaled = copy.copy(op)
+                scaled.prefill_flops /= tp
+                scaled.prefill_bytes /= tp
+                scaled.decode_flops /= tp
+                scaled.decode_bytes /= tp
+                result.append(scaled)
+
+            elif op.category == "elementwise" and "activation" in op.tags:
+                scaled = copy.copy(op)
+                scaled.N_elems = max(scaled.N_elems // tp, 1)
+                result.append(scaled)
+
+            elif op.category == "elementwise" and "rope" in op.tags:
+                scaled = copy.copy(op)
+                scaled.N_elems = max(scaled.N_elems // tp, 1)
+                result.append(scaled)
+
             else:
                 result.append(op)
         return result

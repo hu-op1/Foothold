@@ -71,7 +71,7 @@ def build_graph(spec):
                     ops += build_o_proj(ctx, _h, _nh, _hd, hw)
                     ops.append(OpSpec(
                         name="attn_gate_proj", category="matmul",
-                        tags=frozenset({"projection"}),
+                        tags=frozenset({"projection", "col_parallel"}),
                         M=ctx.total_tokens, K=_h, N=_h,
                         F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
                         p=ctx.matmul_p,
