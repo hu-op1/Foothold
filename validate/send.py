@@ -433,37 +433,15 @@ async def _send_all_embedded(engine, requests, trace_format, *, max_model_len=No
     loop = asyncio.get_event_loop()
     t0 = loop.time()
 
-    session_data: dict[object, tuple[list, list[asyncio.Event]]] = {}
-    if trace_format == "agentic":
-        sessions: dict[object, list] = {}
-        for r in requests:
-            sid = getattr(r, "session_id", None) or getattr(r, "request_id", None)
-            sessions.setdefault(sid, []).append(r)
-        for sid, reqs_in_session in sessions.items():
-            reqs_in_session.sort(key=lambda r: r.sub_request_index)
-            session_data[sid] = (
-                reqs_in_session,
-                [asyncio.Event() for _ in reqs_in_session],
-            )
-
-    total = len(roots)
+    # For agentic traces total counts all sub_requests so progress
+    # (e.g. "5/39") is meaningful; sharegpt counts roots as before.
+    total = len(requests) if trace_format == "agentic" else len(roots)
     counter = [0]
 
-    async def _one(req):
-        i = counter[0]; counter[0] += 1
-
-        if trace_format == "agentic":
-            sid = getattr(req, "session_id", None) or getattr(req, "request_id", None)
-            sub_idx = getattr(req, "sub_request_index", 0)
-            if sub_idx > 0:
-                _, events = session_data[sid]
-                await events[sub_idx - 1].wait()
-                if getattr(req, "tool_duration", 0) > 0:
-                    await asyncio.sleep(req.tool_duration)
-        else:
-            delay = (t0 + req.arrival_time) - loop.time()
-            if delay > 0:
-                await asyncio.sleep(delay)
+    async def _send_one(req):
+        """Send a single request to the embedded engine; append to records."""
+        i = counter[0]
+        counter[0] += 1
 
         n_out = req.max_output_len
         tok_ids = list(req.prompt_token_ids)
@@ -485,18 +463,12 @@ async def _send_all_embedded(engine, requests, trace_format, *, max_model_len=No
             if output.metrics is not None:
                 last_metrics = output.metrics
 
-        if trace_format == "agentic":
-            _, events = session_data[sid]
-            if sub_idx < len(events):
-                events[sub_idx].set()
-
         if last_metrics is not None:
             # vLLM uses two different clocks:
             #   arrival_time  = time.time()       (Unix epoch)
             #   queued_ts, first_token_ts, ... = time.monotonic()
             # Normalize arrival_time into the monotonic domain so that
             # validate/plot.py compute_latencies() can subtract them.
-            vllm_arrival = getattr(last_metrics, "arrival_time", None)
             queued = getattr(last_metrics, "queued_ts", None)
             scheduled = getattr(last_metrics, "scheduled_ts", None)
             first = getattr(last_metrics, "first_token_ts", None)
@@ -528,6 +500,37 @@ async def _send_all_embedded(engine, requests, trace_format, *, max_model_len=No
             })
 
         print(f"  {i + 1}/{total} requests done")
+
+    async def _one(req):
+        if trace_format == "agentic":
+            # Walk the session chain: each sub_request follows the
+            # previous after tool_duration.  Arrival_time only applies
+            # to the root; chained sub_requests start immediately after
+            # the previous finishes + its tool_duration.
+            current = req
+            first_arrival = req.arrival_time
+
+            while current is not None:
+                if current is req:
+                    # Root: wait for arrival_time before dispatching
+                    delay = (t0 + first_arrival) - loop.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+
+                await _send_one(current)
+
+                if current.next_sub_request is not None:
+                    await asyncio.sleep(current.tool_duration)
+                    current = current.next_sub_request
+                else:
+                    break
+        else:
+            # ShareGPT: single request, respect arrival_time
+            delay = (t0 + req.arrival_time) - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            await _send_one(req)
 
     tasks = [asyncio.create_task(_one(r)) for r in roots]
     await asyncio.gather(*tasks)
