@@ -6,13 +6,19 @@ sim_dir: sim/output/llama-2-7b-tp2-sharegpt
 
 # ── Comparison data (optional, used by --compare) ──
 # If null, that source is excluded from comparison.
-sim_csv: null                                          # LLMServingSim sim.csv
-sim_log: null                                          # LLMServingSim sim.log
-vllm_dir: null                                         # vLLM send output dir
-compare_dir: null                                      # Comparison output dir (default: sim_dir)
+sim_csv: sim\output\llama-2-7b-tp2-sharegpt\llama-2-7b-tp2-sharegpt.csv                                          # LLMServingSim sim.csv
+sim_log: sim\output\llama-2-7b-tp2-sharegpt\llama-2-7b-tp2-sharegpt.log                                          # LLMServingSim sim.log
+vllm_dir: sim\output\llama-2-7b-tp2-sharegpt\vllm                                         # vLLM send output dir
+compare_dir: sim\output\llama-2-7b-tp2-sharegpt                                      # Comparison output dir (default: sim_dir)
 
-title: "qwen3-4b-tp4-conversation"                     # Plot title suffix
-prefix: "tp4"                                          # Output filename prefix
+# ── Plot colors (hex) ──
+colors:
+  foothold: "#00BCD4"          # C0 blue
+  llmservingsim: "#7B1FA2"     # purple
+  vllm: "#FF8F00"              # C2 green
+
+title: "llama-2-7b-tp2-sharegpt"                     # Plot title suffix
+prefix: "tp2"                                          # Output filename prefix
 
 # ── vLLM send (--validate --vllm) ──
 vllm:

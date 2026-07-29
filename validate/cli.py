@@ -40,7 +40,9 @@ def _run_visualize(config: dict) -> None:
     sim_ttft, sim_tpot, sim_lat = compute_latencies(sim_reqs)
     print(f"  {len(sim_reqs)} requests, {len(sim_ts)} timeseries rows")
 
-    style = {"label": "foothold-sim", "color": "C0", "linestyle": "-"}
+    colors = config.get("colors", {}) or {}
+    foothold_color = colors.get("foothold", "#1f77b4")
+    style = {"label": "foothold-sim", "color": foothold_color, "linestyle": "-"}
 
     if sim_ts:
         ds_ts = {
@@ -57,7 +59,7 @@ def _run_visualize(config: dict) -> None:
         plot_requests(sim_dir, prefix, [ds_rq], title)
 
     ds_lat = {"ttft": sim_ttft, "tpot": sim_tpot, "lat": sim_lat, "label": "foothold-sim",
-              "color": "C0", "linestyle": "-"}
+              "color": foothold_color, "linestyle": "-"}
     plot_latency_cdfs(sim_dir, prefix, [ds_lat], title)
     write_summary(sim_dir, prefix, [ds_lat])
 

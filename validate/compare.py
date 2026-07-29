@@ -5,7 +5,7 @@ Conditionally includes each data source based on config:
   - LLMServingSim: if ``sim_csv`` and ``sim_log`` are both set
   - vLLM: if ``vllm_dir`` is set
 
-Colors: blue (foothold), purple (LLMServingSim), green (vLLM).
+Colors are read from ``config.validate.yaml`` → ``colors`` section (hex strings).
 """
 
 from __future__ import annotations
@@ -24,6 +24,9 @@ from validate.plot import (
     plot_latency_cdfs,
     write_summary,
 )
+
+
+_LINESTYLES = {"foothold": "-", "llmservingsim": "--", "vllm": ":"}
 
 
 def _build_ts_dataset(ts_rows: list[dict], label: str, color: str, linestyle: str) -> dict | None:
@@ -52,6 +55,15 @@ def _build_latency_dataset(ttft, tpot, lat, label: str, color: str, linestyle: s
     }
 
 
+def _get_colors(config: dict) -> dict:
+    c = config.get("colors", {}) or {}
+    return {
+        "foothold": c.get("foothold", "#1f77b4"),
+        "llmservingsim": c.get("llmservingsim", "#800080"),
+        "vllm": c.get("vllm", "#2ca02c"),
+    }
+
+
 def run_compare(config: dict, *, vllm_dir_override: str | None = None) -> None:
     sim_dir = Path(config.get("sim_dir") or "")
     sim_csv = config.get("sim_csv")
@@ -69,6 +81,8 @@ def run_compare(config: dict, *, vllm_dir_override: str | None = None) -> None:
 
     compare_dir.mkdir(parents=True, exist_ok=True)
 
+    colors = _get_colors(config)
+
     throughput_datasets = []
     requests_datasets = []
     latency_datasets = []
@@ -80,11 +94,11 @@ def run_compare(config: dict, *, vllm_dir_override: str | None = None) -> None:
     sim_ttft, sim_tpot, sim_lat = compute_latencies(sim_reqs)
     print(f"  {len(sim_reqs)} requests, {len(sim_ts)} timeseries rows")
 
-    ts_ds = _build_ts_dataset(sim_ts, "foothold-sim", "C0", "-")
+    ts_ds = _build_ts_dataset(sim_ts, "foothold-sim", colors["foothold"], _LINESTYLES["foothold"])
     if ts_ds:
         throughput_datasets.append(ts_ds)
         requests_datasets.append(ts_ds)
-    latency_datasets.append(_build_latency_dataset(sim_ttft, sim_tpot, sim_lat, "foothold-sim", "C0", "-"))
+    latency_datasets.append(_build_latency_dataset(sim_ttft, sim_tpot, sim_lat, "foothold-sim", colors["foothold"], _LINESTYLES["foothold"]))
 
     # ── LLMServingSim (optional) ───────────────────────────────────────
     if sim_csv and sim_log:
@@ -97,11 +111,11 @@ def run_compare(config: dict, *, vllm_dir_override: str | None = None) -> None:
             lssim_ttft, lssim_tpot, lssim_lat = sim_latencies(lssim_reqs)
             print(f"  {len(lssim_reqs)} requests, {len(lssim_ts)} timeseries rows")
 
-            ts_ds = _build_ts_dataset(lssim_ts, "LLMServingSim", "purple", "--")
+            ts_ds = _build_ts_dataset(lssim_ts, "LLMServingSim", colors["llmservingsim"], _LINESTYLES["llmservingsim"])
             if ts_ds:
                 throughput_datasets.append(ts_ds)
                 requests_datasets.append(ts_ds)
-            latency_datasets.append(_build_latency_dataset(lssim_ttft, lssim_tpot, lssim_lat, "LLMServingSim", "purple", "--"))
+            latency_datasets.append(_build_latency_dataset(lssim_ttft, lssim_tpot, lssim_lat, "LLMServingSim", colors["llmservingsim"], _LINESTYLES["llmservingsim"]))
 
     # ── vLLM (optional) ────────────────────────────────────────────────
     if vllm_dir and vllm_dir.is_dir():
@@ -111,11 +125,11 @@ def run_compare(config: dict, *, vllm_dir_override: str | None = None) -> None:
         vllm_ttft, vllm_tpot, vllm_lat = compute_latencies(vllm_reqs)
         print(f"  {len(vllm_reqs)} requests, {len(vllm_ts)} timeseries rows")
 
-        ts_ds = _build_ts_dataset(vllm_ts, "vLLM", "C2", ":")
+        ts_ds = _build_ts_dataset(vllm_ts, "vLLM", colors["vllm"], _LINESTYLES["vllm"])
         if ts_ds:
             throughput_datasets.append(ts_ds)
             requests_datasets.append(ts_ds)
-        latency_datasets.append(_build_latency_dataset(vllm_ttft, vllm_tpot, vllm_lat, "vLLM", "C2", ":"))
+        latency_datasets.append(_build_latency_dataset(vllm_ttft, vllm_tpot, vllm_lat, "vLLM", colors["vllm"], _LINESTYLES["vllm"]))
 
     # ── Plot ───────────────────────────────────────────────────────────
     print("Generating charts ...")
