@@ -1,7 +1,8 @@
 """Qwen3-4B computation graph.
 
-Standard GQA decoder: QKV fused proj → RoPE → FlashAttn → O proj →
-fused_residual_norm → gate_up proj → SwiGLU → down proj → fused_residual_norm
+Standard GQA decoder: QKV fused proj → QK Norm (per-head RMSNorm) → RoPE →
+FlashAttn → O proj → fused_residual_norm → gate_up proj → SwiGLU →
+down proj → fused_residual_norm
 """
 
 SPEC = {
@@ -25,7 +26,7 @@ SPEC = {
 
 
 def build_graph(spec):
-    from sim.graph import ModelGraph
+    from sim.graph import ModelGraph, OpSpec
     from sim.layers import (
         build_qkv_proj, build_o_proj, build_flash_attn, build_rope,
         build_gate_up_proj, build_down_proj, build_swiglu,
@@ -42,6 +43,28 @@ def build_graph(spec):
     def _layer(ctx, hw):
         ops = []
         ops += build_qkv_proj(ctx, h, nh, nh_kv, hd, hw)
+        b_effs = ctx.b_effs
+        overheads = ctx.overheads
+        b_eff = b_effs.get("rmsnorm", b_effs.get("fused_residual_norm", 1e12))
+        overhead = overheads.get("rmsnorm", 0.0)
+        ops.append(OpSpec(
+            name="q_norm",
+            category="elementwise",
+            tags=frozenset({"norm"}),
+            N_elems=ctx.total_tokens * nh * hd,
+            elem_op="rmsnorm",
+            b_eff=b_eff,
+            elem_overhead=overhead,
+        ))
+        ops.append(OpSpec(
+            name="k_norm",
+            category="elementwise",
+            tags=frozenset({"norm"}),
+            N_elems=ctx.total_tokens * nh_kv * hd,
+            elem_op="rmsnorm",
+            b_eff=b_eff,
+            elem_overhead=overhead,
+        ))
         ops += build_rope(ctx, nh, nh_kv, hd, rd, hw)
         ops += build_flash_attn(ctx, hw)
         ops += build_o_proj(ctx, h, nh, hd, hw)
