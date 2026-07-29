@@ -2,9 +2,18 @@ gpu: "3090"
 model: "Qwen/Qwen3-4B"
 dtype: "bfloat16"  # must match a dtype in the benchmark config
 
-# Communication is modelled via measured memcpy LUT from fitted_params.
-# Run --bench then --fit to generate the LUT.  The old BW+latency
-# model is removed; configure bench.yaml memcpy grid if more coverage is needed.
+# ── Communication model ──────────────────────────────────────────────
+# Two models for GPU-to-GPU communication:
+#   "bw_latency" — bandwidth + latency model (intra_bw_gb_s / intra_latency_us)
+#   "lut"        — measured D2H memcpy lookup table from fitted_params
+# The LUT model requires running --bench then --fit to generate the LUT.
+communication:
+  model: "bw_latency"
+  intra_bw_gb_s: 9.7
+  intra_latency_us: 2.0   # NVLink/PCIe intra-node latency per hop
+  inter_bw_gb_s: 9.7
+  inter_latency_us: 6.9   # cross-node (InfiniBand/Ethernet) latency per hop
+  cpu_swap_bw_gb_s: 9.7   # GPU↔CPU swap bandwidth (preemption)
 
 simulation:
   block_size: 16

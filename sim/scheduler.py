@@ -112,7 +112,7 @@ class ColocatedScheduler:
             "scheduler_reserve_full_isl", True)
         # Use swap instead of skip when OOM on D-side
         self.use_swap = (not reset_on_preempt
-                          and (getattr(memory_pool, "cpu_swap_bw", None) is not None
+                          and (getattr(memory_pool, "_swap_cpu_bw_gb_s", 0) > 0
                                or getattr(memory_pool, "_swap_lut_bytes", None) is not None))
 
         self.running: list[Request] = []

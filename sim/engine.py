@@ -61,23 +61,30 @@ class SimulationEngine:
             * self.block_size * dt_b
         )
 
-        # Network / communication — all modelled via measured memcpy LUT.
-        # The old BW+latency config values are retained for reference but
-        # NOT used at runtime.  Run --bench then --fit to generate the LUT.
+        # Network / communication — configurable via "communication" section.
+        # Two models: "lut" (measured D2H memcpy) or "bw_latency" (bandwidth + latency).
         self.gpus_per_node = config.get("strategy", {}).get("gpus_per_node")
+        comm_cfg = config.get("communication", {})
+        self._comm_model = comm_cfg.get("model", "lut")
+        self._comm_intra_bw_gb_s = comm_cfg.get("intra_bw_gb_s", 9.7)
+        self._comm_intra_latency_us = comm_cfg.get("intra_latency_us", 2.0)
+        self._comm_inter_bw_gb_s = comm_cfg.get("inter_bw_gb_s", 9.7)
+        self._comm_inter_latency_us = comm_cfg.get("inter_latency_us", 6.9)
+        self._comm_cpu_swap_bw_gb_s = comm_cfg.get("cpu_swap_bw_gb_s", 9.7)
         # Prefix caching
         self.enable_cache = config["simulation"].get("enable_prefix_caching", True)
         # Expert parallelism
         self.enable_ep = config.get("simulation", {}).get("enable_expert_parallel", False)
 
-        # Memcpy LUT from fitted params (REQUIRED — must run --bench then --fit first)
+        # Memcpy LUT from fitted params (required when comm_model="lut").
         self._comm_lut_bytes = hw_params.get("memcpy_d2h_bytes")
         self._comm_lut_time_s = hw_params.get("memcpy_d2h_time_s")
-        if self._comm_lut_bytes is None or self._comm_lut_time_s is None:
-            raise RuntimeError(
-                "memcpy LUT missing from fitted params. "
-                "Run: uv run python main.py --bench && uv run python main.py --fit"
-            )
+        if self._comm_model == "lut":
+            if self._comm_lut_bytes is None or self._comm_lut_time_s is None:
+                raise RuntimeError(
+                    "comm_model='lut' requires memcpy LUT in fitted params. "
+                    "Run: uv run python main.py --bench && uv run python main.py --fit"
+                )
 
         # v1 graph loading
         from sim.config import load_model_graph
@@ -264,7 +271,12 @@ class SimulationEngine:
         # _compute_blocks_per_gpu already accounts for TP/PP.
         blocks_per_pool = self._p_blocks_per_gpu
         pools = [BlockPool(blocks_per_pool,
-                           enable_caching=self.enable_cache) for _ in range(dp)]
+                            enable_caching=self.enable_cache,
+                            comm_model=self._comm_model,
+                            cpu_swap_bw_gb_s=self._comm_cpu_swap_bw_gb_s,
+                            comm_lut_bytes=(list(self._comm_lut_bytes) if self._comm_lut_bytes else None),
+                            comm_lut_time_s=(list(self._comm_lut_time_s) if self._comm_lut_time_s else None))
+                 for _ in range(dp)]
         for p in pools:
             p.bytes_per_block = self.bytes_per_block
         scheds = [ColocatedScheduler(pools[i], self.cfg) for i in range(dp)]
@@ -449,7 +461,11 @@ class SimulationEngine:
                 f"({self.tp_size}×{pp}={p_replica})")
         p_dp = num_p // p_replica
         pool_p = BlockPool(self._p_blocks_per_gpu * p_dp,
-                            enable_caching=self.enable_cache)
+                            enable_caching=self.enable_cache,
+                            comm_model=self._comm_model,
+                            cpu_swap_bw_gb_s=self._comm_cpu_swap_bw_gb_s,
+                            comm_lut_bytes=(list(self._comm_lut_bytes) if self._comm_lut_bytes else None),
+                            comm_lut_time_s=(list(self._comm_lut_time_s) if self._comm_lut_time_s else None))
         pool_p.bytes_per_block = self.bytes_per_block
         p_cfg = _deep_copy_config(self.cfg)
         p_cfg["simulation"]["max_num_batched_tokens"] = (
@@ -472,8 +488,10 @@ class SimulationEngine:
         d_cfg = _deep_copy_config(self.cfg)
         d_pools = [BlockPool(self._d_blocks_per_gpu,
                              enable_caching=self.enable_cache,
-                             comm_lut_bytes=list(self._comm_lut_bytes),
-                             comm_lut_time_s=list(self._comm_lut_time_s))
+                             comm_model=self._comm_model,
+                             cpu_swap_bw_gb_s=self._comm_cpu_swap_bw_gb_s,
+                             comm_lut_bytes=list(self._comm_lut_bytes) if self._comm_lut_bytes else None,
+                             comm_lut_time_s=list(self._comm_lut_time_s) if self._comm_lut_time_s else None)
                    for _ in range(num_d_groups)]
         for dp in d_pools:
             dp.bytes_per_block = self.bytes_per_block
@@ -499,9 +517,11 @@ class SimulationEngine:
             if len(sched.running) >= sched.max_num_seqs:
                 return False
             xfer_time = transfer_blocks(req, d_pools[d_idx], self.bytes_per_block,
-                                        self._comm_lut_bytes,
-                                        self._comm_lut_time_s,
-                                        self.block_size)
+                                        comm_model=self._comm_model,
+                                        bw_gb_s=self._comm_inter_bw_gb_s,
+                                        lut_bytes=self._comm_lut_bytes,
+                                        lut_time_s=self._comm_lut_time_s,
+                                        block_size=self.block_size)
             if xfer_time == float("inf"):
                 return False
             pool_p.free_blocks(p_side_blocks)
@@ -774,6 +794,11 @@ class SimulationEngine:
             tp=tp, pp=pp, ep=ep_size if self.enable_ep else 0, pp_stage=0,
             cross_node_hops=cross,
             dtype=self.dtype, use_cudagraph=use_cg,
+            comm_model=self._comm_model,
+            comm_intra_bw_gb_s=self._comm_intra_bw_gb_s,
+            comm_intra_latency_us=self._comm_intra_latency_us,
+            comm_inter_bw_gb_s=self._comm_inter_bw_gb_s,
+            comm_inter_latency_us=self._comm_inter_latency_us,
             comm_lut_bytes=self._comm_lut_bytes,
             comm_lut_time_s=self._comm_lut_time_s,
         )

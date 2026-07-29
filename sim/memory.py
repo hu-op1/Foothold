@@ -272,6 +272,8 @@ class BlockPool:
     """
 
     def __init__(self, num_blocks: int, enable_caching: bool = True,
+                 comm_model: str = "lut",
+                 cpu_swap_bw_gb_s: float = 9.7,
                  comm_lut_bytes: list[int] | None = None,
                  comm_lut_time_s: list[float] | None = None):
         if num_blocks <= 0:
@@ -279,7 +281,8 @@ class BlockPool:
         self.num_blocks = num_blocks
         self.enable_caching = enable_caching
 
-        # GPU↔CPU swap uses measured memcpy LUT.
+        self._swap_comm_model = comm_model
+        self._swap_cpu_bw_gb_s = cpu_swap_bw_gb_s
         self._swap_lut_bytes = comm_lut_bytes
         self._swap_lut_time_s = comm_lut_time_s
 
@@ -532,7 +535,12 @@ class BlockPool:
         return request_id in self._swapped_out
 
     def _swap_time(self, total_bytes: int) -> float:
-        """Predicted transfer time for swap using measured LUT."""
+        """Predicted transfer time for GPU↔CPU swap."""
+        if self._swap_comm_model == "bw_latency":
+            if self._swap_cpu_bw_gb_s <= 0:
+                return 0.0
+            return total_bytes / (self._swap_cpu_bw_gb_s * 1e9)
+        # LUT model
         if self._swap_lut_bytes is None or self._swap_lut_time_s is None:
             return 0.0
         return memcpy_time(total_bytes,
@@ -545,7 +553,10 @@ class BlockPool:
         Frees physical blocks and records the count for later swap-in.
         Returns the swap-out time in seconds, or 0 if swap is disabled.
         """
-        if self._swap_lut_bytes is None:
+        if self._swap_comm_model == "bw_latency":
+            if self._swap_cpu_bw_gb_s <= 0:
+                return 0.0
+        elif self._swap_lut_bytes is None:
             return 0.0
 
         blocks = [b for b in request.block_table if b >= 0]
@@ -570,7 +581,10 @@ class BlockPool:
         Returns the swap-in time in seconds, or float('inf') if allocation
         fails (not enough free blocks).
         """
-        if self._swap_lut_bytes is None:
+        if self._swap_comm_model == "bw_latency":
+            if self._swap_cpu_bw_gb_s <= 0:
+                return 0.0
+        elif self._swap_lut_bytes is None:
             return 0.0
 
         num_blocks = self._swapped_out.get(request.request_id)

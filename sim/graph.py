@@ -11,7 +11,7 @@ from sim.roofline import (
     roofline_time,
     DTYPE_BYTES_MAP,
 )
-from sim.communication import memcpy_time, all_to_all_time
+from sim.communication import memcpy_time, all_to_all_time, ring_all_reduce_time
 
 _M_LO = 32
 _M_HI = 256
@@ -95,11 +95,24 @@ def _compute_op_time(op: OpSpec, ctx: "StepContext") -> float:
         return (op.N_elems * factor * ctx.dt_bytes) / op.b_eff + op.elem_overhead
     elif op.category == "comm":
         if op.comm_type == "all_reduce":
-            return memcpy_time(op.comm_bytes, op.comm_lut_bytes, op.comm_lut_time_s)
+            return ring_all_reduce_time(
+                per_hop_bytes=op.comm_bytes,
+                tp=max(ctx.tp_size, 1),
+                comm_model=ctx.comm_model,
+                intra_bw_gb_s=ctx.comm_intra_bw_gb_s,
+                intra_latency_us=ctx.comm_intra_latency_us,
+                lut_bytes=op.comm_lut_bytes,
+                lut_time_s=op.comm_lut_time_s,
+            )
         elif op.comm_type == "all_to_all":
             return all_to_all_time(
-                op.comm_bytes, op.comm_lut_bytes, op.comm_lut_time_s,
+                op.comm_bytes,
                 ep_size=ctx.ep_size or 1,
+                comm_model=ctx.comm_model,
+                intra_bw_gb_s=ctx.comm_intra_bw_gb_s,
+                intra_latency_us=ctx.comm_intra_latency_us,
+                lut_bytes=op.comm_lut_bytes,
+                lut_time_s=op.comm_lut_time_s,
             )
         return 0.0
     return 0.0
@@ -137,12 +150,20 @@ class StepContext:
     ep_size: int = 1
     pp_size: int = 1
 
+    comm_model: str = "lut"
+    comm_intra_bw_gb_s: float = 9.7
+    comm_intra_latency_us: float = 2.0
+    comm_inter_bw_gb_s: float = 9.7
+    comm_inter_latency_us: float = 6.9
     comm_lut_bytes: list = field(default_factory=list)
     comm_lut_time_s: list = field(default_factory=list)
 
     @classmethod
     def precompute(cls, scheduled_requests, spec, hw_params, dtype="float16",
-                   use_cudagraph=False, comm_lut_bytes=None, comm_lut_time_s=None):
+                   use_cudagraph=False,
+                   comm_model="lut", comm_intra_bw_gb_s=9.7, comm_intra_latency_us=2.0,
+                   comm_inter_bw_gb_s=9.7, comm_inter_latency_us=6.9,
+                   comm_lut_bytes=None, comm_lut_time_s=None):
         """Build StepContext from scheduled requests + model/hardware params."""
         if not scheduled_requests:
             return cls(scheduled_requests=scheduled_requests)
@@ -206,6 +227,11 @@ class StepContext:
             b_effs=b_effs,
             overheads=overheads,
             kernel_overhead_us=kernel_overhead_us,
+            comm_model=comm_model,
+            comm_intra_bw_gb_s=comm_intra_bw_gb_s,
+            comm_intra_latency_us=comm_intra_latency_us,
+            comm_inter_bw_gb_s=comm_inter_bw_gb_s,
+            comm_inter_latency_us=comm_inter_latency_us,
             comm_lut_bytes=comm_lut_bytes,
             comm_lut_time_s=comm_lut_time_s,
         )
