@@ -491,15 +491,29 @@ async def _send_all_embedded(engine, requests, trace_format, *, max_model_len=No
                 events[sub_idx].set()
 
         if last_metrics is not None:
+            # vLLM uses two different clocks:
+            #   arrival_time  = time.time()       (Unix epoch)
+            #   queued_ts, first_token_ts, ... = time.monotonic()
+            # Normalize arrival_time into the monotonic domain so that
+            # validate/plot.py compute_latencies() can subtract them.
+            vllm_arrival = getattr(last_metrics, "arrival_time", None)
+            queued = getattr(last_metrics, "queued_ts", None)
+            scheduled = getattr(last_metrics, "scheduled_ts", None)
+            first = getattr(last_metrics, "first_token_ts", None)
+            last = getattr(last_metrics, "last_token_ts", None)
+
+            # Use queued_ts as the effective arrival_time — all monotonic.
+            arrival_norm = queued
+
             records.append({
                 "request_id": f"bench-{i}",
                 "input_toks": len(req.prompt_token_ids),
                 "output_toks": n_out,
-                "arrival_time": getattr(last_metrics, "arrival_time", None),
-                "queued_ts": getattr(last_metrics, "queued_ts", None),
-                "scheduled_ts": getattr(last_metrics, "scheduled_ts", None),
-                "first_token_ts": getattr(last_metrics, "first_token_ts", None),
-                "last_token_ts": getattr(last_metrics, "last_token_ts", None),
+                "arrival_time": arrival_norm,
+                "queued_ts": queued,
+                "scheduled_ts": scheduled,
+                "first_token_ts": first,
+                "last_token_ts": last,
             })
         else:
             records.append({
