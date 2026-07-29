@@ -2,8 +2,8 @@
 # Structure mirrors search.yaml but with scalar strategy values (no grid search).
 
 gpu: "3090"
-model: "meta-llama/Llama-2-7b-hf"
-dtype: "float16"  # must match a dtype in the benchmark config
+model: "Qwen/Qwen3-4B"
+dtype: "bfloat16"  # must match a dtype in the benchmark config
 
 # ── Communication model ──────────────────────────────────────────────
 # Two models for GPU-to-GPU communication:
@@ -32,6 +32,7 @@ simulation:
   use_cudagraph: true  # set true after running cudagraph bench+fit
   async_scheduling: true  # enable schedule/execute overlap (auto-enabled for PP>1)
   scheduler_reserve_full_isl: true  # gate: full prompt must fit KV cache before first chunk
+  preemption_strategy: recompute  # "recompute" (default, full recompute) or "swap" (GPU↔CPU swap)
   enable_expert_parallel: true  # enable Expert Parallelism for MoE models (EP_SIZE = TP × DP)
 
 strategy:
@@ -57,9 +58,9 @@ output: "sim/output/try"  # output directory for timeseries.csv, requests.jsonl,
 tick_seconds: 0.5            # timeseries downsampling interval
 
 trace:
-  path: "traces/myllama-2-7b-heavy.jsonl"
+  path: "traces/qwen3-4b-conversation.jsonl"
   max_requests: 5000
-  format: "sharegpt"  # "agentic" or "sharegpt"
+  format: "agentic"  # "agentic" or "sharegpt"
 
 # ── Service Level Objectives (SLO) ──────────────────────────────────────
 # SLO is a binary gate checked at p90 (not per-request, not p99).

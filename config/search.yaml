@@ -27,6 +27,7 @@ simulation:
   use_cudagraph: false  # set true after running cudagraph bench+fit
   async_scheduling: false  # enable schedule/execute overlap (auto-enabled for PP>1)
   scheduler_reserve_full_isl: true  # gate: full prompt must fit KV cache before first chunk
+  preemption_strategy: recompute  # "recompute" (default, full recompute) or "swap" (GPU↔CPU swap)
   enable_expert_parallel: false  # enable Expert Parallelism for MoE models (EP_SIZE = TP × DP)
 
 strategy:

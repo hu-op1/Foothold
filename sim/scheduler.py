@@ -104,6 +104,21 @@ class ColocatedScheduler:
         self.policy = config["simulation"].get("scheduling_policy", SchedulingPolicy.FCFS)
         self.max_model_len = config.get("max_model_len", 131072)
         self.reset_on_preempt = reset_on_preempt
+        # ── Config-driven preemption strategy override ──
+        ps = config["simulation"].get("preemption_strategy", "auto")
+        if ps == "swap":
+            swap_ok = (getattr(memory_pool, "_swap_cpu_bw_gb_s", 0) > 0
+                       or getattr(memory_pool, "_swap_lut_bytes", None) is not None)
+            if not swap_ok:
+                raise ValueError(
+                    "preemption_strategy='swap' requires communication.cpu_swap_bw_gb_s > 0 "
+                    "or a memcpy LUT")
+            self.reset_on_preempt = False
+        elif ps == "recompute":
+            self.reset_on_preempt = True
+        elif ps != "auto":
+            raise ValueError(f"Unknown preemption_strategy: {ps}")
+        # "auto" — keep reset_on_preempt as passed by engine (colocated→recompute, D-side→swap/skip)
         # When enabled, a new request's full input sequence must fit in the
         # remaining KV cache before its first chunk is admitted.  Prevents
         # admitting a chunk only to repeatedly preempt later.  Matches vLLM's
