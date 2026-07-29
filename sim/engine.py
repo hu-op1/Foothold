@@ -14,6 +14,7 @@ from sim.communication import (
 )
 from sim.pipeline import ScheduleExecutePipeline, estimate_schedule_time
 from sim.config import model_weight_gb, activation_memory_gb, total_vram_gb
+from sim.metrics import aggregate_breakdown
 
 
 class EventType(Enum):
@@ -419,7 +420,7 @@ class SimulationEngine:
         total_q = sum(p._cache_queries for p in pools)
         total_h = sum(p._cache_hits for p in pools)
         metrics.cache_hit_rate = total_h / total_q if total_q > 0 else 0.0
-        metrics.time_breakdown = dict(self.time_acc)
+        metrics.time_breakdown = aggregate_breakdown(self.time_acc)
         return metrics
 
     def _run_disaggregated(self, requests: list[Request], pd_ratio: tuple[int, int],
@@ -737,7 +738,7 @@ class SimulationEngine:
         total_queries = sum(p._cache_queries for p in all_pools)
         total_hits = sum(p._cache_hits for p in all_pools)
         metrics.cache_hit_rate = total_hits / total_queries if total_queries > 0 else 0.0
-        metrics.time_breakdown = dict(self.time_acc)
+        metrics.time_breakdown = aggregate_breakdown(self.time_acc)
         return metrics
 
     def _predict_step(self, scheduled_requests, tp=None, pp=None, group_id=0):

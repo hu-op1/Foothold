@@ -151,3 +151,43 @@ class MetricsCollector:
         if total == 0:
             return {}
         return {f"{k}_pct": v / total * 100 for k, v in self.time_breakdown.items()}
+
+
+# ── Raw-op-name → CSV category name aggregation ───────────────────────
+# graph.evaluate() produces raw op names (qkv_proj, o_proj, …) but the
+# CSV expects aggregated category names (attn_proj, ffn_proj, …).
+# aggregate_breakdown() maps raw → category before percentages are computed.
+
+_AGGREGATION_MAP: dict[str, set[str]] = {
+    "attn_proj": {"qkv_proj", "o_proj", "qk_proj", "v_proj",
+                  "out_proj", "attn_gate_proj", "attn_gate_mul"},
+    "ffn_proj": {"gate_up_proj", "down_proj"},
+    "attn_prefill": {"flash_attn", "linear_scan"},
+    "attn_decode": set(),
+    "fused_add_norm": {"fused_residual_norm", "rmsnorm", "residual_add"},
+    "rope": {"rope_q", "rope_kv"},
+    "swiglu": {"swiglu"},
+    "lm_head": {"lm_head"},
+    "all_reduce": {"all_reduce"},
+    "all_to_all": {"all_to_all"},
+    "expert_proj": {"expert_gate_up", "expert_down"},
+    "router_proj": {"router"},
+    "kv_transfer": {"kv_transfer"},
+    "swap": {"swap"},
+}
+
+
+def aggregate_breakdown(raw_acc: dict[str, float]) -> dict[str, float]:
+    """Map raw op names from graph evaluation to the category names the
+    CSV expects.  Any raw key not listed in the mapping passes through
+    unchanged, so existing direct matches (swiglu, lm_head, …) are fine."""
+    aggregated: dict[str, float] = {}
+    unmapped = set(raw_acc)
+    for cat, raw_names in _AGGREGATION_MAP.items():
+        total = sum(raw_acc.get(k, 0.0) for k in raw_names)
+        if total > 0:
+            aggregated[cat] = total
+        unmapped -= raw_names
+    for k in unmapped:
+        aggregated[k] = raw_acc[k]
+    return aggregated
