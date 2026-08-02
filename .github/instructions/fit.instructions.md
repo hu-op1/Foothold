@@ -67,6 +67,15 @@ When adding a new proxy: benchmark the real kernel first, then map if the overhe
 - Keys namespaced with `_cudagraph` suffix (e.g. `F_peak_prefill_cudagraph`).
 - Same split strategy, no F_peak sharing needed for elementwise.
 
+## GatedDelta Fitting (`fit/gateddelta.py`)
+
+`fit_gateddelta(results)` fits hybrid-architecture kernels:
+
+- **Scan** uses `ls_`-prefixed dedicated roofline params: decode/prefill split + per-batch B_peak curve + `nvh` anchor. Keys like `ls_F_peak_prefill`, `ls_B_peak_decode`, … — these are what `StepContext.precompute()` in `sim/graph.py` detects to select scan params.
+- **Conv1d** is fit as an elementwise op (`B_eff` + `overhead`) and merged into `elem_b_effs` / `elem_overheads`.
+
+Keep the `ls_` prefix convention — renaming breaks the graph wiring in `sim/graph.py`.
+
 ## Loading Bench Results
 
 ```python

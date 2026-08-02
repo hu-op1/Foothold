@@ -63,11 +63,11 @@ uv run python -m pytest test/test_sim.py -v       # PD sim tests verbose
 
 ### Model spec loading
 
-Model architecture specs are loaded from HuggingFace Hub via `transformers.AutoConfig.from_pretrained()`. No local `config.json` files needed — any model on HuggingFace Hub can be used by specifying its full HF model ID (e.g. `Qwen/Qwen3-8B`, `meta-llama/Llama-2-7b-hf`) in config YAML files.
+Model architecture specs are defined as per-model `.py` files in `models/` — each exports a `SPEC` dict and a `build_graph(spec)` function. No HuggingFace Hub or local `config.json` files needed.
 
-- `sim/config.py` — `load_model_spec(model_name)` calls `AutoConfig`, maps fields (`hidden_size` → `hidden_dim`, `num_attention_heads` → `num_heads`, etc.) to the internal model_spec dict format. `_compute_params()` derives `total_params_b` from architecture dimensions.
-- Key handling: GQA (`num_key_value_heads < num_attention_heads` → `num_kv_heads`), Qwen3.5 nested `text_config`, `layer_types` → `attn_layers` for hybrid architectures.
-- See [docs/architecture.md](docs/architecture.md) §1 for complete field mapping. (This file is a work-in-progress; for now refer to `sim/config.py:load_model_spec()` for details.)
+- `sim/config.py` — `load_model_spec(model_name)` resolves the name to a `models/*.py` file via `_resolve_model_path()` (full HF IDs, short names, or direct paths) and validates against `_SPEC_REQUIRED`. `load_model_graph(model_name)` additionally calls the file's `build_graph(spec)`. `total_params_b` comes from the SPEC dict.
+- Key handling: GQA (`num_kv_heads < num_heads`), hybrid architectures (`layer_types` → `num_attn_layers` + `linear_*` sub-configs for Gated DeltaNet layers), MoE fields (`is_moe`, `num_experts`, `moe_intermediate_size`, `decoder_sparse_step`).
+- See `.github/instructions/models.instructions.md` for the SPEC/build_graph contract and filename resolution rules.
 
 ### Stage 1: `bench/` — GPU kernel microbenchmarks
 
@@ -101,7 +101,7 @@ Output: `fit/results/<gpu>.json`
 
 Simulates vLLM-style inference serving with colocated and disaggregated (separate prefill/decode GPU pools) configurations.
 
-- `sim/config.py` — Loads YAML config with model-aware defaults: `load_model_spec()` fetches architecture from HuggingFace Hub via `AutoConfig.from_pretrained()`. `activation_memory_gb()` computes peak activation from model arch × max_batched_tokens. `valid_tp_sizes()` checks head divisibility + memory constraints. `pp_cross_node_hops()` computes cross-node boundaries for pipeline stage transitions. GPU VRAM lookup table for known GPU models.
+- `sim/config.py` — Loads YAML config with model-aware defaults: `load_model_spec()` loads a `SPEC` dict from `models/*.py` (resolved by model name). `activation_memory_gb()` computes peak activation from model arch × max_batched_tokens. `valid_tp_sizes()` checks head divisibility + memory constraints. `pp_cross_node_hops()` computes cross-node boundaries for pipeline stage transitions. GPU VRAM lookup table for known GPU models.
 - `sim/engine.py` — `SimulationEngine` with event-driven loop. Clock advances only when all GPUs are truly idle. Two modes: `_run_colocated` (data-parallel via least-loaded routing) and `_run_disaggregated` (P pool → KV transfer → D pool with swap preemption).
 - `sim/scheduler.py` — vLLM v1 two-phase scheduler: Phase 1 iterates running queue (decode tokens + chunked prefill, OOM handling via preemption or swap), Phase 2 admits from waiting queue with token budget + prefill threshold.
 - `sim/memory.py` — `BlockPool` with PagedAttention block allocation, prefix caching (SHA-256 based), and GPU↔CPU swap support for D-side OOM recovery.
@@ -132,7 +132,7 @@ CLI with subcommands: `bench`, `fit`, `search`, `sim`, `validate`. Also supports
 - **FlashAttention model**: `attention_fused()` skips HBM round-trip for S×S score matrix — only reads Q,K,V and writes O.
 - **GQA support**: when `num_kv_heads < num_heads`, projections use different output dims for K/V vs Q/O, attention HBM traffic uses nh_kv for K/V, and RoPE separately applies to Q and K.
 - **Hybrid architectures**: `attn_layers` field lets models like Qwen3.5 mix full attention layers with DeltaNet (no O(s²) attention).
-- **Model specs from HuggingFace Hub**: `sim/config.py:load_model_spec()` uses `AutoConfig.from_pretrained()` to load architecture configs directly from HuggingFace Hub. Parameter counts computed from architecture formula, not hand-maintained. Any HF model ID can be used in config YAMLs.
+- **Model specs from `models/*.py`**: `sim/config.py:load_model_spec()` loads a `SPEC` dict from a per-model file in `models/` (resolved by model name). Parameter counts come from the SPEC's `total_params_b` or the architecture formula. Any name that resolves to a file works in config YAMLs.
 - **Activation memory from model architecture**: computed as `batch_tokens × (2h + 3·inter) × 2 + 0.5 GB` instead of hardcoded 2 GB.
 - **DP with independent schedulers**: each DP rank has its own scheduler + block pool + model weights, least-loaded routing, parallel step — matches vLLM DP architecture.
 - **Memcpy LUT for communication**: GPU↔CPU transfer times are modeled via measured lookup tables (`memcpy_d2h_bytes/time_s`, `memcpy_h2d_bytes/time_s`) instead of a simple BW+latency linear model. This captures PCIe/NVLink non-linear behavior accurately. Run `--bench` + `--fit` to generate the LUT.

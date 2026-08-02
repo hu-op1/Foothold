@@ -105,3 +105,13 @@ for M, K, N in tqdm(list(product(grid["M"], grid["K"], grid["N"]))):
 | `flashattn.py` | `F.scaled_dot_product_attention` over (s_q, s_kv) grid. Prefer `flash_attn` on Linux, fallback to torch SDPA. |
 | `cudagraph.py` | Each op under CUDA Graph replay — namespaced with `cudagraph_` prefix. |
 | `launch_overhead.py` | CPU wall-clock vs GPU event-time slope analysis via numpy linear regression. |
+| `gateddelta.py` | Hybrid-architecture kernels: gated delta rule scan (chunked prefill / recurrent decode) + causal depthwise conv1d. |
+
+## GatedDelta (`bench/gateddelta.py`)
+
+Measures two kernels for hybrid (e.g. Qwen3.5) architectures:
+
+- **Gated delta rule scan** — chunked prefill / recurrent decode. Cost scales with `nvh` (hidden-dim based), not `nhk` (KV-dim based).
+- **Causal depthwise conv1d** — elementwise-style kernel.
+
+Prefer fused kernels from `fla` (flash-linear-attention) / `causal_conv1d`; fall back to the vendored torch reference implementation (same path as `modeling_qwen3_5.py`). Config grid comes from the `gateddelta:` section of `config/bench.yaml`; output is `bench/results/<gpu>/gateddelta.csv` (scan + conv1d rows).

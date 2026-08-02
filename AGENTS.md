@@ -17,7 +17,8 @@ AI coding agent guidance for this repository. See [CLAUDE.md](CLAUDE.md) for ful
 - Use `pathlib.Path` for filesystem paths (some legacy uses of `os.path` exist in `main.py` and `bench/`)
 - Use `torch.cuda.Event` for GPU timing — see `CudaTimer`, `warmup()`, `benchmark()` in `bench/utils.py:8`
 - Call `check_memory()` before allocating large tensors to avoid OOM
-- Model specs loaded from **HuggingFace Hub** via `transformers.AutoConfig.from_pretrained()` — no local `config.json` files needed. Any HF model ID works in YAML configs.
+- Model specs defined in `models/*.py` — each file exports a `SPEC` dict + `build_graph(spec)`, loaded via `sim/config.py:load_model_spec()`/`load_model_graph()`. YAML `model:` values (full HF IDs, short names, or paths) resolve to these files; no HuggingFace Hub or local `config.json` needed.
+- `sim/` uses a computation-graph executor: `sim/graph.py` (`OpSpec`, `ModelGraph`, TP/EP/PP transforms) + `sim/layers/` builders; per-model graphs come from `models/*.py`
 - Trace format: `sharegpt` (one JSONL line per request, optional `input_tok_ids`/`output_tok_ids`) or `agentic` (session chains with sub-requests, `tool_duration`)
 - Trace generation tools in `tools/`: `generate_agent_trace.py` (agentic format) and `generate_conversation_trace.py` (sharegpt format)
 
@@ -40,11 +41,14 @@ Granular instruction files live in `.github/instructions/` — auto-attached whe
 
 | File | Applies To | What It Covers |
 |------|-----------|----------------|
-| `.github/instructions/bench.instructions.md` | `bench/**/*.py` | CUDA timing, checkpoint/resume, OOM handling, benchmark conventions (incl. memcpy) |
-| `.github/instructions/fit.instructions.md` | `fit/**/*.py` | Roofline fitting, matmul prefill/decode split, elementwise proxy map, memcpy LUT |
-| `.github/instructions/sim.instructions.md` | `sim/**/*.py` | Event-driven engine, scheduler, executor, memory pool, request lifecycle |
-| `.github/instructions/config.instructions.md` | `config/*.yaml` | Config schemas, model spec loading, common pitfalls (communication via memcpy LUT) |
+| `.github/instructions/bench.instructions.md` | `bench/**/*.py` | CUDA timing, checkpoint/resume, OOM handling, benchmark conventions (incl. memcpy, gateddelta) |
+| `.github/instructions/fit.instructions.md` | `fit/**/*.py` | Roofline fitting, matmul prefill/decode split, elementwise proxy map, memcpy LUT, gateddelta `ls_*` params |
+| `.github/instructions/sim.instructions.md` | `sim/**/*.py` | Event-driven engine, scheduler, computation graph, executor, memory pool, request lifecycle |
+| `.github/instructions/config.instructions.md` | `config/*.yaml` | Config schemas (bench/search/sim/validate), model spec resolution, common pitfalls (communication via memcpy LUT) |
 | `.github/instructions/test.instructions.md` | `test/**/*.py` | Pytest conventions, fixtures, trace generation, sim test patterns |
+| `.github/instructions/models.instructions.md` | `models/*.py` | `SPEC` dict + `build_graph(spec)` contract, model name resolution, hybrid architectures |
+| `.github/instructions/tools.instructions.md` | `tools/**/*.py` | Trace generators (agentic/sharegpt), CLI args, arrival-rate modeling |
+| `.github/instructions/validate.instructions.md` | `validate/**/*.py` | Visualization, vLLM send (API + embedded), sim-vs-vLLM comparison, validate.yaml schema |
 
 ## Design docs
 

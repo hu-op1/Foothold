@@ -12,17 +12,16 @@ applyTo: "config/*.yaml"
 | `config/bench.yaml` | 1 — Benchmarking | `bench`, `fit` |
 | `config/search.yaml` | 2 — Strategy Search | `search` |
 | `config/sim.yaml` | 3 — Single Simulation | `sim` |
+| `config/validate.yaml` | 4 — Validation | `validate` |
 
 ## Model Spec
 
-Model architecture is loaded from **HuggingFace Hub** — specify any HF model ID:
-
-```yaml
-model: "meta-llama/Llama-2-7b-hf"
-model: "Qwen/Qwen3-4B"
-```
-
-No local `config.json` or `model_specs.yaml` needed. `sim/config.py:load_model_spec()` calls `AutoConfig.from_pretrained()`.
+Model architecture is **not** loaded from HuggingFace Hub. The `model:` value in a
+YAML config is resolved by `sim/config.py:_resolve_model_path()` to a per-model
+`.py` file in `models/` (e.g. `meta-llama/Llama-2-7b-hf` → `models/llama_2_7b_hf.py`).
+Each file exports a `SPEC` dict + `build_graph(spec)`. See `models.instructions.md`
+for the contract and filename resolution rules. Any string that resolves to a file
+in `models/` works — full HF IDs, short names, or direct paths.
 
 ## bench.yaml Schema
 
@@ -51,6 +50,11 @@ launch_overhead:
   n_values: [1, 2, 4, 8, 16, 32, 64, 128]
   trials: 50
   warmup: 5
+gateddelta:
+  shapes: [...]        # scan shapes
+  s_q: [...]
+  batch: [...]
+  conv_channels: [...]  # depthwise conv1d channels
 overwrite: false
 max_memory_gb: 24
 warmup: "auto"
@@ -58,6 +62,15 @@ min_time_ms: 200
 max_iters: 10000
 calib_iters: 20
 ```
+
+## validate.yaml Schema
+
+See `config/validate.yaml` for the full example — key sections:
+
+- `sim_dir` (required) — sim output dir.
+- Comparison sources: `sim_csv`, `sim_log` (LLMServingSim), `vllm_dir`, `compare_dir` (null excludes that source).
+- `colors` (hex per source), `title`, `prefix`.
+- `vllm:` block — `embedded` (bool), `endpoint`, `model`, `api_key`, `timeout`, `max_concurrency`, `trace_path`, `trace_format` (`"sharegpt"` | `"agentic"`), `max_requests`, `tokenizer`, `output_dir`, `tick_seconds`, `engine_args` (used only when `embedded: true`).
 
 ## search.yaml / sim.yaml Schema
 
