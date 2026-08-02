@@ -2,6 +2,22 @@
 
 Hybrid architecture: 24 linear attention layers + 8 full attention layers
 (every 4th layer). Full attention layers include attn_output_gate.
+
+Mirrors the official graph in transformers/models/qwen3_5/modeling_qwen3_5.py:
+
+- Full attention: fused QKV GEMM whose Q part doubles for the output gate
+  (q_proj out = nh*hd*2, gate is the second half), per-head QK-norm before
+  RoPE, sigmoid gate multiply on the attention output before O-proj.
+- Linear attention (Gated DeltaNet): QK and V projections (in_proj_qkv)
+  plus separate in_proj_z/in_proj_b/in_proj_a; depthwise conv1d (kernel 4,
+  own elementwise op); gated delta rule scan with per-token cost
+  4*kd*vd*nvh MACs — Q/K are repeated to the value-head count before the
+  kernel (modeling_qwen3_5.py:521-523), so cost scales with nvh, not nhk;
+  state traffic 2*kd*vd*nvh*dt read+write per token, amortized over
+  chunk_size=64 in chunked prefill; gated output norm (RMSNormGated, silu)
+  before out_proj.  Scan roofline params come from the gateddelta bench
+  (ls_* keys); without that data the sim falls back to flash-attention
+  params.
 """
 
 SPEC = {
@@ -25,6 +41,7 @@ SPEC = {
     "linear_key_head_dim": 128,
     "linear_num_value_heads": 32,
     "linear_value_head_dim": 128,
+    "linear_conv_kernel_dim": 4,
     # Layer-type pattern: linear × 3, full × 1, repeating 8 times
     "layer_types": [
         "linear", "linear", "linear", "full",
@@ -71,24 +88,35 @@ def build_graph(spec):
             def _make_full(_h=h, _nh=nh, _nh_kv=nh_kv, _hd=hd, _rd=rd, _inter=inter):
                 def _builder(ctx, hw):
                     ops = []
-                    ops += build_qkv_proj(ctx, _h, _nh, _nh_kv, _hd, hw)
+                    ops += build_qkv_proj(ctx, _h, _nh, _nh_kv, _hd, hw, q_gate=True)
+                    b_effs = ctx.b_effs
+                    overheads = ctx.overheads
+                    b_eff = b_effs.get("rmsnorm", b_effs.get("fused_residual_norm", 1e12))
+                    overhead = overheads.get("rmsnorm", 0.0)
+                    ops.append(OpSpec(
+                        name="q_norm", category="elementwise",
+                        tags=frozenset({"norm"}),
+                        N_elems=ctx.total_tokens * _nh * _hd,
+                        elem_op="rmsnorm",
+                        b_eff=b_eff,
+                        elem_overhead=overhead,
+                    ))
+                    ops.append(OpSpec(
+                        name="k_norm", category="elementwise",
+                        tags=frozenset({"norm"}),
+                        N_elems=ctx.total_tokens * _nh_kv * _hd,
+                        elem_op="rmsnorm",
+                        b_eff=b_eff,
+                        elem_overhead=overhead,
+                    ))
                     ops += build_rope(ctx, _nh, _nh_kv, _hd, _rd, hw)
                     ops += build_flash_attn(ctx, hw)
                     ops += build_o_proj(ctx, _h, _nh, _hd, hw)
                     ops.append(OpSpec(
-                        name="attn_gate_proj", category="matmul",
-                        tags=frozenset({"projection", "col_parallel"}),
-                        M=ctx.total_tokens, K=_h, N=_h,
-                        F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-                        p=ctx.matmul_p,
-                    ))
-                    b_effs = ctx.b_effs
-                    overheads = ctx.overheads
-                    ops.append(OpSpec(
                         name="attn_gate_mul",
                         category="elementwise",
                         tags=frozenset({"activation"}),
-                        N_elems=ctx.total_tokens * _h,
+                        N_elems=ctx.total_tokens * _nh * _hd,
                         elem_op="swiglu",
                         b_eff=b_effs.get("swiglu", 1e12),
                         elem_overhead=overheads.get("swiglu", 0.0),
@@ -104,10 +132,51 @@ def build_graph(spec):
         else:
             def _make_linear(_h=h, _lnkh=lnkh, _lkhd=lkhd, _lnvh=lnvh, _lvhd=lvhd, _inter=inter):
                 def _builder(ctx, hw):
+                    conv_dim = 2 * _lnkh * _lkhd + _lnvh * _lvhd
                     ops = []
                     ops += build_qk_proj(ctx, _h, _lnkh, _lnkh, _lkhd, hw)
                     ops += build_v_proj(ctx, _h, _lnvh, _lvhd, hw)
-                    ops += build_linear_scan(ctx, _h, hw)
+                    b_effs = ctx.b_effs
+                    overheads = ctx.overheads
+                    ops.append(OpSpec(
+                        name="conv1d", category="elementwise",
+                        tags=frozenset({"activation"}),
+                        N_elems=ctx.total_tokens * conv_dim,
+                        elem_op="conv1d",
+                        b_eff=b_effs.get("conv1d", b_effs.get("swiglu", 1e12)),
+                        elem_overhead=overheads.get("conv1d", 0.0),
+                    ))
+                    ops.append(OpSpec(
+                        name="in_proj_z", category="matmul",
+                        tags=frozenset({"projection", "col_parallel"}),
+                        M=ctx.total_tokens, K=_h, N=_lnvh * _lvhd,
+                        F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
+                        p=ctx.matmul_p,
+                    ))
+                    ops.append(OpSpec(
+                        name="in_proj_b", category="matmul",
+                        tags=frozenset({"projection", "col_parallel"}),
+                        M=ctx.total_tokens, K=_h, N=_lnvh,
+                        F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
+                        p=ctx.matmul_p,
+                    ))
+                    ops.append(OpSpec(
+                        name="in_proj_a", category="matmul",
+                        tags=frozenset({"projection", "col_parallel"}),
+                        M=ctx.total_tokens, K=_h, N=_lnvh,
+                        F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
+                        p=ctx.matmul_p,
+                    ))
+                    ops += build_linear_scan(ctx, _lnkh, _lkhd, _lnvh, _lvhd, hw)
+                    ops.append(OpSpec(
+                        name="linear_gate_norm",
+                        category="elementwise",
+                        tags=frozenset({"activation"}),
+                        N_elems=ctx.total_tokens * _lnvh * _lvhd,
+                        elem_op="swiglu",
+                        b_eff=b_effs.get("swiglu", 1e12),
+                        elem_overhead=overheads.get("swiglu", 0.0),
+                    ))
                     ops += build_linear_out_proj(ctx, _h, _lnvh, _lvhd, hw)
                     ops += build_fused_residual_norm(ctx, _h, hw)
                     ops += build_gate_up_proj(ctx, _h, _inter, hw)

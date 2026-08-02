@@ -67,6 +67,7 @@ ELEM_BYTES = {
     "swiglu": 3,
     "rope": 4,
     "residual_add": 3,
+    "conv1d": 8,  # depthwise conv k=4: in/out + 3-tap state read/write
 }
 
 
@@ -141,6 +142,9 @@ class StepContext:
     fa_decode_params: dict = field(default_factory=dict)
     fa_prefill_params: dict = field(default_factory=dict)
 
+    ls_decode_params: dict = field(default_factory=dict)
+    ls_prefill_params: dict = field(default_factory=dict)
+
     b_effs: dict = field(default_factory=dict)
     overheads: dict = field(default_factory=dict)
 
@@ -185,6 +189,23 @@ class StepContext:
         fa_d = _select_fa_params(n_decode, "decode", hw, nh, use_cudagraph=use_cudagraph)
         fa_p = _select_fa_params(n_prefill, "prefill", hw, nh, use_cudagraph=use_cudagraph)
 
+        # Gated delta rule scan (linear attention): dedicated fit when the
+        # gateddelta bench data exists (ls_* keys), else reuse FA params.
+        nvh_model = spec.get("linear_num_value_heads")
+        has_ls = (
+            "ls_batch_sizes" in hw or "B_peak_ls_decode" in hw
+            or "B_peak_ls_prefill" in hw
+        )
+        if has_ls and nvh_model:
+            ls_d = _select_fa_params(n_decode, "decode", hw, nvh_model,
+                                     use_cudagraph=use_cudagraph,
+                                     prefix="ls", bench_nh_key="ls_bench_nvh")
+            ls_p = _select_fa_params(n_prefill, "prefill", hw, nvh_model,
+                                     use_cudagraph=use_cudagraph,
+                                     prefix="ls", bench_nh_key="ls_bench_nvh")
+        else:
+            ls_d, ls_p = fa_d, fa_p
+
         prefill_flops = 0.0
         prefill_bytes = 0.0
         decode_flops = 0.0
@@ -224,6 +245,8 @@ class StepContext:
             matmul_p=mp["p"],
             fa_decode_params=fa_d,
             fa_prefill_params=fa_p,
+            ls_decode_params=ls_d,
+            ls_prefill_params=ls_p,
             b_effs=b_effs,
             overheads=overheads,
             kernel_overhead_us=kernel_overhead_us,
@@ -350,16 +373,21 @@ def _interp_roofline(M_total, hw, use_cudagraph=False):
     return {"F": hw[keys["F_p"]], "B": B, "p": p}
 
 
-def _select_fa_params(n_requests, regime, hw_params, nh_model=None, use_cudagraph=False):
-    """Select FlashAttention roofline params by regime + concurrent request count."""
-    cg = "_cudagraph" if (use_cudagraph and "fa_decode_B_cudagraph" in hw_params) else ""
-    batch_sizes = hw_params.get(f"fa_batch_sizes{cg}")
-    B_key = f"fa_{regime}_B{cg}"
-    p_key = f"fa_{regime}_p{cg}"
-    F_key = f"F_peak_fa_{regime}{cg}"
+def _select_fa_params(n_requests, regime, hw_params, nh_model=None,
+                      use_cudagraph=False, prefix="fa", bench_nh_key="fa_bench_nh"):
+    """Select FlashAttention roofline params by regime + concurrent request count.
+
+    `prefix` allows selecting a sibling kernel family (e.g. "ls" for the
+    gated delta rule scan) that was fitted with the same schema.
+    """
+    cg = "_cudagraph" if (use_cudagraph and f"{prefix}_decode_B_cudagraph" in hw_params) else ""
+    batch_sizes = hw_params.get(f"{prefix}_batch_sizes{cg}")
+    B_key = f"{prefix}_{regime}_B{cg}"
+    p_key = f"{prefix}_{regime}_p{cg}"
+    F_key = f"F_peak_{prefix}_{regime}{cg}"
 
     if nh_model is not None:
-        bench_nh = hw_params.get(f"fa_bench_nh{cg}", nh_model)
+        bench_nh = hw_params.get(f"{bench_nh_key}{cg}", nh_model)
         effective = n_requests * nh_model / bench_nh if bench_nh > 0 else n_requests
     else:
         effective = n_requests
@@ -390,12 +418,12 @@ def _select_fa_params(n_requests, regime, hw_params, nh_model=None, use_cudagrap
             return {"F": F, "B": B, "p": p}
 
     F_fb = hw_params.get(F_key)
-    B_fb = hw_params.get(f"B_peak_fa_{regime}{cg}")
-    p_fb = hw_params.get(f"p_fa_{regime}{cg}")
+    B_fb = hw_params.get(f"B_peak_{prefix}_{regime}{cg}")
+    p_fb = hw_params.get(f"p_{prefix}_{regime}{cg}")
     if F_fb is not None and B_fb is not None and p_fb is not None:
         return {"F": F_fb, "B": B_fb, "p": p_fb}
 
-    print(f"  [fallback] FA {regime} params not found, using matmul roofline params")
+    print(f"  [fallback] {prefix} {regime} params not found, using matmul roofline params")
     return {
         "F": hw_params[f"F_peak_{regime}{cg if cg else ''}"],
         "B": hw_params[f"B_peak_{regime}{cg if cg else ''}"],

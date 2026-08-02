@@ -160,11 +160,13 @@ class MetricsCollector:
 
 _AGGREGATION_MAP: dict[str, set[str]] = {
     "attn_proj": {"qkv_proj", "o_proj", "qk_proj", "v_proj",
-                  "out_proj", "attn_gate_proj", "attn_gate_mul"},
+                  "out_proj", "attn_gate_mul",
+                  "in_proj_z", "in_proj_b", "in_proj_a"},
     "ffn_proj": {"gate_up_proj", "down_proj"},
     "attn_prefill": {"flash_attn", "linear_scan"},
     "attn_decode": set(),
-    "fused_add_norm": {"fused_residual_norm", "rmsnorm", "residual_add"},
+    "fused_add_norm": {"fused_residual_norm", "rmsnorm", "residual_add",
+                       "q_norm", "k_norm"},
     "rope": {"rope_q", "rope_kv"},
     "swiglu": {"swiglu"},
     "lm_head": {"lm_head"},

@@ -8,9 +8,11 @@ graphs.
 from sim.graph import OpSpec
 
 
-def build_qkv_proj(ctx, h, nh, nh_kv, hd, hw) -> list[OpSpec]:
+def build_qkv_proj(ctx, h, nh, nh_kv, hd, hw, q_gate=False) -> list[OpSpec]:
     dim_q = nh * hd
     dim_kv = nh_kv * hd
+    if q_gate:
+        dim_q = 2 * dim_q
     return [OpSpec(
         name="qkv_proj", category="matmul",
         tags=frozenset({"projection", "col_parallel"}),
@@ -91,14 +93,34 @@ def build_v_proj(ctx, h, nh_v, hd, hw) -> list[OpSpec]:
     )]
 
 
-def build_linear_scan(ctx, h, hw) -> list[OpSpec]:
-    """Linear scan projection (matmul approximation)."""
+def build_linear_scan(ctx, nhk, kd, nvh, vd, hw) -> list[OpSpec]:
+    """Gated delta rule scan (attention category).
+
+    Cost scales with nvh: the model repeats Q/K to the value-head count
+    before the kernel (modeling_qwen3_5.py:521-523), so per-token cost is
+    4*kd*vd*nvh MACs.  State read+write is 2*kd*vd*nvh*dt bytes per token,
+    amortized over chunk_size=64 in chunked prefill.  Uses the gateddelta
+    bench roofline (ctx.ls_*); precompute falls back to flash-attention
+    params when the ls_* fit is absent.
+    """
+    macs = 4 * nvh * kd * vd
+    state_bytes = 2 * nvh * kd * vd * ctx.dt_bytes
+    chunk_size = 64
+    prefill_flops = prefill_bytes = decode_flops = decode_bytes = 0.0
+    for req, num_new in ctx.scheduled_requests:
+        flops = 2 * macs * num_new
+        if req.is_prefill_chunk:
+            prefill_flops += flops
+            prefill_bytes += (state_bytes / chunk_size) * num_new
+        else:
+            decode_flops += flops
+            decode_bytes += state_bytes * num_new
     return [OpSpec(
-        name="linear_scan", category="matmul",
-        tags=frozenset({"projection", "col_parallel"}),
-        M=ctx.total_tokens, K=h, N=h,
-        F_peak=ctx.matmul_F, B_peak=ctx.matmul_B,
-        p=ctx.matmul_p,
+        name="linear_scan", category="attention",
+        tags=frozenset({"attention"}),
+        prefill_flops=prefill_flops, prefill_bytes=prefill_bytes,
+        decode_flops=decode_flops, decode_bytes=decode_bytes,
+        fa_d=ctx.ls_decode_params, fa_p=ctx.ls_prefill_params,
     )]
 
 

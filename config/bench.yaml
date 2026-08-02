@@ -26,6 +26,22 @@ flashattn:
   num_kv_heads: 8
   head_dim: 128
 
+# Gated Delta Rule scan + causal depthwise conv1d (hybrid-model linear
+# attention kernels, not covered by the benches above).  Scan cost scales
+# with nvh (Q/K repeated to value-head count before the kernel).  Shapes
+# below cover the repo's hybrid models: Qwen3.5-4B (16/32) and
+# Qwen3.6-27B (16/48).  Prefers fla/causal_conv1d fused kernels when
+# installed; falls back to torch reference implementations otherwise.
+gateddelta:
+  shapes:
+    - {nhk: 16, nvh: 32, kd: 128, vd: 128}
+    - {nhk: 16, nvh: 48, kd: 128, vd: 128}
+  s_q: [16384, 4096, 1024, 128, 1]
+  batch: [64, 16, 4, 1]
+  conv_channels: [8192]
+  conv_kernel: 4
+  chunk_size: 64
+
 gpu: "3090"
 
 # Precision sweep.  fp8 requires Hopper+ (H100/H200/B200); silently OOM/skip on

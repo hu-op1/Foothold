@@ -61,7 +61,11 @@ def run_benchmarks(args):
     elem_combos = len(cfg["elementwise"]["N"]) * len(cfg["elementwise"]["operators"])
     fa_cfg = cfg.get("flashattn", {})
     fa_combos = len(fa_cfg.get("s_q", [])) * len(fa_cfg.get("s_kv", [])) if fa_cfg else 0
-    print(f"Matmul combos: {matmul_combos}, Elementwise combos: {elem_combos}, FlashAttn combos: {fa_combos}")
+    gd_cfg = cfg.get("gateddelta", {})
+    gd_combos = (len(gd_cfg.get("shapes", [])) * len(gd_cfg.get("s_q", []))
+                 * len(gd_cfg.get("batch", [1]))) if gd_cfg else 0
+    print(f"Matmul combos: {matmul_combos}, Elementwise combos: {elem_combos}, "
+          f"FlashAttn combos: {fa_combos}, GatedDelta combos: {gd_combos}")
     print("=" * 70)
 
     out_dir = bench_results_dir(cfg)
@@ -70,6 +74,7 @@ def run_benchmarks(args):
     matmul_csv = os.path.join(out_dir, "matmul.csv")
     elem_csv = os.path.join(out_dir, "elementwise.csv")
     fa_csv = os.path.join(out_dir, "flashattn.csv")
+    gd_csv = os.path.join(out_dir, "gateddelta.csv")
 
     t0 = time.perf_counter()
 
@@ -84,6 +89,12 @@ def run_benchmarks(args):
     if fa_cfg:
         tqdm.write("\n[FlashAttn]")
         bench_flashattn(cfg, output_path=fa_csv)
+        torch.cuda.empty_cache()
+
+    if cfg.get("gateddelta"):
+        tqdm.write("\n[GatedDelta]")
+        from bench.gateddelta import bench_gateddelta
+        bench_gateddelta(cfg, output_path=gd_csv)
         torch.cuda.empty_cache()
 
     if cfg.get("cudagraph"):
@@ -125,6 +136,7 @@ def run_fit(args):
     matmul_csv = os.path.join(bench_dir, "matmul.csv")
     elem_csv = os.path.join(bench_dir, "elementwise.csv")
     fa_csv = os.path.join(bench_dir, "flashattn.csv")
+    gd_csv = os.path.join(bench_dir, "gateddelta.csv")
     cg_matmul_csv = os.path.join(bench_dir, "cudagraph_matmul.csv")
     cg_elem_csv = os.path.join(bench_dir, "cudagraph_elementwise.csv")
     cg_fa_csv = os.path.join(bench_dir, "cudagraph_flashattn.csv")
@@ -133,7 +145,7 @@ def run_fit(args):
     memcpy_csv = os.path.join(bench_dir, "memcpy.csv")
 
     results = []
-    for path in [matmul_csv, elem_csv, fa_csv,
+    for path in [matmul_csv, elem_csv, fa_csv, gd_csv,
                  cg_matmul_csv, cg_elem_csv, cg_fa_csv, lo_csv, memcpy_csv]:
         if os.path.exists(path):
             results.extend(load_results(path))
