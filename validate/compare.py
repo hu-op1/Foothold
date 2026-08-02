@@ -139,6 +139,6 @@ def run_compare(config: dict, *, vllm_dir_override: str | None = None) -> None:
         plot_requests(compare_dir, prefix, requests_datasets, title)
     if latency_datasets:
         plot_latency_cdfs(compare_dir, prefix, latency_datasets, title)
-        write_summary(compare_dir, prefix, latency_datasets)
+        write_summary(compare_dir, prefix, latency_datasets, throughput_datasets, requests_datasets)
 
     print(f"Done → {compare_dir}")

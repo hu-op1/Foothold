@@ -76,6 +76,28 @@ def _mean(xs):
     return sum(xs) / len(xs) if xs else float("nan")
 
 
+def _integral_over(x, y, lo: float, hi: float) -> float:
+    """Trapezoidal integral of a curve over [lo, hi].
+
+    The curve is linearly interpolated onto the union of its own x samples
+    clipped to [lo, hi]. Returns NaN when there are < 2 points in range.
+    """
+    import numpy as np
+
+    if len(x) < 2:
+        return float("nan")
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    grid = np.unique(x)
+    grid = grid[(grid >= lo) & (grid <= hi)]
+    if grid.size < 2:
+        return float("nan")
+    yi = np.interp(grid, x, y)
+    return float(np.sum((yi[:-1] + yi[1:]) * np.diff(grid) / 2.0))
+
+
 _STATS = [
     ("Mean", _mean),
     ("Median", lambda xs: _percentile(xs, 50)),
@@ -182,12 +204,18 @@ def plot_latency_cdfs(out_dir: Path, prefix: str, datasets: list[dict], title: s
     plt.close(fig)
 
 
-def write_summary(out_dir: Path, prefix: str, latency_datasets: list[dict]) -> None:
+def write_summary(out_dir: Path, prefix: str, latency_datasets: list[dict],
+                  ts_datasets: list[dict] | None = None,
+                  req_datasets: list[dict] | None = None) -> None:
     """Multi-column latency summary.
 
     latency_datasets: list of {"ttft": [...], "tpot": [...], "lat": [...],
                                 "label": str}
     First dataset is the reference for Diff% columns.
+    When ts_datasets/req_datasets are given, an "area" section is appended:
+    each curve's own integral over the common overlapping x-range (not the
+    difference), plus each simulator's relative error vs the reference
+    (vLLM when present, else the first dataset) — 0% = identical.
     """
     labels = [ds["label"] for ds in latency_datasets]
     ref_label = labels[0]
@@ -220,6 +248,116 @@ def write_summary(out_dir: Path, prefix: str, latency_datasets: list[dict]) -> N
                 line += f"{diff:>{col_w}.1f}%"
             lines.append(line)
         lines.append("")
+
+    # ── Own-curve areas over the common overlap (vs reference) ────────
+    ref_ds = next((ds for ds in latency_datasets if ds["label"] == "vLLM"), None)
+    if ref_ds is None:
+        ref_ds = latency_datasets[0]
+    area_ref = ref_ds["label"]
+    area_rows = []
+
+    def _ts_area_row(datasets, xkey, ykey, metric):
+        if not datasets:
+            return
+        ref = next((d for d in datasets if d["label"] == area_ref), None)
+        if ref is None:
+            return
+        others = [d for d in datasets if d["label"] != area_ref]
+        if not others:
+            return
+        area_rows.append((metric, ref, others, lambda ds: (ds[xkey], ds[ykey])))
+
+    _ts_area_row(ts_datasets, "t", "prompt", "Prompt throughput")
+    _ts_area_row(ts_datasets, "t", "gen", "Generation throughput")
+    _ts_area_row(req_datasets, "t", "running", "Running")
+    _ts_area_row(req_datasets, "t", "waiting", "Waiting")
+
+    if ref_ds:
+        others = [d for d in latency_datasets if d["label"] != area_ref]
+        if others:
+            for metric_name, key in [("TTFT", "ttft"), ("TPOT", "tpot"), ("Latency", "lat")]:
+                rx, ry = _cdf(ref_ds[key])
+                if not rx:
+                    continue
+                area_rows.append((f"{metric_name} CDF", ref_ds, others,
+                                  lambda ds, k=key: _cdf(ds[k])))
+
+    if area_rows:
+        col_w = 12
+        sim_labels = sorted({d["label"] for _, _, others, _ in area_rows for d in others})
+        all_labels = [area_ref] + sim_labels
+
+        def _fmt(v, pct=False):
+            if v != v:
+                return f"{'nan':>{col_w}}"
+            return f"{v:>{col_w}.1f}%" if pct else f"{v:>{col_w}.1f}"
+
+        # ── each curve's own area over the common overlap ──
+        rows = []
+        for metric, ref, others, xy in area_rows:
+            curves = [(ref, *xy(ref))] + [(d, *xy(d)) for d in others]
+            if any(len(c[1]) < 2 for c in curves):
+                continue
+            lo = max(c[1][0] for c in curves)
+            hi = min(c[1][-1] for c in curves)
+            if hi > lo:
+                areas = {c[0]["label"]: _integral_over(c[1], c[2], lo, hi) for c in curves}
+            else:
+                areas = {c[0]["label"]: float("nan") for c in curves}
+            rows.append((metric, areas))
+
+        lines.append(f"Curve area over the overlapping x-range (own integral):")
+        header = f"{'Metric':<25}" + "".join(f"{lb:>{col_w}}" for lb in all_labels)
+        lines.append(header)
+        lines.append("-" * len(header))
+        for metric, areas in rows:
+            line = f"{metric:<25}"
+            for lb in all_labels:
+                line += _fmt(areas[lb])
+            lines.append(line)
+        lines.append("")
+
+        # ── relative error vs reference ──
+        lines.append(f"Relative error vs {area_ref} (0% = identical):")
+        header = f"{'Metric':<25}" + "".join(f"{lb:>{col_w}}" for lb in sim_labels)
+        lines.append(header)
+        lines.append("-" * len(header))
+        n = len(sim_labels)
+        tot_dev = [0.0] * n
+        counts = [0] * n
+        wins = [0] * n
+        rows_with_best = 0
+        for metric, areas in rows:
+            ref_area = areas[area_ref]
+            line = f"{metric:<25}"
+            best_i, best_v = None, None
+            for i, lb in enumerate(sim_labels):
+                a = areas[lb]
+                r = a / ref_area * 100.0 - 100.0 if ref_area and ref_area == ref_area else float("nan")
+                line += _fmt(r, pct=True)
+                if r == r:
+                    dev = abs(r)
+                    tot_dev[i] += dev
+                    counts[i] += 1
+                    if best_v is None or dev < best_v:
+                        best_v, best_i = dev, i
+            if best_i is not None:
+                wins[best_i] += 1
+                rows_with_best += 1
+            lines.append(line)
+        lines.append("")
+        total_line = f"{'Total |dev|':<25}"
+        for i in range(n):
+            total_line += _fmt(tot_dev[i] if counts[i] else float("nan"))
+        lines.append(total_line)
+
+        valid = [i for i in range(n) if counts[i]]
+        if valid:
+            best = min(valid, key=lambda i: tot_dev[i])
+            lines.append("")
+            lines.append(f"Closest to {area_ref}: {sim_labels[best]} "
+                         f"(total dev {tot_dev[best]:.1f}%, "
+                         f"wins {wins[best]}/{rows_with_best})")
 
     fname = f"{prefix}summary.txt" if prefix else "summary.txt"
     (out_dir / fname).write_text("\n".join(lines))
