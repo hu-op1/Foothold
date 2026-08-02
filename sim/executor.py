@@ -3,7 +3,7 @@
 from math import log, exp, log2
 
 from sim.roofline import dtype_bytes
-from sim.graph import StepContext, ModelGraph, apply_tp, apply_ep, apply_pp
+from sim.graph import StepContext, ModelGraph, apply_tp, apply_ep
 from sim.communication import _transfer_time
 
 
@@ -46,7 +46,7 @@ def _inter_stage_time(total_tokens: int, h: int, dt_bytes: int,
 
 
 def predict_step(scheduled_requests, model_spec, graph, hw_params,
-                 tp=1, pp=1, ep=0, pp_stage=0, cross_node_hops=0,
+                 tp=1, pp=1, ep=0, cross_node_hops=0,
                  dtype="float16", use_cudagraph=False,
                  comm_model="lut", comm_intra_bw_gb_s=9.7, comm_intra_latency_us=2.0,
                  comm_inter_bw_gb_s=9.7, comm_inter_latency_us=6.9,
@@ -91,9 +91,12 @@ def predict_step(scheduled_requests, model_spec, graph, hw_params,
         g = apply_tp(g, ctx, tp)
     if ep > 1:
         g = apply_ep(g, ctx, ep)
-    if pp > 1:
-        g = apply_pp(g, ctx, pp, pp_stage, cross_node_hops)
-
+    # PP: a scheduler step's whole batch is a single micro-batch that
+    # traverses every stage serially (vLLM has no intra-step PP micro-
+    # batching — see gpu_worker.py recv→compute→send per step).  The wall
+    # time is therefore the FULL graph traversal (all pp stages), not a
+    # single stage: PP reduces per-GPU compute but not per-step latency
+    # (validated: vLLM pp=2 TPOT 18.4ms ≈ pp=1 traversal 17.4ms).
     result = g.evaluate(ctx, hw_params)
 
     # PP inter-stage communication (hidden-state transfer between stages)

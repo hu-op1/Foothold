@@ -791,7 +791,7 @@ class SimulationEngine:
         cross = pp_cross_node_hops(pp, tp, self.gpus_per_node) if self.gpus_per_node and pp > 1 else 0
         return predict_step(
             scheduled_requests, self.model, self.graph, self.hw,
-            tp=tp, pp=pp, ep=ep_size if self.enable_ep else 0, pp_stage=0,
+            tp=tp, pp=pp, ep=ep_size if self.enable_ep else 0,
             cross_node_hops=cross,
             dtype=self.dtype, use_cudagraph=use_cg,
             comm_model=self._comm_model,
