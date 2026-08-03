@@ -18,24 +18,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# FlashAttention-2/3 — Linux-only, CUDA required.
-# Install with: uv sync --extra linux
+# CUDA-required extras — Linux-only (no wheels for Windows).
+# Merged `linux` extra: flash-attn + fla (flash-linear-attention + causal-conv1d,
+# Fused Gated DeltaNet kernels) + embedded vLLM (validate/send.py embedded mode).
+# The gateddelta bench prefers the fla kernels; falls back to the torch reference
+# implementation (slower) when absent; re-run bench + fit after installing.
+# Install with: uv sync --all-extras --no-build-isolation
+# (bare `uv sync` installs only base deps and uninstalls extras; --no-build-isolation
+#  builds source dists against the venv's torch instead of an isolated env)
+# These build from source and need nvcc (CUDA toolkit) reachable, e.g.:
+#   export PATH="/usr/local/cuda-12.8/bin:$PATH"
+# If manual installation fails, install with the following command:
+#   export MAX_JOBS=2 && uv pip install --no-build-isolation "flash-attn>=2.7.0" "flash-linear-attention" "causal-conv1d" "vllm==0.19.0"
 linux = [
     "flash-attn>=2.7.0",
-]
-# Fused Gated DeltaNet kernels (fla, PyPI name flash-linear-attention) +
-# causal conv1d — Linux-only CUDA kernels.  The gateddelta bench prefers
-# them; falls back to the torch reference implementation (slower) when
-# absent, and bench + fit must be re-run after installing.
-# Install with: uv sync --extra fla
-fla = [
     "flash-linear-attention",
     "causal-conv1d",
-]
-# Embedded vLLM benchmark (validate/send.py embedded mode).
-# Linux-only — no vLLM pre-built wheels for Windows.
-# Install with: uv sync --extra vllm
-vllm = [
     "vllm==0.19.0",
 ]
 dev = [

@@ -9,7 +9,7 @@ LLM 推理性能工具链：**GPU 微基准 → Roofline 拟合 → PD 分离仿
 - 包管理器：`uv`
 
 ```bash
-uv sync
+uv sync --all-extras --no-build-isolation   # install ALL deps incl. CUDA kernels (flash-attn, fla, causal-conv1d, vllm) + dev; bare `uv sync` uninstalls extras
 ```
 
 ## 整体流程

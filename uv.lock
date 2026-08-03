@@ -728,23 +728,19 @@ dev = [
     { name = "pytest" },
     { name = "vulture" },
 ]
-fla = [
-    { name = "causal-conv1d" },
-    { name = "flash-linear-attention" },
-]
 linux = [
+    { name = "causal-conv1d" },
     { name = "flash-attn" },
-]
-vllm = [
+    { name = "flash-linear-attention" },
     { name = "vllm" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "causal-conv1d", marker = "extra == 'fla'" },
+    { name = "causal-conv1d", marker = "extra == 'linux'" },
     { name = "datasets" },
     { name = "flash-attn", marker = "extra == 'linux'", specifier = ">=2.7.0" },
-    { name = "flash-linear-attention", marker = "extra == 'fla'" },
+    { name = "flash-linear-attention", marker = "extra == 'linux'" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "openai", specifier = ">=2.48.0" },
@@ -756,10 +752,10 @@ requires-dist = [
     { name = "torch", specifier = "==2.10.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "tqdm", specifier = ">=4.65.0" },
     { name = "transformers" },
-    { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.19.0" },
+    { name = "vllm", marker = "extra == 'linux'", specifier = "==0.19.0" },
     { name = "vulture", marker = "extra == 'dev'", specifier = ">=2.11" },
 ]
-provides-extras = ["linux", "fla", "vllm", "dev"]
+provides-extras = ["linux", "dev"]
 
 [[package]]
 name = "frozenlist"

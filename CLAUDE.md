@@ -27,7 +27,9 @@ config/bench.yaml  →  fit/  →  fit/results/<gpu>.json     │
 ## Commands
 
 ```bash
-uv sync                                              # Install deps (PyTorch CUDA 12.8 via tsinghua mirror)
+uv sync --all-extras --no-build-isolation          # Install ALL deps incl. CUDA kernels (flash-attn, fla, causal-conv1d, vllm) + dev
+# NOTE: bare `uv sync` installs only base deps and uninstalls extras from an existing venv — always pass --all-extras.
+#       --no-build-isolation builds source dists (flash-attn etc.) against the venv's torch instead of an isolated env.
 
 # Benchmarking (stage 1)
 uv run python main.py bench                          # Run all benchmarks → bench/results/<gpu>/
