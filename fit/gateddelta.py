@@ -100,8 +100,15 @@ def _fit_scan_dtype(results, label_suffix=""):
 
         p_p = _fit_subset(prefill_b, f"prefill b={b_val}{label_suffix}",
                           F_fixed=F_shared, min_points=4)
-        p_d = _fit_subset(decode, f"decode  b={b_val}{label_suffix}",
-                          F_fixed=F_shared, min_points=3)
+        # Decode has exactly one point per batch (s_q=1), so a per-batch
+        # (B, p) fit is impossible; skip it instead of spamming the
+        # misleading "too few points" log.  The decode batch curve comes
+        # from the all-batch fit below (the batch sweep provides the
+        # 3+ points).  Kept as a guard so extra decode s_q values in the
+        # grid would re-enable the per-batch fit automatically.
+        p_d = (_fit_subset(decode, f"decode  b={b_val}{label_suffix}",
+                           F_fixed=F_shared, min_points=3)
+               if len(decode) >= 3 else {})
 
         prefill_B.append(p_p.get("B_peak", 0.0))
         prefill_p.append(p_p.get("p", 1.0))

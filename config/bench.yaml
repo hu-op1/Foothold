@@ -36,9 +36,17 @@ gateddelta:
   shapes:
     - {nhk: 16, nvh: 32, kd: 128, vd: 128}
     - {nhk: 16, nvh: 48, kd: 128, vd: 128}
-  s_q: [16384, 4096, 1024, 128, 1]
-  batch: [64, 16, 4, 1]
-  conv_channels: [8192]
+  # s_q grid: dense prefill points (32768 for ≤32K prefill chunks, matching
+  # matmul/FA grids) so every batch keeps >=4 prefill points after the OOM
+  # filter (b=64 hits the memory ceiling above s_q=2048, b=16 above 8192).
+  s_q: [32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128, 1]
+  # batch up to 256 for decode-concurrency coverage (sim clamps the batch
+  # curve to the largest anchor); b=128/256 prefill points are OOM-limited
+  # to small s_q, which is fine — the prefill anchors live at b<=64.
+  batch: [256, 128, 64, 16, 4, 1]
+  # 8192 = Qwen3.5-4B/9B conv_dim (2*16*128 + 32*128), 10240 = Qwen3.6-27B
+  # (2*16*128 + 48*128).
+  conv_channels: [8192, 10240]
   conv_kernel: 4
   chunk_size: 64
 
