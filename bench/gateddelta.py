@@ -300,10 +300,14 @@ def bench_gateddelta(config, output_path="results/gateddelta.csv"):
                     continue
 
                 # Torch reference casts to float32 and builds chunked
-                # intermediates (~6x input bytes); conservative for the
-                # fused kernels too.
-                act_gb = (b_val * s_q * nvh * (2 * kd + vd) * dt_bytes * 6
-                          + b_val * nvh * kd * vd * 8) / (1024 ** 3)
+                # intermediates (~6x input bytes); the fused fla kernels
+                # operate in dtype with far less scratch (~2x input).
+                if _HAS_FLA:
+                    act_gb = (b_val * s_q * nvh * (2 * kd + vd) * dt_bytes * 2
+                              + b_val * nvh * kd * vd * 8) / (1024 ** 3)
+                else:
+                    act_gb = (b_val * s_q * nvh * (2 * kd + vd) * dt_bytes * 6
+                              + b_val * nvh * kd * vd * 8) / (1024 ** 3)
                 if not check_memory(act_gb, max_mem):
                     row = {
                         "op_name": "gated_delta_rule", "dtype": dt_name,

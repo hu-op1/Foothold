@@ -23,6 +23,15 @@ dependencies = [
 linux = [
     "flash-attn>=2.7.0",
 ]
+# Fused Gated DeltaNet kernels (fla, PyPI name flash-linear-attention) +
+# causal conv1d — Linux-only CUDA kernels.  The gateddelta bench prefers
+# them; falls back to the torch reference implementation (slower) when
+# absent, and bench + fit must be re-run after installing.
+# Install with: uv sync --extra fla
+fla = [
+    "flash-linear-attention",
+    "causal-conv1d",
+]
 # Embedded vLLM benchmark (validate/send.py embedded mode).
 # Linux-only — no vLLM pre-built wheels for Windows.
 # Install with: uv sync --extra vllm
