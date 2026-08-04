@@ -146,7 +146,13 @@ def _csv_key(result, key_fields):
 
 
 def load_completed_keys(csv_path, key_fields):
-    """Read existing CSV and return {key_tuple, ...} for resume."""
+    """Read existing CSV and return {key_tuple, ...} for resume.
+
+    OOM rows count as completed, so with overwrite=false previously-OOM
+    combos are skipped instead of re-measured on every run.  Set
+    overwrite=true to re-benchmark everything (including combos that may
+    have freed up since last measured).
+    """
     keys = set()
     if not os.path.exists(csv_path):
         return keys
@@ -154,13 +160,53 @@ def load_completed_keys(csv_path, key_fields):
         with open(csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # Skip OOM rows — they need to be re-measured
-                if row.get("time_ms") == "OOM":
-                    continue
                 keys.add(_csv_key(row, key_fields))
     except Exception:
         pass
     return keys
+
+
+def deduplicate_csv(path, key_fields):
+    """Rewrite *path* keeping one row per key; return rows dropped.
+
+    A measured row wins over an OOM row for the same key (the measured
+    value supersedes an earlier OOM marker, e.g. after a combo that used
+    to OOM now fits); among rows with equal precedence the most recently
+    written row is kept.  This clears the duplicate OOM rows that
+    accumulated from pre-fix runs where OOM combos were re-appended on
+    every resume.
+    """
+    if not os.path.exists(path):
+        return 0
+    with open(path, "r", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return 0
+    fieldnames = list(rows[0].keys())
+    best = {}
+    for row in rows:
+        k = _csv_key(row, key_fields)
+        # precedence: measured (0) beats OOM (1); `<=` keeps the later row on ties
+        prec = 1 if row.get("time_ms") == "OOM" else 0
+        cur = best.get(k)
+        if cur is None or prec <= cur[0]:
+            best[k] = (prec, row)
+    kept = [r for _, r in best.values()]
+    # write to a temp file then atomically replace, so an interruption
+    # never leaves a truncated result CSV
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(kept)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return len(rows) - len(kept)
 
 
 def append_csv_row(path, fieldnames, row_dict):

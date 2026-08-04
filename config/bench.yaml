@@ -64,7 +64,8 @@ warmup_ratio: 0.1        # fraction of estimated iters used when warmup=auto
 min_time_ms: 1000
 max_iters: 100000
 calib_iters: 20  # initial calibration batch — higher = more accurate per-iter estimate
-overwrite: true  # true = delete existing CSV and re-benchmark everything
+overwrite: false  # true = delete existing CSV and re-benchmark everything
+                  # false = resume: skip combos already in the CSV, including OOM rows
 max_memory_gb: 24
 
 # ── CUDA Graph replay benchmark ──────────────────────────────────────────
