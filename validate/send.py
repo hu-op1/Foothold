@@ -31,6 +31,7 @@ from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
 from sim.trace import load_trace
+from validate import server as server_utils
 
 @dataclass
 class _MetricsSample:
@@ -137,36 +138,54 @@ def run_send(config: dict) -> None:
         print("vllm.trace_path is required in config")
         return
 
-    requests = load_trace(trace_path, max_requests=max_requests, format=trace_format)
-    total_requests = len(requests)
-    print(f"Loaded {total_requests} requests from {trace_path} (format={trace_format})")
+    # Auto-start an external vLLM server if nothing is answering at the
+    # endpoint yet (serve argv is built from engine_args + the optional
+    # server flags).  If a server is already running it is reused untouched.
+    server = None
+    if not server_utils.endpoint_reachable(endpoint):
+        server = server_utils.spawn_server(vllm_cfg, output_dir)
+        try:
+            server_utils.wait_for_server(
+                endpoint, proc=server.proc, log_path=server.log_path
+            )
+        except Exception:
+            server_utils.stop_server(server)
+            raise
 
-    print(f"Loading tokenizer: {tokenizer_id}")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+    try:
+        requests = load_trace(trace_path, max_requests=max_requests, format=trace_format)
+        total_requests = len(requests)
+        print(f"Loaded {total_requests} requests from {trace_path} (format={trace_format})")
 
-    print(f"Endpoint: {endpoint}")
-    print(f"Model: {model}  Concurrency: {max_concurrency}")
+        print(f"Loading tokenizer: {tokenizer_id}")
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
 
-    started_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        print(f"Endpoint: {endpoint}")
+        print(f"Model: {model}  Concurrency: {max_concurrency}")
 
-    client = AsyncOpenAI(base_url=endpoint, api_key=api_key, timeout=timeout)
+        started_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 
-    metrics_url = f"{_metrics_base_url(endpoint)}/metrics"
-    print(f"Metrics polling: {metrics_url}")
+        client = AsyncOpenAI(base_url=endpoint, api_key=api_key, timeout=timeout)
 
-    request_records, metric_samples = asyncio.run(_send_all(
-        requests, client, model, tokenizer, max_concurrency, trace_format,
-        metrics_url, tick_seconds,
-    ))
+        metrics_url = f"{_metrics_base_url(endpoint)}/metrics"
+        print(f"Metrics polling: {metrics_url}")
 
-    finished_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        request_records, metric_samples = asyncio.run(_send_all(
+            requests, client, model, tokenizer, max_concurrency, trace_format,
+            metrics_url, tick_seconds,
+        ))
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    _write_meta(output_dir, model, trace_path, started_at, finished_at, len(request_records))
-    _write_requests(output_dir, request_records)
-    _write_timeseries(output_dir, metric_samples, tick_seconds)
+        finished_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 
-    print(f"Done → {output_dir}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _write_meta(output_dir, model, trace_path, started_at, finished_at, len(request_records))
+        _write_requests(output_dir, request_records)
+        _write_timeseries(output_dir, metric_samples, tick_seconds)
+
+        print(f"Done → {output_dir}")
+    finally:
+        if server is not None:
+            server_utils.stop_server(server)
 
 async def _send_all(
     requests,
@@ -373,6 +392,17 @@ def run_send_embedded(config: dict) -> None:
     tp = engine_cfg.get("tensor_parallel_size", 1)
     print(f"Model: {model}  TP={tp}")
 
+    # default_chat_template_kwargs is a vLLM serve/frontend option (not an
+    # AsyncEngineArgs field); embedded mode sends raw token prompts and applies
+    # no chat template, so it cannot be honored here.
+    if engine_cfg.get("default_chat_template_kwargs"):
+        print(
+            "[WARNING] default_chat_template_kwargs is a `vllm serve` "
+            "frontend option and is ignored in embedded mode (raw token "
+            "prompts bypass the chat template). Set it when launching an "
+            "external `vllm serve` (embedded: false)."
+        )
+
     started_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 
     engine_args = AsyncEngineArgs(
@@ -390,6 +420,9 @@ def run_send_embedded(config: dict) -> None:
         load_format=engine_cfg.get("load_format", "auto"),
         enforce_eager=engine_cfg.get("enforce_eager", False),
         gpu_memory_utilization=engine_cfg.get("gpu_memory_utilization", 0.9),
+        # Optional server flags (null/false = vLLM defaults)
+        language_model_only=engine_cfg.get("language_model_only", False),
+        reasoning_parser=engine_cfg.get("reasoning_parser") or "",
     )
 
     BenchStatLogger.reset()

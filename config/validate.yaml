@@ -26,11 +26,11 @@ vllm:
   # with custom StatLoggerBase for per-iteration stats (accurate
   # throughput, no /metrics polling).  Requires dedicated GPUs —
   # cannot coexist with a running vLLM server.
-  embedded: true
+  embedded: false
   # OpenAI-compatible API base URL (ignored when embedded: true)
   endpoint: "http://localhost:8000/v1"
   # Required: model name served by vLLM
-  model: Qwen/Qwen3-4B
+  model: Qwen/Qwen3.5-4B
   # Auto from OPENAI_API_KEY env if null
   api_key: dummy
   # Per-request timeout seconds
@@ -39,7 +39,7 @@ vllm:
   # Trace timestamps control when, this controls how many at once.
   max_concurrency: 256
   # Required: path to JSONL trace file
-  trace_path: traces/qwen3-4b-agentic.jsonl
+  trace_path: traces/qwen35-4b-conversation.jsonl
   # "sharegpt" or "agentic"
   trace_format: agentic
   # Cap on trace requests (null = all)
@@ -51,9 +51,19 @@ vllm:
   # Timeseries bucket size (seconds)
   tick_seconds: 0.5
 
-  # ── Embedded engine args (only used when embedded: true) ──
+  # ── Server mode (embedded: false) ──
+  # With embedded: false the sender talks to an OpenAI-compatible vLLM server
+  # at `endpoint`.  If nothing answers there, the server is started
+  # automatically from `engine_args` (incl. the optional server flags below),
+  # waited until ready, then shut down after the run.  A server already
+  # running at the endpoint is reused and left untouched.
+  #   embedded: true  -> AsyncLLM in-process (raw token prompts, no chat template)
+  #   embedded: false -> external `vllm serve` via /v1/chat/completions
+  #                      (chat template applied -> enable_thinking honored)
+
+  # ── Engine / server args (embedded engine AND auto-spawned serve) ──
   engine_args:
-    tensor_parallel_size: 2
+    tensor_parallel_size: 1
     pipeline_parallel_size: 1
     data_parallel_size: 1
     max_num_seqs: 256
@@ -66,3 +76,17 @@ vllm:
     load_format: dummy
     enforce_eager: false
     gpu_memory_utilization: 0.89
+
+    # ── Optional server flags (mirror vLLM serve CLI names) ──
+    # Only load the language model, skipping vision/multimodal towers
+    # (vLLM serve --language-model-only).
+    language_model_only: true
+    # Reasoning parser for splitting reasoning/content from outputs
+    # (vLLM serve --reasoning-parser).  "qwen3" for Qwen3-style reasoning.
+    # Set to null to omit the --reasoning-parser flag entirely.
+    reasoning_parser: qwen3
+    # Default chat-template kwargs for the OpenAI chat frontend
+    # (vLLM serve --default-chat-template-kwargs) — disables Qwen thinking.
+    # Only applies in external serve mode (embedded: false); the embedded
+    # engine sends raw token prompts and applies no chat template.
+    default_chat_template_kwargs: {"enable_thinking": false}
