@@ -287,20 +287,12 @@ score = throughput if slo_pass else 0
 
 ## Trace 生成工具 — `tools/`
 
-### Agent Trace
-
-从 HuggingFace agent 会话数据集生成 agentic JSONL trace，适用于模拟 agentic 工作负载（含 tool calling 停顿）。
-
-```bash
-uv run python tools/generate_agent_trace.py --model Qwen/Qwen3-8B --sps 0.05
-uv run python tools/generate_agent_trace.py --model Qwen/Qwen3-8B --sps 0.2 --max-sessions 500 --output traces/my.jsonl
-```
-
 ### Conversation Trace
 
-从对话数据集（HF 或本地 JSONL）生成 ShareGPT 格式 JSONL trace。
+从本地 agent 会话 trace 目录（`reference/DeepSeek-v4-Pro-Agent`，默认）或对话数据集（HF 或本地 JSONL）生成 agentic JSONL trace。数据集读取完全离线，仅 `--model` 的 tokenizer 需连接 HF。
 
 ```bash
+uv run python tools/generate_conversation_trace.py --model Qwen/Qwen3-8B --sps 1.0 --num-reqs 200
 uv run python tools/generate_conversation_trace.py --dataset <hf_dataset> --model Qwen/Qwen3-8B --sps 1.0
 ```
 
@@ -376,8 +368,7 @@ foothold/
 │   ├── compare.py              # 结果比较
 │   └── gemm.py                 # GEMM 测试
 ├── tools/                      # 辅助脚本
-│   ├── generate_agent_trace.py # 从 HF agent 数据集生成 agentic JSONL trace
-│   └── generate_conversation_trace.py  # 从对话数据集生成 ShareGPT JSONL trace
+│   └── generate_conversation_trace.py  # 从本地 agent trace 目录 / 对话数据集生成 agentic JSONL trace
 ├── traces/                     # 请求 trace 文件（JSONL）
 ├── bench/results/<gpu>/        # [gitignored] benchmark 输出
 ├── fit/results/                # [gitignored] 拟合结果

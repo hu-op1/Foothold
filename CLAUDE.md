@@ -53,7 +53,7 @@ uv run python main.py --validate --vllm              # Send trace to vLLM via Op
 uv run python main.py --validate --compare           # Compare sim vs vLLM output
 
 # Trace generation tools
-uv run python tools/generate_agent_trace.py --model Qwen/Qwen3-8B --sps 0.05
+uv run python tools/generate_conversation_trace.py --model Qwen/Qwen3-8B --sps 1.0   # local trace dir (default)
 uv run python tools/generate_conversation_trace.py --dataset <hf_ds> --model Qwen/Qwen3-8B --sps 1.0
 
 # Tests

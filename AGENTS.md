@@ -20,7 +20,7 @@ AI coding agent guidance for this repository. See [CLAUDE.md](CLAUDE.md) for ful
 - Model specs defined in `models/*.py` — each file exports a `SPEC` dict + `build_graph(spec)`, loaded via `sim/config.py:load_model_spec()`/`load_model_graph()`. YAML `model:` values (full HF IDs, short names, or paths) resolve to these files; no HuggingFace Hub or local `config.json` needed.
 - `sim/` uses a computation-graph executor: `sim/graph.py` (`OpSpec`, `ModelGraph`, TP/EP/PP transforms) + `sim/layers/` builders; per-model graphs come from `models/*.py`
 - Trace format: `sharegpt` (one JSONL line per request, optional `input_tok_ids`/`output_tok_ids`) or `agentic` (session chains with sub-requests, `tool_duration`)
-- Trace generation tools in `tools/`: `generate_agent_trace.py` (agentic format) and `generate_conversation_trace.py` (sharegpt format)
+- Trace generation tools in `tools/`: `generate_conversation_trace.py` (agentic format, default dataset = local `reference/DeepSeek-v4-Pro-Agent` trace dir; tokenizer still from HF)
 
 ## External repos (standalone — not part of this project, do not modify or import)
 

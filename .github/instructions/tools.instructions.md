@@ -1,35 +1,19 @@
 ---
-description: "Use when adding or modifying trace generation tools in tools/. Covers the two generators, their CLI args, output schema, and arrival-rate modeling."
+description: "Use when adding or modifying trace generation tools in tools/. Covers the generator, its CLI args, output schema, and arrival-rate modeling."
 applyTo: "tools/**/*.py"
 ---
 
 # tools/ — Trace Generation
 
-Two standalone scripts convert real data into JSONL traces that `sim/trace.py` loads. Run with `uv run python tools/<script>.py`.
+One standalone script converts real data into JSONL traces that `sim/trace.py` loads. Run with `uv run python tools/<script>.py`.
 
-## generate_agent_trace.py (agentic format)
+## generate_conversation_trace.py (agentic)
 
-Streams the HF dataset `ansulev/DeepSeek-v4-Pro-Agent` and rebuilds token IDs with the model's tokenizer (`apply_chat_template`).
-
-| Arg | Meaning |
-|-----|---------|
-| `--model` | required — HF model ID for the tokenizer |
-| `--sps` | required — sessions/sec arrival rate |
-| `--output` | default `traces/agent_trace.jsonl` |
-| `--max-sessions` | 0 = all |
-| `--seed` | default 42 |
-
-- Arrival times synthesized with **uniform spacing** `1/sps`.
-- Last sub-request of each session has `tool_duration_ns=0`; others random 0–10 s.
-- `session_id` renumbered 0,1,2…; sessions sorted by original arrival time.
-
-## generate_conversation_trace.py (sharegpt/agentic)
-
-Reads an HF dataset ID or a local JSONL/parquet directory.
+Reads an HF dataset ID, a local JSONL/parquet directory, or the local agent-session trace dir.
 
 | Arg | Meaning |
 |-----|---------|
-| `--dataset` | required |
+| `--dataset` | default `reference/DeepSeek-v4-Pro-Agent` — local agent-session trace dir (one JSONL per session, trace-event format, read fully offline); HF ids and local JSONL/parquet dirs still supported |
 | `--model` | required |
 | `--sps` | required — sessions/sec |
 | `--num-reqs` | default 0 = all |
@@ -41,9 +25,9 @@ Reads an HF dataset ID or a local JSONL/parquet directory.
 | `--split` | default `train` |
 | `--no-stream` | disable streaming |
 
-- Arrival times use a **Poisson process** (`expovariate`) — differs from the agent generator's uniform spacing.
-- Parses `messages` / `conversations` / `instruction-output` formats.
-- Single-turn conversations are split into multiple sub-requests with growing context.
+- Arrival times use a **Poisson process** (`expovariate`).
+- Trace-event sessions (developer/user/assistant/toolResult) are converted to messages; assistant chains (incl. tool-call markers) become growing-context sub-requests.
+- Parses `messages` / `conversations` / `instruction-output` formats for other datasets.
 
 ## Output schema (shared)
 
