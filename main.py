@@ -127,6 +127,33 @@ def run_benchmarks(args):
           + (f", {fa_csv}" if fa_cfg else "") + cg_info + lo_info + mc_info)
 
 
+def _run_bench_with_auto_resume(args):
+    """Run the bench; on a CUDA kernel fault, auto-restart to resume the grid.
+
+    An illegal-memory-access kernel fault (fla 0.5.2's fused_recurrent has these
+    intermittently) poisons the whole CUDA context, so it cannot be skipped
+    in-process — every later call fails too.  bench_gateddelta records the
+    faulting combo as OOM before raising KernelFaultError, so restarting with
+    overwrite=false skips it and continues.  This wrapper makes that restart
+    automatic instead of requiring the user to rerun by hand.
+    """
+    from bench.gateddelta import KernelFaultError
+    retries = int(os.environ.get("BENCH_KERNEL_FAULT_RETRIES") or "0")
+    try:
+        run_benchmarks(args)
+    except KernelFaultError as exc:
+        print(f"\n[bench] CUDA kernel fault: {exc}", file=sys.stderr)
+        print(f"[bench] faulting combo recorded as OOM; restarting ({retries + 1}) "
+              "to resume the rest of the grid.", file=sys.stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        if retries >= 30:
+            print("[bench] too many kernel-fault restarts; giving up.", file=sys.stderr)
+            sys.exit(1)
+        os.environ["BENCH_KERNEL_FAULT_RETRIES"] = str(retries + 1)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 def run_fit(args):
     from fit import load_results, fit_all, save_fitted_params
 
@@ -314,7 +341,7 @@ def main():
 
     if args.bench:
         args.config = args.config or "config/bench.yaml"
-        run_benchmarks(args)
+        _run_bench_with_auto_resume(args)
     elif args.fit is not None:
         args.config = args.config or "config/bench.yaml"
         args.fit_dir = args.dir or args.fit or ""

@@ -26,6 +26,15 @@ from tqdm import tqdm
 from bench.utils import (warmup, benchmark, auto_warmup_iters, check_memory,
                          load_completed_keys, append_csv_row)
 
+
+class KernelFaultError(RuntimeError):
+    """A CUDA kernel fault (e.g. illegal memory access) poisoned the context.
+
+    The faulting combo is recorded as OOM in the CSV before this is raised, so
+    a rerun with overwrite=false resumes past it.  main.py auto-restarts the
+    process on this exception instead of forcing the user to rerun by hand.
+    """
+
 # ── Optional fused kernels ──────────────────────────────────────────────
 try:
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
@@ -74,6 +83,13 @@ def torch_chunk_gated_delta_rule(
     query, key, value, beta, g = [
         x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
     ]
+    # GVA: repeat Q/K to the value-head count so every head lines up — the
+    # fused kernels and modeling_qwen3_5.py repeat Q/K before the recurrence.
+    nvh = value.shape[1]
+    if key.shape[1] != nvh:
+        rep = nvh // key.shape[1]
+        query = query.repeat_interleave(rep, dim=1)
+        key = key.repeat_interleave(rep, dim=1)
 
     batch_size, num_heads, sequence_length, k_head_dim = key.shape
     v_head_dim = value.shape[-1]
@@ -144,6 +160,13 @@ def torch_recurrent_gated_delta_rule(
     query, key, value, beta, g = [
         x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
     ]
+    # GVA: repeat Q/K to the value-head count so every head lines up (see
+    # torch_chunk_gated_delta_rule).
+    nvh = value.shape[1]
+    if key.shape[1] != nvh:
+        rep = nvh // key.shape[1]
+        query = query.repeat_interleave(rep, dim=1)
+        key = key.repeat_interleave(rep, dim=1)
 
     batch_size, num_heads, sequence_length, k_head_dim = key.shape
     v_head_dim = value.shape[-1]
@@ -192,24 +215,27 @@ def torch_causal_conv1d_fn(hidden_states, weight, bias=None, activation=None, **
 
 
 # ── Analytical flops/bytes (MUST match sim/gateddelta cost formulas) ────
+# NOTE: these scale with BOTH s and batch b.  sim/graph.py builds these per
+# request (2*macs*num_new etc.) and sums over the scheduled batch, so a
+# benchmark tensor of shape (b, s, ...) carries b*s tokens' worth of work.
 
-def scan_flops(nvh, kd, vd, s):
-    """Per-token 4*kd*vd*nvh MACs (delta-rule state ops), times s tokens."""
-    return 4 * nvh * kd * vd * s * 2
+def scan_flops(nvh, kd, vd, s, b):
+    """Per-token 4*kd*vd*nvh MACs (delta-rule state ops), times b*s tokens."""
+    return 4 * nvh * kd * vd * s * b * 2
 
 
-def scan_bytes(nvh, kd, vd, dt_bytes, s, chunk_size):
+def scan_bytes(nvh, kd, vd, dt_bytes, s, chunk_size, b):
     """State read+write per token; chunked prefill amortizes over chunk_size."""
     state = 2 * nvh * kd * vd * dt_bytes
-    return state * (s / chunk_size if s > 1 else s)
+    return state * (s / chunk_size if s > 1 else s) * b
 
 
-def conv_flops(C, k, s):
-    return 2 * C * k * s
+def conv_flops(C, k, s, b):
+    return 2 * C * k * s * b
 
 
-def conv_bytes(C, k, dt_bytes, s):
-    return 2 * k * C * dt_bytes * s
+def conv_bytes(C, k, dt_bytes, s, b):
+    return 2 * k * C * dt_bytes * s * b
 
 
 # ── Benchmark driver ────────────────────────────────────────────────────
@@ -299,25 +325,36 @@ def bench_gateddelta(config, output_path="results/gateddelta.csv"):
                     skip_count += 1
                     continue
 
-                # Torch reference casts to float32 and builds chunked
-                # intermediates (~6x input bytes); the fused fla kernels
-                # operate in dtype with far less scratch (~2x input).
+                # fla fused chunk kernel peak HBM footprint: q/k/v inputs plus
+                # l2norm copies of q/k, the WY tensors w/u, h, v_new, o, and
+                # the solved (B,T,HV,chunk_size) intra-chunk matrix A — each
+                # input-scale.  Per token-head that is
+                # (5*kd + 5*vd + chunk_size + 2)*dt_bytes (see
+                # fla/ops/gated_delta_rule/chunk_fwd.py:chunk_fwd_o et al.).
+                # The old "inputs * 2" heuristic let b=256/s_q=1024 through at
+                # ~13 GiB but the kernel really needs ~22 GiB -> OOM.  The
+                # torch reference casts to fp32 and materializes per-chunk
+                # attention, so it keeps the conservative ~6x input heuristic.
                 if _HAS_FLA:
-                    act_gb = (b_val * s_q * nvh * (2 * kd + vd) * dt_bytes * 2
-                              + b_val * nvh * kd * vd * 8) / (1024 ** 3)
+                    act_gb = (b_val * s_q * nvh
+                              * (5 * kd + 5 * vd + chunk_size + 2) * dt_bytes
+                              + b_val * nvh * kd * vd * dt_bytes) / (1024 ** 3)
                 else:
                     act_gb = (b_val * s_q * nvh * (2 * kd + vd) * dt_bytes * 6
                               + b_val * nvh * kd * vd * 8) / (1024 ** 3)
-                if not check_memory(act_gb, max_mem):
+                def _record_skip():
+                    """Persist an OOM/unsupported row so resume skips this combo."""
                     row = {
                         "op_name": "gated_delta_rule", "dtype": dt_name,
                         "b": b_val, "nhk": nhk, "nvh": nvh, "kd": kd, "vd": vd,
-                        "s_q": s_q, "time_ms": "OOM",
-                        "flops": 0, "bytes": 0,
+                        "s_q": s_q, "time_ms": "OOM", "flops": 0, "bytes": 0,
                     }
                     results.append(row)
                     append_csv_row(output_path, GD_FIELDS, row)
                     done_keys.add(key)
+
+                if not check_memory(act_gb, max_mem):
+                    _record_skip()
                     continue
 
                 q = torch.randn(b_val, s_q, nvh, kd, dtype=dtype, device=device)
@@ -358,15 +395,37 @@ def bench_gateddelta(config, output_path="results/gateddelta.csv"):
                                 use_qk_l2norm_in_kernel=True,
                             )
 
-                _wu(scan_fn)
-                ms = benchmark(scan_fn, min_time_ms=bench_min_time,
-                               max_iters=bench_max_iters, calib_iters=bench_calib)
+                try:
+                    _wu(scan_fn)
+                    ms = benchmark(scan_fn, min_time_ms=bench_min_time,
+                                   max_iters=bench_max_iters,
+                                   calib_iters=bench_calib)
+                except torch.cuda.OutOfMemoryError:
+                    # OOM is recoverable: release the tensors and move on.
+                    del q, k, v, g, beta, state
+                    torch.cuda.empty_cache()
+                    _record_skip()
+                    continue
+                except RuntimeError as exc:
+                    # A kernel fault (illegal memory access) poisons the CUDA
+                    # context — every later call would fail too.  Record the
+                    # combo first so a rerun resumes past it, then signal main
+                    # to restart the process.  Non-CUDA RuntimeErrors (e.g. a
+                    # shape bug in the reference) are re-raised to surface
+                    # loudly instead of being mistaken for a kernel fault.
+                    if "cuda" not in str(exc).lower():
+                        raise
+                    _record_skip()
+                    raise KernelFaultError(
+                        f"gated_delta_rule {dt_name} b={b_val} nvh={nvh} "
+                        f"kd={kd} vd={vd} s_q={s_q}: {exc}"
+                    ) from exc
                 _append({
                     "op_name": "gated_delta_rule", "dtype": dt_name,
                     "b": b_val, "nhk": nhk, "nvh": nvh, "kd": kd, "vd": vd,
                     "s_q": s_q, "time_ms": f"{ms:.6f}",
-                    "flops": scan_flops(nvh, kd, vd, s_q),
-                    "bytes": scan_bytes(nvh, kd, vd, dt_bytes, s_q, chunk_size),
+                    "flops": scan_flops(nvh, kd, vd, s_q, b_val),
+                    "bytes": scan_bytes(nvh, kd, vd, dt_bytes, s_q, chunk_size, b_val),
                 })
                 del q, k, v, g, beta, state
 
@@ -406,16 +465,41 @@ def bench_gateddelta(config, output_path="results/gateddelta.csv"):
                         return torch_causal_conv1d_fn(x, w, bias=None,
                                                       activation=None)
 
-                _wu(conv_fn)
-                ms = benchmark(conv_fn, min_time_ms=bench_min_time,
-                               max_iters=bench_max_iters, calib_iters=bench_calib)
+                def _conv_skip():
+                    row = {
+                        "op_name": "conv1d", "dtype": dt_name,
+                        "b": b_val, "nhk": C, "nvh": conv_kernel,
+                        "kd": C, "vd": 1, "s_q": s_q,
+                        "time_ms": "OOM", "flops": 0, "bytes": 0,
+                    }
+                    results.append(row)
+                    append_csv_row(output_path, GD_FIELDS, row)
+                    done_keys.add(key)
+
+                try:
+                    _wu(conv_fn)
+                    ms = benchmark(conv_fn, min_time_ms=bench_min_time,
+                                   max_iters=bench_max_iters,
+                                   calib_iters=bench_calib)
+                except torch.cuda.OutOfMemoryError:
+                    del x, weight
+                    torch.cuda.empty_cache()
+                    _conv_skip()
+                    continue
+                except RuntimeError as exc:
+                    if "cuda" not in str(exc).lower():
+                        raise
+                    _conv_skip()
+                    raise KernelFaultError(
+                        f"conv1d {dt_name} C={C} b={b_val} s_q={s_q}: {exc}"
+                    ) from exc
                 _append({
                     "op_name": "conv1d", "dtype": dt_name,
                     "b": b_val, "nhk": C, "nvh": conv_kernel,
                     "kd": C, "vd": 1, "s_q": s_q,
                     "time_ms": f"{ms:.6f}",
-                    "flops": conv_flops(C, conv_kernel, s_q),
-                    "bytes": conv_bytes(C, conv_kernel, dt_bytes, s_q),
+                    "flops": conv_flops(C, conv_kernel, s_q, b_val),
+                    "bytes": conv_bytes(C, conv_kernel, dt_bytes, s_q, b_val),
                 })
                 del x, weight
 

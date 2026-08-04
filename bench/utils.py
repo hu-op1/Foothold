@@ -94,11 +94,16 @@ def auto_warmup_iters(fn, min_time_ms, max_iters, calib_iters, ratio=0.1):
     return max(1, int(total_est * ratio))
 
 
-def check_memory(required_gb, max_gb=7.5):
-    """Check if required_gb fits in available and allowed memory."""
+def check_memory(required_gb, max_gb=7.5, headroom_gb=3.0):
+    """Check if required_gb fits in available and allowed memory.
+
+    Reserves *headroom_gb* beyond the analytical estimate so a kernel whose
+    real scratch the caller didn't model (e.g. fla chunk intermediates) can't
+    OOM mid-bench.  Skipping a combo is cheap; crashing kills the whole run.
+    """
     free_gb, _ = torch.cuda.mem_get_info()
     free_gb = free_gb / (1024**3)
-    return required_gb < free_gb and required_gb <= max_gb
+    return required_gb + headroom_gb < free_gb and required_gb <= max_gb
 
 
 def get_compute_capability():
