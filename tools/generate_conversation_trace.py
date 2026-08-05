@@ -209,11 +209,13 @@ def main():
     p.add_argument("--no-stream", action="store_true")
     args = p.parse_args()
 
+    random.seed(args.seed)
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
     if is_trace_dir(args.dataset):
         print(f"Using local trace dir: {args.dataset}")
-        ds = iter_trace_sessions(args.dataset)
+        ds = list(iter_trace_sessions(args.dataset))
+        random.shuffle(ds)
     else:
         ds = load_data(args.dataset, args.split, streaming=not args.no_stream)
         if args.no_stream:
@@ -221,7 +223,6 @@ def main():
         else:
             ds = ds.shuffle(buffer_size=1000, seed=args.seed)
 
-    random.seed(args.seed)
     sessions, seen = [], 0
 
     for ex in tqdm.tqdm(ds, desc="Parsing"):
