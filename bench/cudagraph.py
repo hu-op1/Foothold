@@ -207,7 +207,19 @@ def bench_cudagraph_matmul(config, output_path="results/cudagraph_matmul.csv"):
             else:
                 wu = int(warmup_cfg)
 
-            ms = _cuda_graph_benchmark(setup, forward, wu, bench_cfg)
+            try:
+                ms = _cuda_graph_benchmark(setup, forward, wu, bench_cfg)
+            except torch.cuda.OutOfMemoryError:
+                # Graph capture holds all tensors resident; a scratch
+                # allocation beyond the estimate OOMs here.  Record and move on.
+                del a, w
+                torch.cuda.empty_cache()
+                row = {"op_name": "cudagraph_matmul", "dtype": dt_name,
+                       "M": M, "K": K, "N": N,
+                       "time_ms": "OOM", "flops": 2 * M * K * N, "bytes": act_bytes}
+                append_csv_row(output_path, CG_MATMUL_FIELDS, row)
+                done_keys.add(key)
+                continue
 
             row = {"op_name": "cudagraph_matmul", "dtype": dt_name,
                    "M": M, "K": K, "N": N,
@@ -342,7 +354,16 @@ def bench_cudagraph_elementwise(config, output_path="results/cudagraph_elementwi
                 else:
                     wu = int(warmup_cfg)
 
-                ms = _cuda_graph_benchmark(setup, forward, wu, bench_cfg)
+                try:
+                    ms = _cuda_graph_benchmark(setup, forward, wu, bench_cfg)
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    row = {"op_name": "cudagraph_elem", "dtype": dt_name,
+                           "operator": op_name, "N": N,
+                           "time_ms": "OOM", "bytes": act_bytes}
+                    append_csv_row(output_path, CG_ELEM_FIELDS, row)
+                    done_keys.add(key)
+                    continue
 
                 row = {"op_name": "cudagraph_elem", "dtype": dt_name,
                        "operator": op_name, "N": N,
@@ -446,7 +467,18 @@ def bench_cudagraph_flashattn(config, output_path="results/cudagraph_flashattn.c
             else:
                 wu = int(warmup_cfg)
 
-            ms = _cuda_graph_benchmark(setup, forward, wu, bench_cfg)
+            try:
+                ms = _cuda_graph_benchmark(setup, forward, wu, bench_cfg)
+            except torch.cuda.OutOfMemoryError:
+                del q, k, v
+                torch.cuda.empty_cache()
+                row = {"op_name": "cudagraph_flashattn", "dtype": dt_name,
+                       "b": b_val, "nh": nh, "nh_kv": nh_kv, "hd": hd,
+                       "s_q": s_q, "s_kv": s_kv,
+                       "time_ms": "OOM", "flops": 0, "bytes": 0}
+                append_csv_row(output_path, CG_FA_FIELDS, row)
+                done_keys.add(key)
+                continue
 
             _fa_flops = 4 * b_val * nh * s_q * s_kv * hd
             _fa_bytes = b_val * hd * dt_bytes * (nh * s_q + nh_kv * s_kv + nh_kv * s_kv + nh * s_q)

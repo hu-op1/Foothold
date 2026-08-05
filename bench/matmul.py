@@ -110,9 +110,23 @@ def bench_matmul(config, output_path="results/matmul.csv"):
                                        bench_calib, warmup_ratio)
             else:
                 wu = int(warmup_cfg)
-            warmup(mm, wu)
-            avg_ms = benchmark(mm, min_time_ms=bench_min_time, max_iters=bench_max_iters,
-                                calib_iters=bench_calib)
+            try:
+                warmup(mm, wu)
+                avg_ms = benchmark(mm, min_time_ms=bench_min_time, max_iters=bench_max_iters,
+                                    calib_iters=bench_calib)
+            except torch.cuda.OutOfMemoryError:
+                del a, w
+                torch.cuda.empty_cache()
+                row = {
+                    "op_name": "matmul", "dtype": dt_name,
+                    "M": M, "K": K, "N": N,
+                    "time_ms": "OOM",
+                    "flops": 2 * M * K * N, "bytes": act_bytes,
+                }
+                results.append(row)
+                append_csv_row(output_path, MATMUL_FIELDS, row)
+                done_keys.add(key)
+                continue
 
             row = {
                 "op_name": "matmul", "dtype": dt_name,

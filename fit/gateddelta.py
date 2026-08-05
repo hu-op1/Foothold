@@ -62,7 +62,13 @@ def _fit_scan_dtype(results, label_suffix=""):
         prefill = [r for r in results if r["s_q"] > S_Q_SPLIT]
         p_prefill = _fit_subset(prefill, f"prefill (s_q > {S_Q_SPLIT})",
                                 min_points=4)
-        F_shared = p_prefill.get("F_peak", 1e13)
+        if not p_prefill:
+            raise ValueError(
+                f"Too few prefill points ({len(prefill)}) to fit the scan roofline "
+                "— gateddelta.csv is likely contaminated by OOM rows. Restore a "
+                "clean CSV and re-run the fit."
+            )
+        F_shared = p_prefill["F_peak"]
         # decode has no s_kv dimension (state is fixed size): only batch
         # sweeps it, so 3 points suffice for the (B, p) fit with fixed F.
         p_decode = _fit_subset(decode, f"decode (s_q = {S_Q_SPLIT})",
@@ -76,20 +82,36 @@ def _fit_scan_dtype(results, label_suffix=""):
 
     # ── Step 1: fit F_peak from the largest batch with enough prefill
     # points (the torch-reference bench may OOM the largest batches) ──
+    # Also require a healthy anchor fit (R2 ≥ 0.9): partially OOM-polluted
+    # batches fit with garbage R2 and extrapolate F absurdly high.
     largest_b = None
     p_largest = {}
     for b_val in reversed(batch_sizes):
         prefill_b = [r for r in results
                      if r["b"] == b_val and r["s_q"] > S_Q_SPLIT]
-        if len(prefill_b) >= 4:
-            largest_b = b_val
-            p_largest = _fit_subset(prefill_b,
-                                    f"prefill b={b_val} (F_peak anchor){label_suffix}",
-                                    min_points=4)
-            break
+        if len(prefill_b) < 4:
+            continue
+        p_candidate = _fit_subset(prefill_b,
+                                  f"prefill b={b_val} (F_peak candidate){label_suffix}",
+                                  min_points=4)
+        if p_candidate.get("r2", 0.0) < 0.9:
+            print(f"  → b={b_val} anchor fit R2={p_candidate['r2']:.3f} < 0.9 "
+                  f"(likely polluted), trying smaller batch")
+            continue
+        largest_b = b_val
+        p_largest = p_candidate
+        break
     if largest_b is None:
-        largest_b = batch_sizes[-1]
-    F_shared = p_largest.get("F_peak", 1e13)
+        per_batch = {b_val: len([r for r in results
+                                 if r["b"] == b_val and r["s_q"] > S_Q_SPLIT])
+                     for b_val in batch_sizes}
+        raise ValueError(
+            "No batch has ≥4 valid prefill points with a healthy anchor fit "
+            f"(R2≥0.9; per-batch prefill point counts: {per_batch}). "
+            "gateddelta.csv is likely contaminated by OOM rows — restore a "
+            "clean CSV and re-run the fit."
+        )
+    F_shared = p_largest["F_peak"]
     print(f"  → shared F_peak = {F_shared / 1e12:.1f} TF (from b={largest_b} prefill)")
 
     decode_B, decode_p, prefill_B, prefill_p = [], [], [], []

@@ -64,7 +64,14 @@ def _fit_single_batch(fa_results):
     prefill = [r for r in fa_results if r["s_q"] > S_Q_SPLIT]
 
     p_prefill = _fit_subset(prefill, f"prefill (s_q > {S_Q_SPLIT})")
-    F_shared = p_prefill.get("F_peak", 1e13)
+    if not p_prefill:
+        raise ValueError(
+            f"Too few prefill points ({len(prefill)}) to fit FA prefill — "
+            "flashattn.csv is likely contaminated by OOM rows. Restore a clean "
+            "CSV (e.g. git checkout 740bdd4 -- bench/results/<gpu>/flashattn.csv) "
+            "and re-run the fit."
+        )
+    F_shared = p_prefill["F_peak"]
     p_decode = _fit_subset(decode, f"decode (s_q = {S_Q_SPLIT})", F_fixed=F_shared)
 
     params = {}
@@ -89,14 +96,42 @@ def _fit_flashattn_dtype(fa_results, label_suffix=""):
             return {f"{k}{label_suffix}": v for k, v in p.items()}
         return p
 
-    # ── Step 1: fit F_peak from largest-batch prefill ──
-    largest_b = batch_sizes[-1]
-    prefill_largest = [r for r in fa_results
-                       if r["b"] == largest_b and r["s_q"] > S_Q_SPLIT]
-    p_largest = _fit_subset(prefill_largest,
-                            f"prefill b={largest_b} (F_peak anchor){label_suffix}")
-    F_shared = p_largest.get("F_peak", 1e13)
-    print(f"  → shared F_peak = {F_shared / 1e12:.1f} TF (from b={largest_b} prefill)")
+    # ── Step 1: fit F_peak from the largest usable-batch prefill ──
+    # The anchor batch needs ≥5 valid prefill points AND a healthy fit
+    # (R2 ≥ 0.9): a polluted batch whose prefill points were partially
+    # OOM-wiped fits with garbage R2 and extrapolates F absurdly high.
+    # Fall back down the batch list; with no usable anchor, fail loudly
+    # instead of silently producing a garbage fit (F pinned at the 1e13
+    # bound → r2 ≈ −50) that zeroes out attention cost in the sim.
+    anchor_b = None
+    for b_val in reversed(batch_sizes):
+        prefill_candidates = [r for r in fa_results
+                              if r["b"] == b_val and r["s_q"] > S_Q_SPLIT]
+        if len(prefill_candidates) < 5:
+            continue
+        p_candidate = _fit_subset(prefill_candidates,
+                                  f"prefill b={b_val} (F_peak candidate){label_suffix}")
+        if p_candidate.get("r2", 0.0) < 0.9:
+            print(f"  → b={b_val} anchor fit R2={p_candidate['r2']:.3f} < 0.9 "
+                  f"(likely polluted), trying smaller batch")
+            continue
+        anchor_b = b_val
+        prefill_anchor = prefill_candidates
+        p_largest = p_candidate
+        break
+    if anchor_b is None:
+        per_batch = {b_val: len([r for r in fa_results
+                                 if r["b"] == b_val and r["s_q"] > S_Q_SPLIT])
+                     for b_val in batch_sizes}
+        raise ValueError(
+            "No batch has ≥5 valid prefill points with a healthy anchor fit "
+            f"(R2≥0.9; per-batch prefill point counts: {per_batch}). "
+            "flashattn.csv is likely contaminated by OOM rows — restore a clean "
+            "CSV (e.g. git checkout 740bdd4 -- bench/results/<gpu>/flashattn.csv) "
+            "and re-run the fit."
+        )
+    F_shared = p_largest["F_peak"]
+    print(f"  → shared F_peak = {F_shared / 1e12:.1f} TF (from b={anchor_b} prefill)")
 
     # ── Step 2: per-batch B_peak and p (F_peak fixed) ──
     decode_B = []

@@ -220,7 +220,13 @@ def _fit_cg_fa_dtype(fa_results, label_suffix=""):
         decode = [r for r in fa_results if r["s_q"] <= S_Q_SPLIT]
         prefill = [r for r in fa_results if r["s_q"] > S_Q_SPLIT]
         p_prefill = _fit_cg_fa_subset(prefill, f"prefill (s_q > {S_Q_SPLIT}){label_suffix}")
-        F_shared = p_prefill.get("F_peak", 1e13)
+        if not p_prefill:
+            raise ValueError(
+                f"Too few prefill points ({len(prefill)}) to fit the cudagraph FA "
+                "roofline — cudagraph_flashattn.csv is likely contaminated by OOM "
+                "rows. Restore a clean CSV and re-run the fit."
+            )
+        F_shared = p_prefill["F_peak"]
         p_decode = _fit_cg_fa_subset(decode, f"decode (s_q = {S_Q_SPLIT}){label_suffix}",
                                      F_fixed=F_shared)
         params = {}
@@ -229,13 +235,35 @@ def _fit_cg_fa_dtype(fa_results, label_suffix=""):
         params[f"fa_bench_nh_cudagraph{label_suffix}"] = fa_results[0].get("nh", 32)
         return params
 
-    # Multi-batch
-    largest_b = batch_sizes[-1]
-    prefill_largest = [r for r in fa_results
-                       if r["b"] == largest_b and r["s_q"] > S_Q_SPLIT]
-    p_largest = _fit_cg_fa_subset(prefill_largest,
-                                  f"prefill b={largest_b} (F_peak anchor){label_suffix}")
-    F_shared = p_largest.get("F_peak", 1e13)
+    # Multi-batch: anchor F_peak on the largest batch with ≥5 prefill points
+    # AND a healthy fit (R2 ≥ 0.9; polluted batches fit with garbage R2 and
+    # extrapolate F absurdly high).  Fall back down the batch list.
+    anchor_b = None
+    for b_val in reversed(batch_sizes):
+        prefill_candidates = [r for r in fa_results
+                              if r["b"] == b_val and r["s_q"] > S_Q_SPLIT]
+        if len(prefill_candidates) < 5:
+            continue
+        p_candidate = _fit_cg_fa_subset(prefill_candidates,
+                                        f"prefill b={b_val} (F_peak candidate){label_suffix}")
+        if p_candidate.get("r2", 0.0) < 0.9:
+            print(f"  → b={b_val} anchor fit R2={p_candidate['r2']:.3f} < 0.9 "
+                  f"(likely polluted), trying smaller batch")
+            continue
+        anchor_b = b_val
+        p_largest = p_candidate
+        break
+    if anchor_b is None:
+        per_batch = {b_val: len([r for r in fa_results
+                                 if r["b"] == b_val and r["s_q"] > S_Q_SPLIT])
+                     for b_val in batch_sizes}
+        raise ValueError(
+            "No batch has ≥5 valid prefill points with a healthy anchor fit "
+            f"(R2≥0.9; per-batch prefill point counts: {per_batch}). "
+            "cudagraph_flashattn.csv is likely contaminated by OOM rows — "
+            "restore a clean CSV and re-run the fit."
+        )
+    F_shared = p_largest["F_peak"]
 
     decode_B, decode_p = [], []
     prefill_B, prefill_p = [], []

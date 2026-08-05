@@ -81,6 +81,28 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
             w = int(warmup_cfg)
         warmup(fn, w)
 
+    def _measure(fn, op_name, flops, byt):
+        """Warmup + benchmark one elementwise op; record OOM rows instead of crashing."""
+        nonlocal new_count
+        try:
+            _wu(fn)
+            ms = benchmark(fn, min_time_ms=bench_min_time,
+                           max_iters=bench_max_iters, calib_iters=bench_calib)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            key = (op_name, dt_name, N)
+            if key in done_keys:
+                return
+            row = {
+                "op_name": op_name, "dtype": dt_name, "N": N,
+                "time_ms": "OOM", "flops": flops, "bytes": byt,
+            }
+            results.append(row)
+            append_csv_row(output_path, ELEM_FIELDS, row)
+            done_keys.add(key)
+            return
+        _append(op_name, flops, byt, ms)
+
     for dt_name in dtypes:
         dtype = getattr(torch, dt_name)
         dt_bytes = DTYPE_BYTES_MAP.get(dt_name, 2)
@@ -145,26 +167,20 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
             if "residual_add" in pending_ops:
                 def add_fn(x=x, y=y):
                     x + y
-                _wu(add_fn)
-                ms = benchmark(add_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
-                _append("residual_add", N, 3 * N * dt_bytes, ms)
+                _measure(add_fn, "residual_add", N, 3 * N * dt_bytes)
 
             # --- rmsnorm ---
             if "rmsnorm" in pending_ops:
                 w = torch.ones(N, dtype=dtype, device=device)
                 def rms_fn(x=x, w=w):
                     F.rms_norm(x, (N,), w, 1e-5)
-                _wu(rms_fn)
-                ms = benchmark(rms_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
-                _append("rmsnorm", 4 * N, 4 * N * dt_bytes, ms)
+                _measure(rms_fn, "rmsnorm", 4 * N, 4 * N * dt_bytes)
 
             # --- softmax ---
             if "softmax" in pending_ops:
                 def soft_fn(x=x):
                     F.softmax(x, dim=0)
-                _wu(soft_fn)
-                ms = benchmark(soft_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
-                _append("softmax", 5 * N, 6 * N * dt_bytes, ms)
+                _measure(soft_fn, "softmax", 5 * N, 6 * N * dt_bytes)
 
             # --- swiglu ---
             if "swiglu" in pending_ops:
@@ -172,9 +188,7 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
                 up = torch.randn(N, dtype=dtype, device=device)
                 def swiglu_fn(gate=gate, up=up):
                     F.silu(gate) * up
-                _wu(swiglu_fn)
-                ms = benchmark(swiglu_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
-                _append("swiglu", 5 * N, 3 * N * dt_bytes, ms)
+                _measure(swiglu_fn, "swiglu", 5 * N, 3 * N * dt_bytes)
 
             # --- rope ---
             # WARNING: This synthetic kernel uses PyTorch slice indexing
@@ -194,10 +208,7 @@ def bench_elementwise(config, output_path="results/elementwise.csv"):
                     out[:, 0] = q2[:, 0] * 0.5 - q2[:, 1] * 0.866
                     out[:, 1] = q2[:, 1] * 0.5 + q2[:, 0] * 0.866
                     return out.view(-1)
-                _wu(rope_fn)
-                ms = benchmark(rope_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters, calib_iters=bench_calib)
-                _append("rope", 6 * N, 4 * N * dt_bytes, ms)
-
+                _measure(rope_fn, "rope", 6 * N, 4 * N * dt_bytes)
             del x, y
 
     if skip_count:

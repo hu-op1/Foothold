@@ -68,7 +68,13 @@ def _fit_matmul_dtype(matmul_results, dtypes, label_suffix=""):
     large = [r for r in matmul_results if r["M"] >= M_SPLIT]
 
     p_large = _fit_subset(large, f"prefill (M>={M_SPLIT}){label_suffix}")
-    F_shared = p_large.get("F_peak", 1e13)
+    if not p_large:
+        raise ValueError(
+            f"Too few prefill points ({len(large)}) to fit the matmul roofline "
+            "— matmul.csv is likely contaminated by OOM rows. Restore a clean "
+            "CSV and re-run the fit."
+        )
+    F_shared = p_large["F_peak"]
     p_small = _fit_subset(small, f"decode (M<={M_SPLIT}){label_suffix}",
                           F_fixed=F_shared)
 

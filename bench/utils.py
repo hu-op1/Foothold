@@ -95,15 +95,19 @@ def auto_warmup_iters(fn, min_time_ms, max_iters, calib_iters, ratio=0.1):
 
 
 def check_memory(required_gb, max_gb=7.5, headroom_gb=3.0):
-    """Check if required_gb fits in available and allowed memory.
+    """Coarse memory budget filter — required_gb must stay under max_gb.
 
-    Reserves *headroom_gb* beyond the analytical estimate so a kernel whose
-    real scratch the caller didn't model (e.g. fla chunk intermediates) can't
-    OOM mid-bench.  Skipping a combo is cheap; crashing kills the whole run.
+    Only the analytical-vs-config ceiling is enforced.  The old runtime-free
+    check (``required_gb + headroom_gb < free_gb``) was removed: the analytical
+    estimate can overestimate (mis-skipping runnable combos) and `free_gb`
+    drifts with torch's CUDA allocator cache left by earlier combos, so the
+    check mis-classified healthy combos as OOM — and resume then skips them
+    forever.  Whether the kernel actually fits is decided by the caller's
+    try/except around the real kernel call, which records an OOM row and
+    moves on.
     """
-    free_gb, _ = torch.cuda.mem_get_info()
-    free_gb = free_gb / (1024**3)
-    return required_gb + headroom_gb < free_gb and required_gb <= max_gb
+    del headroom_gb  # kept for signature compatibility; no longer used
+    return required_gb <= max_gb
 
 
 def get_compute_capability():

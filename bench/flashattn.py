@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from bench.utils import (warmup, benchmark, auto_warmup_iters, check_memory,
                          load_completed_keys, append_csv_row)
+from bench.gateddelta import KernelFaultError
 
 # flash_attn is Linux + CUDA only; fall back to torch SDPA on Windows / CPU.
 try:
@@ -150,9 +151,44 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
                                        bench_calib, warmup_ratio)
             else:
                 wu = int(warmup_cfg)
-            warmup(fa_fn, wu)
-            ms = benchmark(fa_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters,
-                            calib_iters=bench_calib)
+            try:
+                warmup(fa_fn, wu)
+                ms = benchmark(fa_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters,
+                                calib_iters=bench_calib)
+            except torch.cuda.OutOfMemoryError:
+                # The flash-attn workspace can exceed the analytical estimate;
+                # record the combo as OOM and move on (resume skips it).
+                del q, k, v
+                torch.cuda.empty_cache()
+                row = {
+                    "op_name": "flashattn", "dtype": dt_name,
+                    "b": b_val, "nh": nh, "nh_kv": nh_kv, "hd": hd,
+                    "s_q": s_q, "s_kv": s_kv,
+                    "time_ms": "OOM", "flops": 0, "bytes": 0,
+                }
+                results.append(row)
+                append_csv_row(output_path, FA_FIELDS, row)
+                done_keys.add(key)
+                continue
+            except RuntimeError as exc:
+                # A kernel fault (illegal memory access) poisons the CUDA
+                # context — record the combo first so a rerun resumes past it,
+                # then signal main.py to restart the process.
+                if "cuda" not in str(exc).lower():
+                    raise
+                del q, k, v
+                row = {
+                    "op_name": "flashattn", "dtype": dt_name,
+                    "b": b_val, "nh": nh, "nh_kv": nh_kv, "hd": hd,
+                    "s_q": s_q, "s_kv": s_kv,
+                    "time_ms": "OOM", "flops": 0, "bytes": 0,
+                }
+                results.append(row)
+                append_csv_row(output_path, FA_FIELDS, row)
+                done_keys.add(key)
+                raise KernelFaultError(
+                    f"flashattn {dt_name} b={b_val} s_q={s_q} s_kv={s_kv}: {exc}"
+                ) from exc
 
             row = {
                 "op_name": "flashattn", "dtype": dt_name,
