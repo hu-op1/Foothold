@@ -90,7 +90,9 @@ class BenchStatLogger(StatLoggerBase):
 
         Within each tick, sum prompt/gen tokens across engines (matches how
         bench-side throughput reports aggregate over DP), and take the last
-        running/waiting/cache_pct snapshot in the bucket.
+        running/waiting/cache_pct snapshot in the bucket.  Buckets with no
+        samples (idle engine, e.g. tool-call gaps) get a zero-throughput row
+        carrying the last observed state, keeping the timeseries contiguous.
         """
         header = [
             "t",
@@ -106,6 +108,7 @@ class BenchStatLogger(StatLoggerBase):
         samples = sorted(cls.samples, key=lambda s: s.t)
         end_t = samples[-1].t
         rows: list[list] = []
+        last_state = (0, 0, 0.0)  # running, waiting, kv_cache_pct
 
         bucket_idx = 0
         while bucket_idx * tick_seconds <= end_t:
@@ -113,6 +116,21 @@ class BenchStatLogger(StatLoggerBase):
             t_hi = t_lo + tick_seconds
             in_bucket = [s for s in samples if t_lo <= s.t < t_hi]
             if not in_bucket:
+                # No scheduler iteration in this window (engine idle, e.g.
+                # tool-call gaps): emit a zero-throughput row with the last
+                # observed state so the timeseries stays contiguous.  Holes
+                # would make trapezoidal area integration
+                # (validate/plot.py _integral_over) bridge each gap with a
+                # linear ramp, over-counting prompt/gen area — mirrors
+                # sim/recorder.py _fill_skipped_buckets.
+                rows.append([
+                    round(t_hi, 3),
+                    0.0,
+                    0.0,
+                    last_state[0],
+                    last_state[1],
+                    last_state[2],
+                ])
                 bucket_idx += 1
                 continue
 
@@ -141,6 +159,7 @@ class BenchStatLogger(StatLoggerBase):
                 waiting,
                 round(cache_pct, 2),
             ])
+            last_state = (running, waiting, round(cache_pct, 2))
             bucket_idx += 1
 
         return header, rows
