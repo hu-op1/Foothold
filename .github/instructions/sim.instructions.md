@@ -23,7 +23,7 @@ Requests → SimulationEngine (event loop)
 (see `docs/plans/2026-07-21-computation-graph-refactor.md` and its design doc),
 replacing the hardcoded `predict_step_*` math in `executor.py`:
 
-- **`sim/graph.py`** — `OpSpec` (matmul / attention / elementwise / comm ops with precomputed roofline params), `StepContext.precompute()` (builds a single-step context from scheduled requests + hw params; detects `ls_*` keys to select gated-delta scan params), `ModelGraph.evaluate()` / `transform_layers()`, and graph transforms `apply_tp` / `apply_ep` / `apply_pp` (tag matching, architecture-agnostic).
+- **`sim/graph.py`** — `OpSpec` (matmul / attention / elementwise / comm ops with precomputed roofline params), `StepContext.precompute()` (builds a single-step context from scheduled requests + hw params; detects `ls_*` keys to select gated-delta scan params), `ModelGraph.evaluate()` / `transform_layers()`, and graph transforms `apply_tp` / `apply_ep` (tag matching, architecture-agnostic).
 - **`sim/layers/`** — layer builders (`common.py`: qkv_proj, o_proj, flash_attn, rope, linear_scan, gate_up, swiglu, fused_residual_norm, moe/expert, all_to_all; `head.py`: lm_head).
 - **Wiring**: `sim/executor.py:predict_step()` now only does `StepContext.precompute` + transform + `ModelGraph.evaluate`. `sim/engine.py` loads the graph via `load_model_graph(config["model"])`.
 - **Per-model graphs** live in `models/*.py` (`SPEC` dict + `build_graph(spec)`) — see `models.instructions.md`.

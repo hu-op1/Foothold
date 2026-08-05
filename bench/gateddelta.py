@@ -202,6 +202,10 @@ def torch_recurrent_gated_delta_rule(
 
 
 def torch_causal_conv1d_fn(hidden_states, weight, bias=None, activation=None, **kwargs):
+    # `activation` is unused — kept for API compatibility with
+    # causal_conv1d_fn (flash-linear-attention). The benchmark only
+    # measures the identity case (activation=None).
+    del activation
     _, hidden_size, seq_len = hidden_states.shape
     padding = weight.shape[-1] - 1
     out = F.conv1d(

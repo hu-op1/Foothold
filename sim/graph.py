@@ -521,28 +521,3 @@ def apply_ep(graph: ModelGraph, ctx: StepContext, ep: int) -> ModelGraph:
         return result
 
     return graph.transform_layers(_transform)
-
-
-def apply_pp(graph: ModelGraph, ctx: StepContext, pp: int, stage: int,
-             cross_node_hops: int = 0) -> ModelGraph:
-    """Keep only layers belonging to the current PP stage.
-
-    Layers distributed evenly: nl // pp per stage, remainder to first stages.
-    """
-    if pp <= 1:
-        return graph
-
-    all_builders = []
-    for builder, count in graph.layer_specs:
-        all_builders.extend([builder] * count)
-
-    nl = len(all_builders)
-    per_stage = nl // pp
-    remainder = nl % pp
-    start = stage * per_stage + min(stage, remainder)
-    end = start + per_stage + (1 if stage < remainder else 0)
-
-    stage_builders = all_builders[start:end]
-
-    new_specs = [(b, 1) for b in stage_builders]
-    return ModelGraph(layer_specs=new_specs, head_builder=graph.head_builder)

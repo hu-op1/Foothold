@@ -28,6 +28,7 @@ class MetricsCollector:
             "tpot": (total_lat - ttft) / num_out,
             "num_output_tokens": request.num_output_tokens,
             "prompt_len": request.prompt_len,
+            "finish_reason": request.finish_reason.value if request.finish_reason else None,
         })
 
     # ── aggregated metrics ──────────────────────────────────────────

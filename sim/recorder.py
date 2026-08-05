@@ -175,6 +175,7 @@ class SimRecorder:
             "scheduled_ts": getattr(request, "scheduled_ts", None) or request.arrival_time,
             "first_token_ts": first,
             "last_token_ts": request.finish_time,
+            "finish_reason": request.finish_reason.value if request.finish_reason else None,
         })
 
     # ── write artifacts ──────────────────────────────────────────────────

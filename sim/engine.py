@@ -103,10 +103,6 @@ class SimulationEngine:
                 "lm_head": 0.0,
                 "all_reduce": 0.0, "all_to_all": 0.0, "inter_stage_comm": 0.0}
 
-    def _compute_num_blocks(self):
-        kv_mem_gb = self.cfg["simulation"]["kv_cache_memory_gb"]
-        return max(1, int(kv_mem_gb * 1024**3) // self.bytes_per_block)
-
     def _compute_per_gpu_kv_cache_gb(self, tp: int, pp: int, stage: int | None = None) -> float:
         """Compute per-GPU KV cache budget from GPU VRAM, model weights, and activation.
 
