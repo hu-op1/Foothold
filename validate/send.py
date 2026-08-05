@@ -129,6 +129,7 @@ def run_send(config: dict) -> None:
     max_requests = vllm_cfg.get("max_requests")
     output_dir = Path(vllm_cfg.get("output_dir", "vllm/output"))
     tick_seconds = vllm_cfg.get("tick_seconds", 0.5)
+    request_extra_body = vllm_cfg.get("request_extra_body", {}) or {}
     tokenizer_id = vllm_cfg.get("tokenizer") or model
 
     if not model:
@@ -172,7 +173,7 @@ def run_send(config: dict) -> None:
 
         request_records, metric_samples = asyncio.run(_send_all(
             requests, client, model, tokenizer, max_concurrency, trace_format,
-            metrics_url, tick_seconds,
+            metrics_url, tick_seconds, request_extra_body,
         ))
 
         finished_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
@@ -196,6 +197,7 @@ async def _send_all(
     trace_format,
     metrics_url,
     tick_seconds,
+    request_extra_body,
 ):
     semaphore = asyncio.Semaphore(max_concurrency)
     records: list[dict] = []
@@ -230,7 +232,8 @@ async def _send_all(
             text = tokenizer.decode(current.prompt_token_ids, skip_special_tokens=True)
             messages = [{"role": "user", "content": text}]
 
-            rec = await _send_one(current, client, model, messages, semaphore)
+            rec = await _send_one(current, client, model, messages, semaphore,
+                                  request_extra_body)
 
             rec["arrival_time"] = chain_arrival
             rec["input_toks"] = len(current.prompt_token_ids)
@@ -252,23 +255,26 @@ async def _send_all(
 
     return records, metric_samples
 
-async def _send_one(req, client, model, messages, semaphore):
+async def _send_one(req, client, model, messages, semaphore, request_extra_body):
     async with semaphore:
         t_start = time.perf_counter()
         first_ts = None
         n_out = req.max_output_len
 
         try:
+            extra_body = {
+                "min_tokens": n_out,
+                "ignore_eos": True,
+            }
+            if request_extra_body:
+                extra_body.update(request_extra_body)
             stream = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=n_out,
                 stream=True,
                 stream_options={"include_usage": True},
-                extra_body={
-                    "min_tokens": n_out,
-                    "ignore_eos": True,
-                },
+                extra_body=extra_body,
             )
 
             async for chunk in stream:
@@ -401,6 +407,15 @@ def run_send_embedded(config: dict) -> None:
             "frontend option and is ignored in embedded mode (raw token "
             "prompts bypass the chat template). Set it when launching an "
             "external `vllm serve` (embedded: false)."
+        )
+    # request_extra_body is merged into the OpenAI-compatible request body and
+    # targets the chat template (e.g. chat_template_kwargs); embedded mode
+    # sends raw TokensPrompt and applies no chat template, so it is inert here.
+    if vllm_cfg.get("request_extra_body"):
+        print(
+            "[WARNING] request_extra_body is a chat-template-layer option and "
+            "is ignored in embedded mode (raw token prompts bypass the chat "
+            "template). It applies to external serve mode (embedded: false)."
         )
 
     started_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())

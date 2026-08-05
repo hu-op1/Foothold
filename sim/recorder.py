@@ -97,8 +97,19 @@ class SimRecorder:
             self._cur_bucket["waiting"] = waiting
             self._cur_bucket["kv_cache_pct"] = kv_cache_pct
         else:
-            # New bucket — flush old one first
+            # New bucket — flush the old one first, then fill any tick
+            # buckets the sim clock skipped over.  A single long step or an
+            # idle catch-up can advance the clock across several
+            # tick_seconds windows; without zero-throughput rows for those
+            # buckets the timeseries has holes, and downstream trapezoidal
+            # integration (validate/plot.py _integral_over) bridges each
+            # hole as if tokens flowed continuously, over-counting the
+            # prompt/generation area.
+            prev_t = self._cur_bucket["t"]
+            prev_state = {k: self._cur_bucket[k]
+                          for k in ("running", "waiting", "kv_cache_pct")}
             self._flush_bucket()
+            self._fill_skipped_buckets(prev_t, bucket_idx, prev_state)
             self._cur_bucket = {
                 "t": round(bucket_end, 3),
                 "running": running,
@@ -121,6 +132,26 @@ class SimRecorder:
         self._cur_bucket = None
         self._bucket_prompt_tokens = 0
         self._bucket_gen_tokens = 0
+
+    def _fill_skipped_buckets(self, prev_t: float, new_bucket_idx: int,
+                              state: dict) -> None:
+        """Emit zero-throughput rows for tick buckets the clock skipped.
+
+        ``prev_t`` is the just-flushed bucket's ``t`` (=(old_idx + 1) * tick).
+        Every bucket index in ``(old_idx, new_bucket_idx)`` gets a row with
+        zero throughput and the last observed running/waiting/kv state, so
+        the timeseries stays contiguous (one row per tick_seconds).
+        """
+        old_idx = int(prev_t / self.tick_seconds) - 1
+        for idx in range(old_idx + 1, new_bucket_idx):
+            self._tick_rows.append({
+                "t": round((idx + 1) * self.tick_seconds, 3),
+                "running": state.get("running", 0),
+                "waiting": state.get("waiting", 0),
+                "kv_cache_pct": state.get("kv_cache_pct", 0.0),
+                "prompt_throughput": 0.0,
+                "gen_throughput": 0.0,
+            })
 
     # ── per-request recording ────────────────────────────────────────────
 

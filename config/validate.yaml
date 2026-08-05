@@ -90,3 +90,13 @@ vllm:
     # Only applies in external serve mode (embedded: false); the embedded
     # engine sends raw token prompts and applies no chat template.
     default_chat_template_kwargs: {"enable_thinking": false}
+
+  # ── Per-request extra body (external serve mode) ──
+  # Merged into every /v1/chat/completions request body sent to the server.
+  # Unlike the server flag above (engine_args.default_chat_template_kwargs,
+  # which only takes effect on an auto-spawned server), this works against an
+  # already-running server too.  e.g. {"chat_template_kwargs":
+  # {"enable_thinking": false}} disables Qwen thinking at the chat-template
+  # layer per request.  Only applies in external mode (embedded: false); the
+  # embedded engine sends raw token prompts and applies no chat template.
+  request_extra_body: {"chat_template_kwargs": {"enable_thinking": false}}
