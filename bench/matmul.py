@@ -105,17 +105,17 @@ def bench_matmul(config, output_path="results/matmul.csv"):
                 def mm(a=a, w=w):
                     torch.mm(a, w)
 
-            if warmup_cfg == "auto":
-                wu = auto_warmup_iters(mm, bench_min_time, bench_max_iters,
-                                       bench_calib, warmup_ratio)
-            else:
-                wu = int(warmup_cfg)
             try:
+                if warmup_cfg == "auto":
+                    wu = auto_warmup_iters(mm, bench_min_time, bench_max_iters,
+                                           bench_calib, warmup_ratio)
+                else:
+                    wu = int(warmup_cfg)
                 warmup(mm, wu)
                 avg_ms = benchmark(mm, min_time_ms=bench_min_time, max_iters=bench_max_iters,
                                     calib_iters=bench_calib)
             except torch.cuda.OutOfMemoryError:
-                del a, w
+                del mm, a, w
                 torch.cuda.empty_cache()
                 row = {
                     "op_name": "matmul", "dtype": dt_name,
@@ -139,7 +139,7 @@ def bench_matmul(config, output_path="results/matmul.csv"):
             done_keys.add(key)
             new_count += 1
 
-            del a, w
+            del mm, a, w
 
     total = len(done_keys) + skip_count  # done_keys now includes all combos
     if skip_count:

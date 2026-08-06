@@ -146,19 +146,19 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
                         is_causal=True,
                     )
 
-            if warmup_cfg == "auto":
-                wu = auto_warmup_iters(fa_fn, bench_min_time, bench_max_iters,
-                                       bench_calib, warmup_ratio)
-            else:
-                wu = int(warmup_cfg)
             try:
+                if warmup_cfg == "auto":
+                    wu = auto_warmup_iters(fa_fn, bench_min_time, bench_max_iters,
+                                           bench_calib, warmup_ratio)
+                else:
+                    wu = int(warmup_cfg)
                 warmup(fa_fn, wu)
                 ms = benchmark(fa_fn, min_time_ms=bench_min_time, max_iters=bench_max_iters,
                                 calib_iters=bench_calib)
             except torch.cuda.OutOfMemoryError:
                 # The flash-attn workspace can exceed the analytical estimate;
                 # record the combo as OOM and move on (resume skips it).
-                del q, k, v
+                del fa_fn, q, k, v
                 torch.cuda.empty_cache()
                 row = {
                     "op_name": "flashattn", "dtype": dt_name,
@@ -176,7 +176,7 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
                 # then signal main.py to restart the process.
                 if "cuda" not in str(exc).lower():
                     raise
-                del q, k, v
+                del fa_fn, q, k, v
                 row = {
                     "op_name": "flashattn", "dtype": dt_name,
                     "b": b_val, "nh": nh, "nh_kv": nh_kv, "hd": hd,
@@ -203,7 +203,7 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
             done_keys.add(key)
             new_count += 1
 
-            del q, k, v
+            del fa_fn, q, k, v
 
     if skip_count:
         print(f"  [resume] skipped {skip_count} completed, {new_count} new → {output_path}")

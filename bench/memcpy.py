@@ -75,17 +75,17 @@ def bench_memcpy(config, output_path="results/memcpy.csv"):
                         x_gpu.copy_(x_cpu, non_blocking=True)
                         torch.cuda.synchronize()
 
-                if warmup_cfg == "auto":
-                    wu = auto_warmup_iters(fn, bench_min_time, bench_max_iters,
-                                           bench_calib, warmup_ratio)
-                else:
-                    wu = int(warmup_cfg)
                 try:
+                    if warmup_cfg == "auto":
+                        wu = auto_warmup_iters(fn, bench_min_time, bench_max_iters,
+                                               bench_calib, warmup_ratio)
+                    else:
+                        wu = int(warmup_cfg)
                     warmup(fn, wu)
                     ms = benchmark(fn, min_time_ms=bench_min_time,
                                    max_iters=bench_max_iters, calib_iters=bench_calib)
                 except torch.cuda.OutOfMemoryError:
-                    del x_gpu, x_cpu
+                    del fn, x_gpu, x_cpu
                     torch.cuda.empty_cache()
                     row = {"op_name": "memcpy", "direction": direction,
                            "dtype": dt_name, "bytes": nbytes,
@@ -100,6 +100,6 @@ def bench_memcpy(config, output_path="results/memcpy.csv"):
                 append_csv_row(output_path, MEMCPY_FIELDS, row)
                 done_keys.add(key)
 
-                del x_gpu, x_cpu
+                del fn, x_gpu, x_cpu
 
     return []

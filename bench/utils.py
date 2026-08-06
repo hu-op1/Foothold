@@ -103,8 +103,8 @@ def check_memory(required_gb, max_gb=7.5, headroom_gb=3.0):
     drifts with torch's CUDA allocator cache left by earlier combos, so the
     check mis-classified healthy combos as OOM — and resume then skips them
     forever.  Whether the kernel actually fits is decided by the caller's
-    try/except around the real kernel call, which records an OOM row and
-    moves on.
+    try/except around the real kernel call (including the auto_warmup_iters
+    calibration run), which records an OOM row and moves on.
     """
     del headroom_gb  # kept for signature compatibility; no longer used
     return required_gb <= max_gb

@@ -198,21 +198,21 @@ def bench_cudagraph_matmul(config, output_path="results/cudagraph_matmul.csv"):
                 def forward(a_t, w_t):
                     torch.mm(a_t, w_t)
 
-            if warmup_cfg == "auto":
-                wu = auto_warmup_iters(lambda: forward(*setup()[0], **setup()[1]),
-                                       bench_cfg["min_time_ms"],
-                                       bench_cfg["max_iters"],
-                                       bench_cfg["calib_iters"],
-                                       warmup_ratio)
-            else:
-                wu = int(warmup_cfg)
-
             try:
+                if warmup_cfg == "auto":
+                    wu = auto_warmup_iters(lambda: forward(*setup()[0], **setup()[1]),
+                                           bench_cfg["min_time_ms"],
+                                           bench_cfg["max_iters"],
+                                           bench_cfg["calib_iters"],
+                                           warmup_ratio)
+                else:
+                    wu = int(warmup_cfg)
+
                 ms = _cuda_graph_benchmark(setup, forward, wu, bench_cfg)
             except torch.cuda.OutOfMemoryError:
                 # Graph capture holds all tensors resident; a scratch
                 # allocation beyond the estimate OOMs here.  Record and move on.
-                del a, w
+                del setup, a, w
                 torch.cuda.empty_cache()
                 row = {"op_name": "cudagraph_matmul", "dtype": dt_name,
                        "M": M, "K": K, "N": N,
@@ -229,7 +229,7 @@ def bench_cudagraph_matmul(config, output_path="results/cudagraph_matmul.csv"):
             done_keys.add(key)
             new_count += 1
 
-            del a, w
+            del setup, a, w
 
     if skip_count:
         print(f"  [resume] skipped {skip_count} completed, {new_count} new → {output_path}")
@@ -345,18 +345,19 @@ def bench_cudagraph_elementwise(config, output_path="results/cudagraph_elementwi
                 else:
                     continue
 
-                if warmup_cfg == "auto":
-                    wu = auto_warmup_iters(lambda: forward(*setup()[0], **setup()[1]),
-                                           bench_cfg["min_time_ms"],
-                                           bench_cfg["max_iters"],
-                                           bench_cfg["calib_iters"],
-                                           warmup_ratio)
-                else:
-                    wu = int(warmup_cfg)
-
                 try:
+                    if warmup_cfg == "auto":
+                        wu = auto_warmup_iters(lambda: forward(*setup()[0], **setup()[1]),
+                                               bench_cfg["min_time_ms"],
+                                               bench_cfg["max_iters"],
+                                               bench_cfg["calib_iters"],
+                                               warmup_ratio)
+                    else:
+                        wu = int(warmup_cfg)
+
                     ms = _cuda_graph_benchmark(setup, forward, wu, bench_cfg)
                 except torch.cuda.OutOfMemoryError:
+                    del setup
                     torch.cuda.empty_cache()
                     row = {"op_name": "cudagraph_elem", "dtype": dt_name,
                            "operator": op_name, "N": N,
@@ -458,19 +459,19 @@ def bench_cudagraph_flashattn(config, output_path="results/cudagraph_flashattn.c
                         is_causal=True,
                     )
 
-            if warmup_cfg == "auto":
-                wu = auto_warmup_iters(lambda: forward(*setup()[0], **setup()[1]),
-                                       bench_cfg["min_time_ms"],
-                                       bench_cfg["max_iters"],
-                                       bench_cfg["calib_iters"],
-                                       warmup_ratio)
-            else:
-                wu = int(warmup_cfg)
-
             try:
+                if warmup_cfg == "auto":
+                    wu = auto_warmup_iters(lambda: forward(*setup()[0], **setup()[1]),
+                                           bench_cfg["min_time_ms"],
+                                           bench_cfg["max_iters"],
+                                           bench_cfg["calib_iters"],
+                                           warmup_ratio)
+                else:
+                    wu = int(warmup_cfg)
+
                 ms = _cuda_graph_benchmark(setup, forward, wu, bench_cfg)
             except torch.cuda.OutOfMemoryError:
-                del q, k, v
+                del setup, q, k, v
                 torch.cuda.empty_cache()
                 row = {"op_name": "cudagraph_flashattn", "dtype": dt_name,
                        "b": b_val, "nh": nh, "nh_kv": nh_kv, "hd": hd,
@@ -492,7 +493,7 @@ def bench_cudagraph_flashattn(config, output_path="results/cudagraph_flashattn.c
             done_keys.add(key)
             new_count += 1
 
-            del q, k, v
+            del setup, q, k, v
 
     if skip_count:
         print(f"  [resume] skipped {skip_count} completed, {new_count} new → {output_path}")
