@@ -77,7 +77,7 @@ def roofline_fit(flops_list, bytes_list, time_s_list, F_max=None):
 
     def model(X, F, B, p):
         f, b_arr = X
-        return (f / F + b_arr / B) ** (1 / p)
+        return ((f / F) ** p + (b_arr / B) ** p) ** (1 / p)
 
     # Initial guesses from raw FLOP/s and bytes/s ratios
     F0 = float(np.median(flops / times))

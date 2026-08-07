@@ -24,6 +24,18 @@ from fit.utils import roofline_fit
 S_Q_SPLIT = 1
 
 
+def _is_prefill_point(r):
+    """Valid prefill point: s_q > 1 (prefill) AND s_q <= s_kv.
+
+    s_q > s_kv is degenerate under flash_attn's causal offset convention
+    (offset = s_kv - s_q < 0 → most queries see no visible keys → NaN output,
+    kernel does only ~1/16 of the work) and never occurs in real serving
+    (KV always contains the query tokens, so s_kv >= s_q).  Those cells are
+    excluded so they don't contaminate the prefill roofline fit.
+    """
+    return r["s_q"] > S_Q_SPLIT and r["s_q"] <= r["s_kv"]
+
+
 def _fit_subset(fa_results, label, F_fixed=None):
     flops = np.array([r["flops"] for r in fa_results])
     bytes_moved = np.array([r["bytes"] for r in fa_results])
@@ -37,7 +49,7 @@ def _fit_subset(fa_results, label, F_fixed=None):
         from scipy.optimize import curve_fit
         def model(X, B, p):
             f, b_arr = X
-            return (f / F_fixed + b_arr / B) ** (1 / p)
+            return ((f / F_fixed) ** p + (b_arr / B) ** p) ** (1 / p)
         B0 = float(np.median(bytes_moved / times))
         popt, _ = curve_fit(model, (flops, bytes_moved), times,
                             p0=[B0 * 0.5, 2.0],
@@ -61,7 +73,7 @@ def _fit_subset(fa_results, label, F_fixed=None):
 def _fit_single_batch(fa_results):
     """Original fitting path: single batch, split by s_q only."""
     decode = [r for r in fa_results if r["s_q"] <= S_Q_SPLIT]
-    prefill = [r for r in fa_results if r["s_q"] > S_Q_SPLIT]
+    prefill = [r for r in fa_results if _is_prefill_point(r)]
 
     p_prefill = _fit_subset(prefill, f"prefill (s_q > {S_Q_SPLIT})")
     if not p_prefill:
@@ -97,23 +109,32 @@ def _fit_flashattn_dtype(fa_results, label_suffix=""):
         return p
 
     # ── Step 1: fit F_peak from the largest usable-batch prefill ──
-    # The anchor batch needs ≥5 valid prefill points AND a healthy fit
-    # (R2 ≥ 0.9): a polluted batch whose prefill points were partially
-    # OOM-wiped fits with garbage R2 and extrapolates F absurdly high.
-    # Fall back down the batch list; with no usable anchor, fail loudly
-    # instead of silently producing a garbage fit (F pinned at the 1e13
-    # bound → r2 ≈ −50) that zeroes out attention cost in the sim.
+    # The anchor batch needs ≥5 valid prefill points AND a non-degenerate fit.
+    # A healthy eager FA fit on real data lands at R2 ≈ 0.7-0.9 (small s_q
+    # points are launch-overhead dominated and scatter ~10-15% around the
+    # roofline), so an R2 ≥ 0.9 bar is unreachable.  What we reject instead is
+    # a degenerate fit: garbage R2 (≤ 0.5) or F/B pinned at the 1e15/1e13 fit
+    # bounds — the classic polluted-fit signature where the memory term
+    # collapses to ≈ 0 and zeroes out attention cost in the sim (TTFT ~2.3x
+    # too fast).  Fall back down the batch list; with no usable anchor, fail
+    # loudly instead of silently producing that garbage fit.
     anchor_b = None
     for b_val in reversed(batch_sizes):
         prefill_candidates = [r for r in fa_results
-                              if r["b"] == b_val and r["s_q"] > S_Q_SPLIT]
+                              if r["b"] == b_val and _is_prefill_point(r)]
         if len(prefill_candidates) < 5:
             continue
         p_candidate = _fit_subset(prefill_candidates,
                                   f"prefill b={b_val} (F_peak candidate){label_suffix}")
-        if p_candidate.get("r2", 0.0) < 0.9:
-            print(f"  → b={b_val} anchor fit R2={p_candidate['r2']:.3f} < 0.9 "
-                  f"(likely polluted), trying smaller batch")
+        r2 = p_candidate.get("r2", 0.0)
+        F_peak = p_candidate.get("F_peak", 0.0)
+        B_peak = p_candidate.get("B_peak", 0.0)
+        # Degenerate: garbage R2, or F/B pinned at the 1e15/1e13 upper bounds
+        # (pinned B → memory term ≈ 0 → the "zeroed attention cost" bug).
+        if r2 < 0.5 or F_peak >= 9e14 or B_peak >= 9e12:
+            print(f"  → b={b_val} anchor fit degenerate "
+                  f"(R2={r2:.3f}, F={F_peak / 1e12:.1f}TF, "
+                  f"B={B_peak / 1e12:.2f}TB), trying smaller batch")
             continue
         anchor_b = b_val
         prefill_anchor = prefill_candidates
@@ -121,13 +142,15 @@ def _fit_flashattn_dtype(fa_results, label_suffix=""):
         break
     if anchor_b is None:
         per_batch = {b_val: len([r for r in fa_results
-                                 if r["b"] == b_val and r["s_q"] > S_Q_SPLIT])
+                                 if r["b"] == b_val and _is_prefill_point(r)])
                      for b_val in batch_sizes}
         raise ValueError(
-            "No batch has ≥5 valid prefill points with a healthy anchor fit "
-            f"(R2≥0.9; per-batch prefill point counts: {per_batch}). "
-            "flashattn.csv is likely contaminated by OOM rows — restore a clean "
-            "CSV (e.g. git checkout 740bdd4 -- bench/results/<gpu>/flashattn.csv) "
+            "No batch has ≥5 valid prefill points with a non-degenerate "
+            f"anchor fit (R2≥0.5 and F/B not pinned at the fit bounds; "
+            f"per-batch prefill point counts: {per_batch}). "
+            "flashattn.csv is likely contaminated by OOM rows or otherwise "
+            "polluted — restore a clean CSV "
+            "(e.g. git checkout 740bdd4 -- bench/results/<gpu>/flashattn.csv) "
             "and re-run the fit."
         )
     F_shared = p_largest["F_peak"]
@@ -142,7 +165,7 @@ def _fit_flashattn_dtype(fa_results, label_suffix=""):
     for b_val in batch_sizes:
         batch_results = [r for r in fa_results if r["b"] == b_val]
         decode = [r for r in batch_results if r["s_q"] <= S_Q_SPLIT]
-        prefill_b = [r for r in batch_results if r["s_q"] > S_Q_SPLIT]
+        prefill_b = [r for r in batch_results if _is_prefill_point(r)]
 
         p_p = _fit_subset(prefill_b, f"prefill b={b_val}{label_suffix}", F_fixed=F_shared)
         p_d = _fit_subset(decode, f"decode  b={b_val}{label_suffix}", F_fixed=F_shared)
@@ -153,7 +176,7 @@ def _fit_flashattn_dtype(fa_results, label_suffix=""):
         decode_p.append(p_d.get("p", 1.0))
 
     # ── Step 3: unified fit (all batches) ──
-    prefill_all = [r for r in fa_results if r["s_q"] > S_Q_SPLIT]
+    prefill_all = [r for r in fa_results if _is_prefill_point(r)]
     decode_all = [r for r in fa_results if r["s_q"] <= S_Q_SPLIT]
     p_prefill_u = _fit_subset(prefill_all, f"prefill (all batches){label_suffix}", F_fixed=F_shared)
     p_decode_u = _fit_subset(decode_all, f"decode  (all batches){label_suffix}", F_fixed=F_shared)

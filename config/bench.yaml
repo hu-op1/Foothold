@@ -15,7 +15,10 @@ elementwise:
   operators: [residual_add, rmsnorm, softmax, swiglu, rope]
 
 # FlashAttention benchmark — (s_q, s_kv) grid covering decode (s_q=1)
-# through long-context prefill (s_q up to 65536, s_kv up to 262144 for 256K context).
+# through long-context prefill (s_q/s_kv up to 32768).
+# s_q > s_kv combos are skipped: degenerate under flash_attn's causal offset
+# convention (offset = s_kv - s_q < 0 → most queries see no keys → NaN output,
+# kernel does ~1/16 of the work) and never a real serving shape (s_kv >= s_q).
 # Large s_kv × large batch will OOM on 24GB; check_memory skips those combos.
 # Uses GQA defaults (nh=32, nh_kv=8, hd=128) — representative of 7B-class models.
 flashattn:
@@ -64,7 +67,7 @@ warmup_ratio: 0.1        # fraction of estimated iters used when warmup=auto
 min_time_ms: 1000
 max_iters: 100000
 calib_iters: 20  # initial calibration batch — higher = more accurate per-iter estimate
-overwrite: false  # true = delete existing CSV and re-benchmark everything
+overwrite: true  # true = delete existing CSV and re-benchmark everything
                   # false = resume: skip combos already in the CSV, including OOM rows
 max_memory_gb: 24
 

@@ -105,8 +105,13 @@ def bench_flashattn(config, output_path="results/flashattn.csv"):
             print(f"\n  [skip] float8 FlashAttn: not supported for float8")
             continue
 
+        # Skip s_q > s_kv combos: degenerate under flash_attn's causal offset
+        # convention (offset = s_kv - s_q < 0 → most queries see no keys → NaN
+        # output, kernel does ~1/16 of the work) and never a real serving shape
+        # (KV always contains the query tokens, so s_kv >= s_q).
         combos = [(b_val, sq, skv) for b_val in batch_list
-                  for sq in fa_cfg["s_q"] for skv in fa_cfg["s_kv"]]
+                  for sq in fa_cfg["s_q"] for skv in fa_cfg["s_kv"]
+                  if sq <= skv]
         for b_val, s_q, s_kv in tqdm(combos, desc=f"FlashAttn {dt_name}"):
             key = ("flashattn", dt_name, b_val, s_q, s_kv)
             if key in done_keys:

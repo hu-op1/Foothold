@@ -24,6 +24,18 @@ M_SPLIT = 256
 S_Q_SPLIT = 1
 
 
+def _is_prefill_point(r):
+    """Valid prefill point: s_q > 1 (prefill) AND s_q <= s_kv.
+
+    s_q > s_kv is degenerate under flash_attn's causal offset convention
+    (offset = s_kv - s_q < 0 → most queries see no visible keys → NaN output,
+    kernel does only ~1/16 of the work) and never occurs in real serving
+    (KV always contains the query tokens, so s_kv >= s_q).  Those cells are
+    excluded so they don't contaminate the prefill roofline fit.
+    """
+    return r["s_q"] > S_Q_SPLIT and r["s_q"] <= r["s_kv"]
+
+
 # ── Matmul CUDA Graph fit ───────────────────────────────────────────────
 
 def _fit_cg_matmul_subset(matmul_results, label, F_fixed=None):
@@ -218,7 +230,7 @@ def _fit_cg_fa_dtype(fa_results, label_suffix=""):
 
     if len(batch_sizes) <= 1:
         decode = [r for r in fa_results if r["s_q"] <= S_Q_SPLIT]
-        prefill = [r for r in fa_results if r["s_q"] > S_Q_SPLIT]
+        prefill = [r for r in fa_results if _is_prefill_point(r)]
         p_prefill = _fit_cg_fa_subset(prefill, f"prefill (s_q > {S_Q_SPLIT}){label_suffix}")
         if not p_prefill:
             raise ValueError(
@@ -241,7 +253,7 @@ def _fit_cg_fa_dtype(fa_results, label_suffix=""):
     anchor_b = None
     for b_val in reversed(batch_sizes):
         prefill_candidates = [r for r in fa_results
-                              if r["b"] == b_val and r["s_q"] > S_Q_SPLIT]
+                              if r["b"] == b_val and _is_prefill_point(r)]
         if len(prefill_candidates) < 5:
             continue
         p_candidate = _fit_cg_fa_subset(prefill_candidates,
@@ -255,7 +267,7 @@ def _fit_cg_fa_dtype(fa_results, label_suffix=""):
         break
     if anchor_b is None:
         per_batch = {b_val: len([r for r in fa_results
-                                 if r["b"] == b_val and r["s_q"] > S_Q_SPLIT])
+                                 if r["b"] == b_val and _is_prefill_point(r)])
                      for b_val in batch_sizes}
         raise ValueError(
             "No batch has ≥5 valid prefill points with a healthy anchor fit "
@@ -271,7 +283,7 @@ def _fit_cg_fa_dtype(fa_results, label_suffix=""):
     for b_val in batch_sizes:
         batch_results = [r for r in fa_results if r["b"] == b_val]
         decode = [r for r in batch_results if r["s_q"] <= S_Q_SPLIT]
-        prefill_b = [r for r in batch_results if r["s_q"] > S_Q_SPLIT]
+        prefill_b = [r for r in batch_results if _is_prefill_point(r)]
         p_p = _fit_cg_fa_subset(prefill_b, f"prefill b={b_val}{label_suffix}",
                                 F_fixed=F_shared)
         p_d = _fit_cg_fa_subset(decode, f"decode  b={b_val}{label_suffix}",
@@ -281,7 +293,7 @@ def _fit_cg_fa_dtype(fa_results, label_suffix=""):
         decode_B.append(p_d.get("B_peak", 0.0))
         decode_p.append(p_d.get("p", 1.0))
 
-    prefill_all = [r for r in fa_results if r["s_q"] > S_Q_SPLIT]
+    prefill_all = [r for r in fa_results if _is_prefill_point(r)]
     decode_all = [r for r in fa_results if r["s_q"] <= S_Q_SPLIT]
     p_prefill_u = _fit_cg_fa_subset(prefill_all,
                                     f"prefill (all batches){label_suffix}",

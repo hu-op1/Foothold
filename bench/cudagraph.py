@@ -421,8 +421,13 @@ def bench_cudagraph_flashattn(config, output_path="results/cudagraph_flashattn.c
             print(f"\n  [skip] float8 FlashAttn: flash_attn does not support float8")
             continue
 
+        # Skip s_q > s_kv combos: degenerate under flash_attn's causal offset
+        # convention (offset = s_kv - s_q < 0 → most queries see no keys → NaN
+        # output, kernel does ~1/16 of the work) and never a real serving shape
+        # (KV always contains the query tokens, so s_kv >= s_q).
         combos = [(b_val, sq, skv) for b_val in batch_list
-                  for sq in grid["s_q"] for skv in grid["s_kv"]]
+                  for sq in grid["s_q"] for skv in grid["s_kv"]
+                  if sq <= skv]
 
         for b_val, s_q, s_kv in tqdm(combos, desc=f"CUDA Graph FA {dt_name}"):
             key = ("cudagraph_flashattn", dt_name, b_val, s_q, s_kv)
