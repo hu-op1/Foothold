@@ -40,6 +40,21 @@ def bench_results_dir(cfg):
     return os.path.join(BENCH_RESULTS, gpu)
 
 
+def _force_resume_mode(cfg):
+    """Force resume (overwrite=false) after the process was restarted by a CUDA
+    kernel fault.
+
+    The faulting combo is recorded as OOM in the CSV before KernelFaultError is
+    raised, and _run_bench_with_auto_resume re-execs the process.  Resume mode
+    makes load_completed_keys skip that combo so the grid continues from the
+    fault.  Without this, overwrite=true wipes the CSV (and that OOM record) on
+    restart, re-faulting the same combo in a no-progress loop.
+    """
+    if os.environ.get("BENCH_FAULT_RESUME"):
+        cfg["overwrite"] = False
+    return cfg
+
+
 def run_benchmarks(args):
     from bench.flashattn import bench_flashattn
     from bench.cudagraph import bench_cudagraph_all
@@ -48,7 +63,7 @@ def run_benchmarks(args):
         print("CUDA not available. Exiting.")
         sys.exit(1)
 
-    cfg = load_config(args.config)
+    cfg = _force_resume_mode(load_config(args.config))
 
     gpu_name = torch.cuda.get_device_name(0)
     gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
@@ -133,9 +148,11 @@ def _run_bench_with_auto_resume(args):
     An illegal-memory-access kernel fault (fla 0.5.2's fused_recurrent has these
     intermittently) poisons the whole CUDA context, so it cannot be skipped
     in-process — every later call fails too.  bench_gateddelta records the
-    faulting combo as OOM before raising KernelFaultError, so restarting with
-    overwrite=false skips it and continues.  This wrapper makes that restart
-    automatic instead of requiring the user to rerun by hand.
+    faulting combo as OOM before raising KernelFaultError.  The restart forces
+    resume mode (overwrite=false) via _force_resume_mode, so the recorded combo
+    is skipped and the grid continues from the fault instead of re-faulting the
+    same combo.  This wrapper makes that restart automatic instead of requiring
+    the user to rerun by hand.
     """
     from bench.gateddelta import KernelFaultError
     retries = int(os.environ.get("BENCH_KERNEL_FAULT_RETRIES") or "0")
@@ -151,6 +168,8 @@ def _run_bench_with_auto_resume(args):
             print("[bench] too many kernel-fault restarts; giving up.", file=sys.stderr)
             sys.exit(1)
         os.environ["BENCH_KERNEL_FAULT_RETRIES"] = str(retries + 1)
+        # Resume mode on the restarted process (see _force_resume_mode).
+        os.environ["BENCH_FAULT_RESUME"] = "1"
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
