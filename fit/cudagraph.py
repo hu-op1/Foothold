@@ -51,7 +51,7 @@ def _fit_cg_matmul_subset(matmul_results, label, F_fixed=None):
         from scipy.optimize import curve_fit
         def model(X, B, p):
             f, b_arr = X
-            return (f / F_fixed + b_arr / B) ** (1 / p)
+            return ((f / F_fixed) ** p + (b_arr / B) ** p) ** (1 / p)
         B0 = float(np.median(bytes_moved / times))
         popt, _ = curve_fit(model, (flops, bytes_moved), times,
                             p0=[B0 * 0.5, 2.0],
@@ -204,7 +204,7 @@ def _fit_cg_fa_subset(fa_results, label, F_fixed=None):
         from scipy.optimize import curve_fit
         def model(X, B, p):
             f, b_arr = X
-            return (f / F_fixed + b_arr / B) ** (1 / p)
+            return ((f / F_fixed) ** p + (b_arr / B) ** p) ** (1 / p)
         B0 = float(np.median(bytes_moved / times))
         popt, _ = curve_fit(model, (flops, bytes_moved), times,
                             p0=[B0 * 0.5, 2.0],

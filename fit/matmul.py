@@ -36,7 +36,7 @@ def _fit_subset(matmul_results, label, F_fixed=None):
 
         def model(X, B, p):
             f, b_arr = X
-            return (f / F_fixed + b_arr / B) ** (1 / p)
+            return ((f / F_fixed) ** p + (b_arr / B) ** p) ** (1 / p)
         B0 = float(np.median(bytes_moved / times))
         B0 = float(np.clip(B0 * 0.5, *B_bounds))
         popt, _ = curve_fit(model, (flops, bytes_moved), times,

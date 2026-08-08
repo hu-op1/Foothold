@@ -1,21 +1,21 @@
 {
   "type": "elementwise",
-  "F_peak_decode_bfloat16": 71903100606871.56,
-  "B_peak_decode_bfloat16": 725330607485.1571,
-  "p_decode_bfloat16": 1.0008081870249423,
-  "r2_decode_bfloat16": 0.6235352443584121,
-  "F_peak_prefill_bfloat16": 71903100606871.56,
-  "B_peak_prefill_bfloat16": 386145574278.08154,
-  "p_prefill_bfloat16": 3.298198915468036,
-  "r2_prefill_bfloat16": 0.9965637669982219,
-  "F_peak_decode_float16": 77570069824486.0,
-  "B_peak_decode_float16": 694926522026.1586,
-  "p_decode_float16": 1.000614102393059,
-  "r2_decode_float16": 0.6797444189345859,
-  "F_peak_prefill_float16": 77570069824486.0,
-  "B_peak_prefill_float16": 838416385546.5015,
-  "p_prefill_float16": 1.000001108044511,
-  "r2_prefill_float16": 0.9990499655952017,
+  "F_peak_decode_bfloat16": 71902217069608.8,
+  "B_peak_decode_bfloat16": 589875041455.1599,
+  "p_decode_bfloat16": 1.453982147471679,
+  "r2_decode_bfloat16": 0.6592231703946608,
+  "F_peak_prefill_bfloat16": 71902217069608.8,
+  "B_peak_prefill_bfloat16": 386045554583.0782,
+  "p_prefill_bfloat16": 3.299799124015731,
+  "r2_prefill_bfloat16": 0.9965624693883526,
+  "F_peak_decode_float16": 77570344220789.19,
+  "B_peak_decode_float16": 599997183129.8242,
+  "p_decode_float16": 1.2910953183721354,
+  "r2_decode_float16": 0.6976736944049646,
+  "F_peak_prefill_float16": 77570344220789.19,
+  "B_peak_prefill_float16": 838389472659.9524,
+  "p_prefill_float16": 1.000000183974716,
+  "r2_prefill_float16": 0.999049965661264,
   "elem_b_effs_bfloat16": {
     "residual_add": 825940001107.6719,
     "softmax": 53312693921.487366,
@@ -60,14 +60,14 @@
     "fused_residual_norm": 2.9173143127441407e-05,
     "conv1d": 0.00013151543933296204
   },
-  "F_peak_fa_decode_bfloat16": 79020194129435.14,
-  "B_peak_fa_decode_bfloat16": 613107063417.1501,
-  "p_fa_decode_bfloat16": 5.149076212728939,
-  "r2_fa_decode_bfloat16": 0.9070021112208266,
-  "F_peak_fa_prefill_bfloat16": 79020194129435.14,
-  "B_peak_fa_prefill_bfloat16": 37983787344.66389,
+  "F_peak_fa_decode_bfloat16": 79020193416071.38,
+  "B_peak_fa_decode_bfloat16": 613107454828.3418,
+  "p_fa_decode_bfloat16": 5.298054672534194,
+  "r2_fa_decode_bfloat16": 0.9070021112671125,
+  "F_peak_fa_prefill_bfloat16": 79020193416071.38,
+  "B_peak_fa_prefill_bfloat16": 37983790057.48521,
   "p_fa_prefill_bfloat16": 1.0000000000001446,
-  "r2_fa_prefill_bfloat16": 0.9637367288214642,
+  "r2_fa_prefill_bfloat16": 0.9637367306701081,
   "fa_batch_sizes_bfloat16": [
     1,
     4,
@@ -75,38 +75,38 @@
     64
   ],
   "fa_decode_B_bfloat16": [
-    708761783310.521,
-    829932904328.0172,
-    854854027615.5107,
-    471834260244.46936
+    708761797888.0814,
+    829933321951.9034,
+    854854174464.3048,
+    471834307007.78107
   ],
   "fa_decode_p_bfloat16": [
-    5.325172395624223,
-    3.0479185174588723,
-    2.4600035828626425,
-    5.537805180185294
+    4.361934572572983,
+    3.0429584200067943,
+    2.459748391545111,
+    5.536278628731573
   ],
   "fa_prefill_B_bfloat16": [
-    16233539932.333683,
-    14871422415.015556,
-    22693502071.145176,
-    232988548716.79187
+    16233541277.512104,
+    14871423606.255104,
+    22693502739.258484,
+    232988609014.51245
   ],
   "fa_prefill_p_bfloat16": [
     1.0000000000000002,
     1.0000000000000002,
     1.0000000000000002,
-    1.0000000000000677
+    1.000000000000068
   ],
   "fa_bench_nh_bfloat16": 32,
-  "F_peak_fa_decode_float16": 77066799074441.23,
-  "B_peak_fa_decode_float16": 606941554433.613,
-  "p_fa_decode_float16": 5.679463888811759,
-  "r2_fa_decode_float16": 0.9018821963086757,
-  "F_peak_fa_prefill_float16": 77066799074441.23,
-  "B_peak_fa_prefill_float16": 36842499391.59862,
-  "p_fa_prefill_float16": 1.0000000000001366,
-  "r2_fa_prefill_float16": 0.9629966885406336,
+  "F_peak_fa_decode_float16": 77066799178688.23,
+  "B_peak_fa_decode_float16": 606939300964.8541,
+  "p_fa_decode_float16": 5.940346590080338,
+  "r2_fa_decode_float16": 0.9018821960259974,
+  "F_peak_fa_prefill_float16": 77066799178688.23,
+  "B_peak_fa_prefill_float16": 36842495919.93247,
+  "p_fa_prefill_float16": 1.000000000000137,
+  "r2_fa_prefill_float16": 0.9629966882605551,
   "fa_batch_sizes_float16": [
     1,
     4,
@@ -114,38 +114,38 @@
     64
   ],
   "fa_decode_B_float16": [
-    713531254742.5521,
-    844476565723.3876,
-    855897868557.7084,
-    463742908332.1689
+    713531254166.8859,
+    844477045785.6906,
+    855897733572.6895,
+    463742929187.18176
   ],
   "fa_decode_p_float16": [
-    5.1624699964215734,
-    2.8245752556119275,
-    2.4603197080282695,
-    4.7407657727888175
+    5.421524735232263,
+    2.822677345314013,
+    2.460542160353817,
+    5.469782435135887
   ],
   "fa_prefill_B_float16": [
-    15872238812.643011,
-    14433179051.194288,
-    21939562657.853096,
-    234084635093.52133
+    15872238339.297663,
+    14433179105.168623,
+    21939562874.04525,
+    234084576588.8592
   ],
   "fa_prefill_p_float16": [
     1.0000000000000002,
     1.0000000000000002,
     1.0000000000000002,
-    1.0000000000001585
+    1.0000000000001559
   ],
   "fa_bench_nh_float16": 32,
-  "F_peak_ls_decode_bfloat16": 22106706332840.453,
-  "B_peak_ls_decode_bfloat16": 9810234439381.203,
-  "p_ls_decode_bfloat16": 1.3712372780859359,
-  "r2_ls_decode_bfloat16": 0.666117534720706,
-  "F_peak_ls_prefill_bfloat16": 22106706332840.453,
-  "B_peak_ls_prefill_bfloat16": 418718222877.0827,
-  "p_ls_prefill_bfloat16": 1.0000000935245685,
-  "r2_ls_prefill_bfloat16": 0.9840866493252818,
+  "F_peak_ls_decode_bfloat16": 22126124075823.3,
+  "B_peak_ls_decode_bfloat16": 378784755689.0361,
+  "p_ls_decode_bfloat16": 3.14902996847601,
+  "r2_ls_decode_bfloat16": 0.46028853013157456,
+  "F_peak_ls_prefill_bfloat16": 22126124075823.3,
+  "B_peak_ls_prefill_bfloat16": 168009756632.89636,
+  "p_ls_prefill_bfloat16": 2.089204472446262,
+  "r2_ls_prefill_bfloat16": 0.9840866499871458,
   "ls_batch_sizes_bfloat16": [
     1,
     4,
@@ -171,30 +171,30 @@
     1.0
   ],
   "ls_prefill_B_bfloat16": [
-    728534693589.9657,
-    285687155345.56573,
-    347682738817.9633,
-    490341694132.88165,
-    678571413575.0452,
-    3907336230242.2095
+    123710067673.64009,
+    135225071721.93858,
+    151672846186.99472,
+    183152683120.42545,
+    199303511718.7798,
+    203055955591.7241
   ],
   "ls_prefill_p_bfloat16": [
-    1.0700593634100184,
-    1.0000005420318516,
-    1.0000001663853326,
-    1.000000000001227,
-    1.010496778183475,
-    1.062604841894007
+    2.0753361693218677,
+    2.0657594965079684,
+    2.072954086433257,
+    2.0961993242861374,
+    2.10756431615623,
+    2.110900427753618
   ],
   "ls_bench_nvh_bfloat16": 32,
-  "F_peak_ls_decode_float16": 21679315513327.266,
-  "B_peak_ls_decode_float16": 9415794117621.93,
-  "p_ls_decode_float16": 1.3718716625359788,
-  "r2_ls_decode_float16": 0.9010902210875917,
-  "F_peak_ls_prefill_float16": 21679315513327.266,
-  "B_peak_ls_prefill_float16": 9999287289205.762,
-  "p_ls_prefill_float16": 1.0777223366042525,
-  "r2_ls_prefill_float16": 0.9896588001368103,
+  "F_peak_ls_decode_float16": 21664771446738.816,
+  "B_peak_ls_decode_float16": 443599404696.33527,
+  "p_ls_decode_float16": 4.038665779477928,
+  "r2_ls_decode_float16": 0.8083204200367572,
+  "F_peak_ls_prefill_float16": 21664771446738.816,
+  "B_peak_ls_prefill_float16": 188949223179.5322,
+  "p_ls_prefill_float16": 2.1064430708136843,
+  "r2_ls_prefill_float16": 0.9869764374279978,
   "ls_batch_sizes_float16": [
     1,
     4,
@@ -220,38 +220,38 @@
     1.0
   ],
   "ls_prefill_B_float16": [
-    9997222373266.713,
-    1548000064060.4998,
-    1244945783026.7656,
-    3988510539083.4272,
-    9995031437541.293,
-    9999974396978.795
+    134617940169.49965,
+    167233430200.52847,
+    184101397665.7047,
+    201109840484.7712,
+    204779003833.24463,
+    199558670688.70184
   ],
   "ls_prefill_p_float16": [
-    1.092477198442824,
-    1.071028936675696,
-    1.0487581726165291,
-    1.0617875623935868,
-    1.0672189172084576,
-    1.0717902666546013
+    2.26895060361606,
+    2.093073770495135,
+    2.100983115008967,
+    2.112900709439918,
+    2.1151041361645824,
+    2.111222849958687
   ],
   "ls_bench_nvh_float16": 32,
-  "F_peak_decode_cudagraph_bfloat16": 77654681976120.25,
-  "B_peak_decode_cudagraph_bfloat16": 932854657004.738,
-  "p_decode_cudagraph_bfloat16": 1.0047766022316051,
-  "r2_decode_cudagraph_bfloat16": 0.9165276967183982,
-  "F_peak_prefill_cudagraph_bfloat16": 77654681976120.25,
-  "B_peak_prefill_cudagraph_bfloat16": 928264793869.1311,
-  "p_prefill_cudagraph_bfloat16": 1.0000911597162918,
-  "r2_prefill_cudagraph_bfloat16": 0.9993462268208638,
-  "F_peak_decode_cudagraph_float16": 75374371213359.42,
-  "B_peak_decode_cudagraph_float16": 935114529145.6704,
-  "p_decode_cudagraph_float16": 1.003936675474524,
-  "r2_decode_cudagraph_float16": 0.9303516964123941,
-  "F_peak_prefill_cudagraph_float16": 75374371213359.42,
-  "B_peak_prefill_cudagraph_float16": 1046374902177.1003,
-  "p_prefill_cudagraph_float16": 1.000019743030019,
-  "r2_prefill_cudagraph_float16": 0.9994183842780533,
+  "F_peak_decode_cudagraph_bfloat16": 77654890767901.16,
+  "B_peak_decode_cudagraph_bfloat16": 732054093701.1005,
+  "p_decode_cudagraph_bfloat16": 1.3467303497435177,
+  "r2_decode_cudagraph_bfloat16": 0.9382103670568905,
+  "F_peak_prefill_cudagraph_bfloat16": 77654890767901.16,
+  "B_peak_prefill_cudagraph_bfloat16": 928339976943.9227,
+  "p_prefill_cudagraph_bfloat16": 1.0000604963174706,
+  "r2_prefill_cudagraph_bfloat16": 0.9993462277449289,
+  "F_peak_decode_cudagraph_float16": 75374373067262.06,
+  "B_peak_decode_cudagraph_float16": 734582897232.6149,
+  "p_decode_cudagraph_float16": 1.3590927885821351,
+  "r2_decode_cudagraph_float16": 0.9520033559402573,
+  "F_peak_prefill_cudagraph_float16": 75374373067262.06,
+  "B_peak_prefill_cudagraph_float16": 1046373897916.0626,
+  "p_prefill_cudagraph_float16": 1.000020078882312,
+  "r2_prefill_cudagraph_float16": 0.9994183842723995,
   "elem_b_effs_cudagraph_bfloat16": {
     "residual_add": 121863675983.49702,
     "rmsnorm": 95520473696.19678,
@@ -288,14 +288,14 @@
     "causal_mask": 1.8449921874999998e-05,
     "fused_residual_norm": 1.8449921874999998e-05
   },
-  "F_peak_fa_decode_cudagraph_bfloat16": 70889583996183.9,
-  "B_peak_fa_decode_cudagraph_bfloat16": 502964775847.6586,
-  "p_fa_decode_cudagraph_bfloat16": 1.0000000000000524,
-  "r2_fa_decode_cudagraph_bfloat16": 0.9865562995962305,
-  "F_peak_fa_prefill_cudagraph_bfloat16": 70889583996183.9,
-  "B_peak_fa_prefill_cudagraph_bfloat16": 443245658698.1361,
-  "p_fa_prefill_cudagraph_bfloat16": 1.0000000016052042,
-  "r2_fa_prefill_cudagraph_bfloat16": 0.9979146978546687,
+  "F_peak_fa_decode_cudagraph_bfloat16": 70889584240600.2,
+  "B_peak_fa_decode_cudagraph_bfloat16": 489106658893.2462,
+  "p_fa_decode_cudagraph_bfloat16": 2.457479675823085,
+  "r2_fa_decode_cudagraph_bfloat16": 0.9865563357057056,
+  "F_peak_fa_prefill_cudagraph_bfloat16": 70889584240600.2,
+  "B_peak_fa_prefill_cudagraph_bfloat16": 443245298675.07745,
+  "p_fa_prefill_cudagraph_bfloat16": 1.0000000000000002,
+  "r2_fa_prefill_cudagraph_bfloat16": 0.9979146978686892,
   "fa_batch_sizes_cudagraph_bfloat16": [
     1,
     4,
@@ -303,38 +303,38 @@
     64
   ],
   "fa_decode_B_cudagraph_bfloat16": [
-    6672547218465.815,
-    6440758503215.39,
-    1788323752090.5886,
-    494135915132.60394
+    658390072077.4774,
+    829963045065.3699,
+    850583042114.7407,
+    475659412597.5313
   ],
   "fa_decode_p_cudagraph_bfloat16": [
-    1.23196160561546,
-    1.2280861366143594,
-    1.1038082055102865,
-    1.0025046713750152
+    3.3517823011024976,
+    2.5752238767411137,
+    3.3517980197529176,
+    2.706342324360322
   ],
   "fa_prefill_B_cudagraph_bfloat16": [
-    9996941003262.668,
-    9999951536021.283,
-    9999962398650.998,
-    341488265299.4549
+    198779410125.6948,
+    236720852947.06668,
+    233856307000.39017,
+    359777952816.562
   ],
   "fa_prefill_p_cudagraph_bfloat16": [
-    1.0000050528148317,
-    1.0000000686881927,
-    1.0000000114580185,
-    1.0028873537569463
+    3.2538253234319408,
+    2.9733542496854075,
+    3.5591187279814123,
+    1.0000000000000002
   ],
   "fa_bench_nh_cudagraph_bfloat16": 32,
-  "F_peak_fa_decode_cudagraph_float16": 69172393267101.73,
-  "B_peak_fa_decode_cudagraph_float16": 495075578769.89545,
-  "p_fa_decode_cudagraph_float16": 1.00000000000003,
-  "r2_fa_decode_cudagraph_float16": 0.9860341444473046,
-  "F_peak_fa_prefill_cudagraph_float16": 69172393267101.73,
-  "B_peak_fa_prefill_cudagraph_float16": 447575911322.7516,
-  "p_fa_prefill_cudagraph_float16": 1.0000000007407237,
-  "r2_fa_prefill_cudagraph_float16": 0.9978610387606308,
+  "F_peak_fa_decode_cudagraph_float16": 69172393255958.016,
+  "B_peak_fa_decode_cudagraph_float16": 481322379470.2318,
+  "p_fa_decode_cudagraph_float16": 2.4166202513484176,
+  "r2_fa_decode_cudagraph_float16": 0.9860341750903523,
+  "F_peak_fa_prefill_cudagraph_float16": 69172393255958.016,
+  "B_peak_fa_prefill_cudagraph_float16": 447575613819.5919,
+  "p_fa_prefill_cudagraph_float16": 1.0000000000000002,
+  "r2_fa_prefill_cudagraph_float16": 0.9978610387633468,
   "fa_batch_sizes_cudagraph_float16": [
     1,
     4,
@@ -342,28 +342,28 @@
     64
   ],
   "fa_decode_B_cudagraph_float16": [
-    6720217291929.094,
-    6490880063525.998,
-    1323709194083.102,
-    482749269752.30505
+    663275452026.8406,
+    829887771208.4122,
+    849442523705.0236,
+    467853374843.7695
   ],
   "fa_decode_p_cudagraph_float16": [
-    1.2305188303731118,
-    1.228008229999806,
-    1.0594538818666768,
-    1.0009187521801597
+    3.2138707249951897,
+    2.570841863744518,
+    5.9850106863932,
+    2.4027069001407537
   ],
   "fa_prefill_B_cudagraph_float16": [
-    9998851202658.13,
-    9999977167963.672,
-    9999976563888.201,
-    340233962876.1823
+    213463055188.39514,
+    232133427105.62292,
+    229427333888.93185,
+    359159602072.0852
   ],
   "fa_prefill_p_cudagraph_float16": [
-    1.000001714574205,
-    1.0000000297979077,
-    1.000000005642921,
-    1.002824443666445
+    3.1775894731681187,
+    2.9497572287087146,
+    3.5840265273279535,
+    1.0000000000000002
   ],
   "fa_bench_nh_cudagraph_float16": 32,
   "kernel_launch_overhead_us": 0.08047670077991403,
